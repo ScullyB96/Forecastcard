@@ -1,0 +1,22 @@
+# Per-project virtual environments
+.venv/
+__pycache__/
+*.pyc
+
+# Regenerable data caches (large, reproducible from src/ingest fetch scripts)
+*/data/raw/
+*/data/processed/
+*/data/external/
+
+# OS/editor cruft
+.DS_Store
+.vscode/
+.idea/
+
+# Local Claude Code permission cache (machine-specific, not project config)
+.claude/settings.local.json
+
+# Node (once site/ has a real frontend build)
+node_modules/
+.next/
+dist/

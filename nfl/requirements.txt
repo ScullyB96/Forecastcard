@@ -1,0 +1,12 @@
+nfl_data_py==0.3.3
+pandas==3.0.3
+numpy==2.5.1
+scikit-learn==1.9.0
+scipy==1.18.0
+statsmodels==0.14.6
+pyarrow==25.0.0
+fastparquet==2026.5.0
+appdirs==1.4.4
+requests==2.34.2
+pdfplumber==0.11.10
+kaggle==2.2.3
