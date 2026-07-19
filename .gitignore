@@ -14,7 +14,7 @@ __pycache__/
 .idea/
 
 # Local Claude Code permission cache (machine-specific, not project config)
-.claude/settings.local.json
+**/.claude/settings.local.json
 
 # Node (once site/ has a real frontend build)
 node_modules/
