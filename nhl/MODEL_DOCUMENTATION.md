@@ -6158,6 +6158,73 @@ with **0.00247 (§36.5) as the pre-registered backtest reference line**:
   game-per-window logic as §37.4, though the FULL-season total, not a single window, is the
   number that actually answers this specific question).
 
+### 37.6 Pre-registered refinement: segment the live model-vs-market gap by season phase
+
+A pre-season demo (predicting a random already-completed week, then a random odds-covered week
+for a market comparison) surfaced this refinement before October, not after — worth recording
+why. The first randomly-chosen week landed, by chance, on the FINAL week of the 2025-26 regular
+season: exactly the model's structural worst case for the informational hypothesis (§37.5).
+Playoff-locked teams rest stars and start backup goalies, eliminated teams dress AHL call-ups,
+and motivation asymmetry peaks — the market prices all of this in real time; the model, with no
+lineup channel, prices none of it. The model held its historical averages on that specific week
+anyway (total-MAE 1.800 vs. a historical 1.797, on 53 untouched games) — mildly encouraging, but
+a single week is not evidence (§37.7's caution on sample size applies here too), and the more
+useful output is the refinement it suggests.
+
+**The informational hypothesis makes a falsifiable, phase-dependent prediction, not just a
+season-aggregate one**: if the residual 0.00247 gap is real lineup/injury information the
+market has and the model doesn't, that gap should be WIDEST exactly when roster uncertainty is
+highest and NARROWEST when it's lowest — not flat across the season. Segment §37.5's live
+model-vs-market series into four pre-registered phase buckets (using the actual 2026-27
+schedule once it's published):
+
+- **Early season** (first ~4 weeks): moderate uncertainty (new/changed rosters, unsettled
+  lines), but confounded with small-sample team-strength noise on a separate axis — treat as a
+  secondary bucket, not the sharpest test.
+- **Mid-season stable stretch** (week 5 through ~2 weeks before the trade deadline): the
+  pre-registered BASELINE — lineups and motivation are at their most stable and predictable all
+  season. This bucket's gap is the one closest to the season-aggregate 0.00247 by construction.
+- **Trade-deadline window** (~1 week before through ~1 week after the actual deadline date):
+  roster churn and asymmetric information about it (rumors, healthy scratches ahead of a trade)
+  should be near a local maximum.
+- **Final two weeks**: the model's structural worst case, per the reasoning above — the
+  pre-registered prediction is this bucket shows the WIDEST gap of the four.
+
+**Decision rule**: if the gap is real and meaningfully wider in the trade-deadline and
+final-two-weeks buckets than in the mid-season baseline, that's the informational hypothesis
+confirming with phase-level specificity — a sharper, more actionable finding than a flat
+season-aggregate number, since it tells task #44's scraper exactly WHEN its data matters most
+(worth prioritizing scraper reliability and injury-report freshness heading into those windows
+specifically). **If the gap comes back flat across all four phases**, that weakens the
+informational story specifically (not just generically) — a phase-invariant gap looks more like
+something structural the model is still missing than like lineup information, and the search
+for what explains 0.00247 should resume from a different hypothesis. Either outcome is a real,
+useful, falsifiable result; this is purely diagnostic, feeding no automated action, same as
+§37.5's undifferentiated version.
+
+### 37.7 Live odds capture added to task #44's scope
+
+Every market number in this project to date — the 13-season aggregate 0.00247 (§36.5), the
+per-season breakdown, and any demo/spot-check — is computed against the historical odds archive
+(`sbro_odds_games.parquet`), which stops in **May 2022** (§6.1's coverage gap). No market
+comparison this project has ever produced has been on games where neither the model's
+prediction nor the evaluation itself preceded the actual result — the archive was always
+assembled after the fact. Live 2026-27 play is the first opportunity to close that gap
+entirely: task #44's scope is expanded from lineup/starting-goalie scraping alone to also
+**log the real closing line for every game the model prices, starting opening night** — a
+trivial addition operationally (the same fetch cadence as the lineup data, a different endpoint)
+that turns §37.5/§37.6's live model-vs-market tracking into the first genuinely clean series
+this project will have had: real predictions, real lines, real results, with a hard temporal
+wall between the number and the answer that no historical archive can replicate.
+
+**Caution carried forward from the demo**: any SINGLE week's model-vs-market Brier comparison
+has a standard error roughly 3x the size of the true season-long gap itself (a ~48-game week's
+SE is around ±0.008-0.009 against a real gap of 0.00247) — individual weeks, and even individual
+phase-buckets early in a season before enough games accumulate, will look like blowouts in
+either direction purely from noise. §37.6's phase buckets should each be read only once they
+individually have enough games for the comparison to mean something (the same ~220-240-game
+logic as §37.4), not reacted to game-by-game or week-by-week the way the degradation trigger is.
+
 ## 38. Season freeze: production constants locked as the 2026-27 configuration (2026-07-24)
 
 The original roadmap is complete (§36 closed the last queued item). With current-best stable

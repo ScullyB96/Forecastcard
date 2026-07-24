@@ -43,6 +43,7 @@ from src.models.bullpen import (
     nearest_prior_pitcher_snapshot,
     sample_bullpen_plan,
 )
+from src.models.bullpen_usage_policy import attach_margin, build_starter_hook_events, fit_hook_policy
 from src.models.game_simulator import (
     OUTCOMES,
     GameSimulator,
@@ -77,12 +78,82 @@ from src.models.defense_factor import resolve_defense_factor, team_game_defense_
 from src.models.baserunning import build_season_sb_stats, build_pregame_sb_rates, resolve_sb_rates
 from src.models.weather import attach_weather_bucket, bucket_weather, build_weather_factors_by_season
 from src.models.weather_forecast import build_historical_game_buckets, resolve_weather_distribution, sample_weather_bucket
+from src.models.true_talent import build_debut_rate
 from src.models.validate_game_simulator import build_profile, player_game_snapshot, predominant_hand, SHOCK_SIGMA
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
 HIT_OUTCOMES = {"single", "double", "triple", "home_run"}
 TOTAL_BASES = {"single": 1, "double": 2, "triple": 3, "home_run": 4}
 N_TRIALS = 1000
+
+HOOK_TABLE_FIT_SEASONS = {2023, 2024}  # matches task #145's own fit period exactly.
+
+
+def build_hook_table(pa: pd.DataFrame) -> dict:
+    """Task #144/#145 starter-hook-frailty mechanism, deployed PROPS-PATH
+    ONLY (2026-07-24 starter-outs calibration check): a game-level SU/Brier
+    factorial (sec 11.23) found this mechanism carries no measurable
+    game-level win-probability value -- but that was never its claim. Its
+    claim was always about the distribution of starter outs/innings pitched,
+    the quantity props.py actually prices, and THAT check (real 2025 games,
+    hook-enabled vs. deterministic-cutoff baseline, segmented by pregame
+    run-value tercile) found a large, statistically real win: aggregate CRPS
+    0.747 vs. 0.908 (baseline), CI excludes zero, and the win holds in EVERY
+    run-value tercile including the shelled-tail (worst-pitchers) slice where
+    it was designed to matter most (CRPS delta -0.227, the largest of the
+    three). The three props-priced quantities confirm it: P(exits by the
+    4th) error drops from 0.067 (baseline) to 0.011 (hook) in aggregate, and
+    from 0.068 to 0.003 in the worst-pitchers tercile specifically -- the
+    deterministic baseline has essentially ZERO early-exit tail by
+    construction (a fixed cutoff can't produce a start that ends early), so
+    the shelled-start scenario a prop bettor actually cares about was
+    entirely unmodeled before this. Deployed here with the EXACT SHOCK_SIGMA
+    precedent: a distribution-realism/variance-shape fix, with NO
+    game-level win-probability claim (that lens stays a confirmed null, see
+    sec 11.23) -- kept OFF in validate_game_simulator.py/
+    validate_oracle_vs_predictive.py's own game-level oracle backtest, which
+    stays byte-identical to before. Reliever TIER selection (the other half
+    of task #144 step 4) is NOT deployed here -- its own specific claim
+    (reliever-inning attribution/prop calibration) has not yet been checked
+    on this same lens, so it stays dormant pending that separate test."""
+    pa_m = attach_margin(pa)
+    events = build_starter_hook_events(pa_m)
+    fit_events = events[events["season"].isin(HOOK_TABLE_FIT_SEASONS)]
+    hook_table_df = fit_hook_policy(fit_events)
+    return hook_table_df.set_index(["inning_b", "pa_count_b", "runs_allowed_b", "margin_b"])["p_exit"].to_dict()
+
+
+def build_generic_debut_profile(pa: pd.DataFrame, player_col: str, season: int,
+                                 league_rates_this_season: dict[str, float]) -> dict:
+    """Task #149: a LAST-RESORT synthetic profile for a player with ZERO
+    cached history anywhere -- not even a debut-cohort snapshot row exists
+    for them (a true, brand-new-to-our-data MLB debut). Confirmed as a REAL,
+    not hypothetical, failure mode via task #150's postseason dress rehearsal:
+    a September call-up outfielder started two 2025 Wild Card games with no
+    prior MLB PA in our data at all, causing generate_game_props' own
+    missing-snapshot ValueError.
+
+    Reuses true_talent.build_debut_rate (task #119's already-validated,
+    walk-forward-safe empirical debut-cohort rate per outcome -- real MLB
+    debut cohorts perform BELOW league average, matching replacement-level
+    expectations) rather than a guessed quartile cutoff. Note this is a
+    narrower reuse than task #119's own rejected use_debut_prior flag: that
+    flag would have applied the debut rate as the ONGOING cold-start prior
+    for every player inside the regular Marcel blend (tested full-stack,
+    found NULL, not deployed) -- this is a last-resort fallback ONLY for a
+    player who would otherwise crash the whole game's prop generation,
+    which was never tested and is a different, much narrower claim.
+
+    effective_n=0 for every outcome (a real, already-handled edge case in
+    true_talent.sample_posterior_rate: "a fully cold-started player with
+    zero weight" -- there is nothing to estimate a confidence interval
+    from). hand defaults 'R' (genuinely unknown) and platoon multipliers
+    stay neutral -- no signal exists to differentiate either."""
+    rates = {o: build_debut_rate(pa, player_col, o, season, league_rates_this_season[o]) for o in OUTCOMES}
+    neutral = {o: 1.0 for o in OUTCOMES}
+    effective_n = {o: 0.0 for o in OUTCOMES}
+    return {"rates": rates, "hand": "R", "same_mult": neutral, "opp_mult": neutral,
+            "pull_tercile": None, "effective_n": effective_n}
 
 
 def build_pregame_context(pa: pd.DataFrame) -> dict:
@@ -137,8 +208,23 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
     season_sb_stats = build_season_sb_stats(pa)
     sb_rates_by_season = {season: build_pregame_sb_rates(season_sb_stats, season) for season in pa["season"].unique()}
     game_dates = pa[["game_pk", "game_date"]].drop_duplicates()
+    # Task #149: precomputed once per (player_col, season) here -- cheap relative to
+    # everything else in this function, and every game needing this fallback in a given
+    # season shares the identical profile anyway (there's no per-player signal to give
+    # a true zero-history debut beyond "which season is it").
+    league_rates_by_season = build_league_rates_by_season(pa)
+    generic_debut_batter_profile_by_season = {
+        season: build_generic_debut_profile(pa, "batter", season, league_rates_by_season[season])
+        for season in pa["season"].unique()
+    }
+    generic_debut_pitcher_profile_by_season = {
+        season: build_generic_debut_profile(pa, "pitcher", season, league_rates_by_season[season])
+        for season in pa["season"].unique()
+    }
     return dict(
-        league_rates=build_league_rates_by_season(pa),
+        league_rates=league_rates_by_season,
+        generic_debut_batter_profile_by_season=generic_debut_batter_profile_by_season,
+        generic_debut_pitcher_profile_by_season=generic_debut_pitcher_profile_by_season,
         state_factors=build_state_factors_by_season(pa),
         ttop_factors=build_ttop_factors_by_season(pa),
         pull_rate_snapshot=pull_rate_snapshot,
@@ -159,6 +245,7 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
         historical_game_buckets=build_historical_game_buckets(all_schedules),
         bullpen_snap=build_bullpen_snapshot(pa, park_factors_long),
         expected_innings=build_expected_starter_innings(pa).set_index(["pitcher", "game_pk"])["expected_innings"],
+        hook_table=build_hook_table(pa),
         relief_log=build_relief_appearance_log(pa),
         all_appearance_log=build_all_appearance_log(pa),
         closer_log=build_closer_appearance_log(pa),
@@ -194,13 +281,20 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
 def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, away_team: str, game_date: str,
                          home_ids: list, away_ids: list, home_pitcher_id: int, away_pitcher_id: int,
                          venue_name: str | None = None,
-                         n_trials: int = N_TRIALS, rng: np.random.Generator | None = None) -> dict:
+                         n_trials: int = N_TRIALS, rng: np.random.Generator | None = None,
+                         postseason: bool = False) -> dict:
     """Run n_trials full-game Monte Carlo simulations (predictive bullpen,
     this game's real park + weather) and return aggregated prop
     probabilities. home_ids/away_ids: 9 batter IDs in real batting order.
     venue_name: needed only when this game's real weather isn't posted yet --
     used to resolve a forecast/climatological fallback (see weather_forecast.py).
-    """
+
+    postseason: real MLB rule -- no automatic extra-innings runner and no
+    position-player-pitching substitution in the postseason (see
+    GameSimulator.simulate_game's own docstring). Default False (every
+    existing caller) is byte-for-byte identical to before this parameter
+    existed; the caller derives it from the schedule's own game_type field
+    (see generate_daily_props.py)."""
     rng = rng or np.random.default_rng()
     batter_snap = ctx["batter_snap"][ctx["batter_snap"]["game_pk"] == game_pk].set_index("batter")
     pitcher_snap = ctx["pitcher_snap"][ctx["pitcher_snap"]["game_pk"] == game_pk].set_index("pitcher")
@@ -212,6 +306,11 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
     gbfb_pitcher_snap = ctx["gbfb_pitcher_snap"][ctx["gbfb_pitcher_snap"]["game_pk"] == game_pk].set_index("pitcher")
     speed_snap = ctx["sprint_speed_by_season"].get(season, pd.Series(dtype=float))
     bat_speed_snap = ctx["bat_speed_by_season"].get(season, pd.Series(dtype=float))
+    # Task #149: pids that had ZERO cached history anywhere (not even a debut-cohort
+    # snapshot) and fell back to build_generic_debut_profile -- surfaced in the
+    # returned dict (props["debut_fallback_pids"]) so the caller can flag it, same
+    # transparency spirit as home_lineup_source/away_lineup_source.
+    debut_fallback_pids: list = []
 
     def batter_profile(pid):
         # exact game_pk match works for a BACKTEST (a historical game_pk
@@ -223,7 +322,14 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         else:
             row = nearest_prior_pitcher_snapshot(ctx["batter_snap_dates"], pid, game_date, game_pk)
             if row is None:
-                return None
+                # a TRUE debut with zero cached PA history anywhere -- see
+                # build_generic_debut_profile's docstring (task #149, a real
+                # failure mode confirmed via task #150's postseason dress
+                # rehearsal, not hypothetical). Always non-None (build_debut_rate
+                # itself falls back to the plain league rate when no debut
+                # cohort has been observed yet), so this never re-raises.
+                debut_fallback_pids.append(pid)
+                return ctx["generic_debut_batter_profile_by_season"].get(season)
         key = (pid, season)
         prow = ctx["batter_platoon"].loc[key] if key in ctx["batter_platoon"].index else None
         hand = ctx["batter_hand"].get(pid, "R")
@@ -274,7 +380,10 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         else:
             row = nearest_prior_pitcher_snapshot(ctx["pitcher_snap_dates"], pid, game_date, game_pk)
             if row is None:
-                return None
+                # true debut, zero cached history -- see batter_profile's identical
+                # fallback above and build_generic_debut_profile's docstring.
+                debut_fallback_pids.append(pid)
+                return ctx["generic_debut_pitcher_profile_by_season"].get(season)
         key = (pid, season)
         prow = ctx["pitcher_platoon"].loc[key] if key in ctx["pitcher_platoon"].index else None
         gb_p, fb_p = _pitcher_gb_fb(pid)
@@ -350,8 +459,15 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         return {"rates": {o: row[f"pregame_rate_{o}"] for o in OUTCOMES}, "hand": "R",
                 "same_mult": neutral, "opp_mult": neutral}
 
+    # Task: trade-deadline hardening -- optional {pitcher_id: {"new_team":,
+    # "effective_date":}} (see bullpen.build_traded_pitcher_overrides), set
+    # once per day by the caller (generate_daily_props.py) into ctx. Absent
+    # (ctx.get returns None) is byte-for-byte identical to before this existed.
+    traded_overrides = ctx.get("traded_overrides")
+
     def build_roster_profiles(team):
-        raw = build_team_bullpen_roster(ctx["relief_log"], ctx["all_appearance_log"], team, game_date)
+        raw = build_team_bullpen_roster(ctx["relief_log"], ctx["all_appearance_log"], team, game_date,
+                                         traded_overrides=traded_overrides)
         profiles, weights = {}, {}
         for pid, w in raw.items():
             prof = roster_pitcher_profile(pid)
@@ -366,8 +482,8 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
     away_exp_ip = ctx["expected_innings"].get((away_pitcher_id, game_pk), 5.4)
     home_fallback = fallback_profile(home_team)
     away_fallback = fallback_profile(away_team)
-    home_closer_id = identify_closer(ctx["closer_log"], home_team, game_date)
-    away_closer_id = identify_closer(ctx["closer_log"], away_team, game_date)
+    home_closer_id = identify_closer(ctx["closer_log"], home_team, game_date, traded_overrides=traded_overrides)
+    away_closer_id = identify_closer(ctx["closer_log"], away_team, game_date, traded_overrides=traded_overrides)
 
     home_catcher_id = identify_starting_catcher(ctx["catcher_log"], home_team, game_date)
     away_catcher_id = identify_starting_catcher(ctx["catcher_log"], away_team, game_date)
@@ -407,6 +523,16 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
     sim = GameSimulator(transitions, league_rates[season], rng, state_factors=state_factors[season],
                         ttop_factors=ctx["ttop_factors"][season], shock_sigma=SHOCK_SIGMA)
 
+    # Starter-hook frailty (task #144/#145), PROPS PATH ONLY -- see
+    # build_hook_table's docstring for the 2026-07-24 starter-outs
+    # calibration result that justifies this (distribution-realism fix, no
+    # win-probability claim; game-level oracle backtest stays off this).
+    # cutoff must match sample_bullpen_plan's own internal cutoff formula
+    # exactly (max(1, round(expected_innings))) -- it's the pregame-assumed
+    # exit inning the sampled home_bullpen/away_bullpen plan was built around.
+    home_hook_context = {"hook_table": ctx["hook_table"], "cutoff": max(1, round(home_exp_ip))}
+    away_hook_context = {"hook_table": ctx["hook_table"], "cutoff": max(1, round(away_exp_ip))}
+
     all_events, final_scores = [], []
     for trial in range(n_trials):
         # a specific reliever is SAMPLED per inning (roster-weighted by
@@ -426,6 +552,7 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             sampled_bucket = sample_weather_bucket(weather_dist, rng)
             trial_weather_factors = ctx["weather_factors_by_season"].get(season, {}).get(sampled_bucket)
         events = []
+        hook_result = {}
         h, a = sim.simulate_game(
             home_lineup, away_lineup, home_pitcher, away_pitcher, innings=18,
             park_factors=park_factors, weather_factors=trial_weather_factors,
@@ -433,9 +560,19 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             blowout_pitcher_profile=ctx["blowout_profile"], events=events,
             home_catcher_factor=home_catcher_factor, away_catcher_factor=away_catcher_factor,
             home_sb_rates=home_sb_rates, away_sb_rates=away_sb_rates,
-            hfa_factors=hfa_factors,
+            hfa_factors=hfa_factors, postseason=postseason,
+            home_hook_context=home_hook_context, away_hook_context=away_hook_context,
+            hook_result=hook_result,
         )
         final_scores.append((h, a))
+        # home_hook_context/away_hook_context is always on now (props path),
+        # so the starter's REAL exit inning is hook_result's value, not the
+        # pregame-assumed cutoff -- None means the starter was never hooked
+        # (went the distance) this trial, so treat the cutoff as infinite.
+        home_effective_cutoff = hook_result.get("home_hook_inning")
+        home_effective_cutoff = home_effective_cutoff if home_effective_cutoff is not None else float("inf")
+        away_effective_cutoff = hook_result.get("away_hook_inning")
+        away_effective_cutoff = away_effective_cutoff if away_effective_cutoff is not None else float("inf")
         for e in events:
             e["trial"] = trial
             # pitching team = the OTHER side's team label; a blowout PA is
@@ -443,21 +580,32 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             # than whichever starter/bullpen id_plan would otherwise say for
             # that inning, since blowout_pitcher_profile overrides both.
             pitching_team = home_team if e["side"] == "away" else away_team
+            side_is_away = e["side"] == "away"  # away batting => HOME team pitching
             if e["blowout"]:
                 e["pitcher_id"] = f"{pitching_team}_POSITION_PLAYER"
-            elif e["inning"] <= max(round(home_exp_ip if e["side"] == "away" else away_exp_ip), 1):
-                e["pitcher_id"] = home_pitcher_id if e["side"] == "away" else away_pitcher_id
+            elif e["inning"] <= (home_effective_cutoff if side_is_away else away_effective_cutoff):
+                e["pitcher_id"] = home_pitcher_id if side_is_away else away_pitcher_id
             else:
-                id_plan = home_id_plan if e["side"] == "away" else away_id_plan
+                id_plan = home_id_plan if side_is_away else away_id_plan
+                pregame_cutoff = max(round(home_exp_ip if side_is_away else away_exp_ip), 1)
+                effective_cutoff = home_effective_cutoff if side_is_away else away_effective_cutoff
+                # id_plan was built around pregame_cutoff (see sample_bullpen_plan),
+                # but the starter actually exited at effective_cutoff (hook-shifted,
+                # possibly earlier or later) -- re-derive which PLANNED inning this
+                # real inning corresponds to via the identical shift
+                # _shift_bullpen_after_hook already applied to home_bullpen/
+                # away_bullpen itself, so attribution matches which reliever the
+                # simulation actually had pitching, not the stale pregame plan.
+                shifted_inning = pregame_cutoff + (e["inning"] - effective_cutoff)
                 # id_plan only has entries for innings 1..N_TRIALS's sample_bullpen_plan
                 # innings=9 default, but simulate_game runs up to 18 -- extra-inning
                 # PAs mirror GameSimulator._pitcher_for_inning's own fallback (the most
                 # recently known pitcher, not a generic placeholder), so props
                 # attribution matches who the simulation actually had pitching.
-                if e["inning"] in id_plan:
-                    e["pitcher_id"] = id_plan[e["inning"]]
+                if shifted_inning in id_plan:
+                    e["pitcher_id"] = id_plan[shifted_inning]
                 else:
-                    prior_innings = [i for i in id_plan if i < e["inning"]]
+                    prior_innings = [i for i in id_plan if i < shifted_inning]
                     e["pitcher_id"] = id_plan[max(prior_innings)] if prior_innings else "BULLPEN_FALLBACK"
             e["batter_id"] = (away_ids if e["side"] == "away" else home_ids)[e["batter_idx"]]
         all_events.extend(events)
@@ -469,6 +617,7 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         "pitcher_props": _pitcher_props(events_df, n_trials),
         "inning_props": _inning_props(events_df, n_trials),
         "game_props": _game_props(scores_df, n_trials),
+        "debut_fallback_pids": sorted(set(debut_fallback_pids)),
     }
 
 

@@ -25,10 +25,18 @@ from src.models.true_talent import STABILIZATION_PA, build_pregame_rates, sample
 from src.models.matchup import odds, prob_from_odds
 from src.models.platoon_splits import build_platoon_multipliers
 from src.models.crn import (
-    crn_bool, crn_choice, crn_normal, half_inning_ordinal,
+    crn_bool, crn_choice, crn_normal, crn_uniform, half_inning_ordinal,
     DECISION_OUTCOME, DECISION_SB_ATTEMPT, DECISION_SB_SUCCESS, DECISION_TRANSITION,
-    DECISION_PITCHER_SHOCK,
+    DECISION_PITCHER_SHOCK, DECISION_HOOK_FRAILTY, DECISION_TIER_SELECT,
 )
+# Pure hook-frailty/tier-selection math only (task #144/#145) -- deliberately from
+# these leaf modules, NOT bullpen.py/bullpen_usage_policy.py, to avoid a circular
+# import: bullpen_usage_policy.py -> bullpen.py -> game_simulator.py (for OUTCOMES).
+# See hook_frailty.py's/tier_selection.py's own docstrings.
+from src.models.hook_frailty import (
+    apply_hook_frailty, bucket_inning, bucket_pa_count, bucket_runs_allowed, bucket_margin,
+)
+from src.models.tier_selection import sample_tier_conditioned_reliever
 from src.utils.paths import DATA_PROCESSED
 
 OUTCOMES = list(STABILIZATION_PA.keys())
@@ -319,6 +327,25 @@ def _reassign_runners(pre_runners: dict[int, int], outcome: str, post_bases_bitm
     return new_runners
 
 
+def _shift_bullpen_after_hook(original_bullpen: dict[int, dict] | None, cutoff: int, hook_inning: int) -> dict[int, dict] | None:
+    """Task #144/#145: one-time rebuild of a pregame {inning: profile} bullpen
+    plan (see bullpen.sample_bullpen_plan) after a state-conditioned starter
+    hook fires at `hook_inning` instead of the plan's assumed `cutoff` --
+    reuses the EXACT same reliever sequence/order the plan already encoded
+    (innings cutoff+1..N), just shifted to start at hook_inning+1..N instead.
+    If the hook happened earlier than assumed, relievers arrive earlier (using
+    up the same arms just sooner); if later, they arrive later -- reliever
+    IDENTITY and ORDER are completely untouched, only timing shifts. Called
+    ONCE per game per side, immediately after the hook fires -- see
+    simulate_game."""
+    if original_bullpen is None:
+        return None
+    return {
+        hook_inning + (orig_inning - cutoff): profile
+        for orig_inning, profile in original_bullpen.items() if orig_inning > cutoff
+    }
+
+
 class GameSimulator:
     def __init__(self, transitions: TransitionTable, league_rates: dict[str, float], rng: np.random.Generator,
                  state_factors: dict[int, dict[str, float]] | None = None,
@@ -383,7 +410,11 @@ class GameSimulator:
                               auto_runner: bool = False,
                               hfa_factors: dict[str, float] | None = None,
                               crn_keys: tuple[int, int, int] | None = None,
-                              pitcher_shock_factors: dict[str, float] | None = None) -> tuple[int, int]:
+                              pitcher_shock_factors: dict[str, float] | None = None,
+                              inning: int | None = None,
+                              hook_state: dict | None = None,
+                              pitching_score_entering: int = 0,
+                              batting_score_entering: int = 0) -> tuple[int, int]:
         """lineup: 9 batter profiles in order, each {"rates": {...}, "hand": "L"/"R",
         "same_mult": {...}, "opp_mult": {...}, "pull_tercile": str|None} (see
         build_wide_platoon_multipliers and spray.py).
@@ -467,7 +498,41 @@ class GameSimulator:
         for THIS pitcher's current appearance's latent "stuff" shock (see
         GameSimulator._draw_pitcher_shock) -- constant for the whole
         half-inning (one shock per appearance, not per PA), applied
-        identically to every batter faced, same as catcher_factors/park_factors."""
+        identically to every batter faced, same as catcher_factors/park_factors.
+
+        inning/hook_state/pitching_score_entering/batting_score_entering:
+        optional (task #144/#145, the state-conditioned starter-hook mechanism)
+        -- when hook_state is None (every existing caller), completely inert;
+        `inning`/the two score params are read ONLY inside the hook check below.
+        hook_state, when given, is a MUTABLE dict shared across every half-inning
+        this specific starter pitches in this specific trial (simulate_game owns
+        building/reading it): {"hook_table": (inning_b,pa_count_b,runs_allowed_b,
+        margin_b)->p_exit lookup, "z": this trial's frailty latent (float, fixed
+        for the whole start), "next_reliever": profile to swap to if hooked,
+        "hooked": bool (latches True on the FIRST hook, permanently), "hook_inning":
+        set to the actual inning the hook fired, "pa_count"/"cum_runs_allowed": this
+        starter's own running tallies THIS trial (mutated here, NEVER reset once
+        hooked -- his tenure is over). Evaluated once per PA, BEFORE that PA is
+        simulated (using pre-PA state, matching exactly how the fitted table's
+        cells were defined -- see bullpen_usage_policy.py): if the hazard fires,
+        the reliever in "next_reliever" takes over STARTING WITH this exact
+        batter (the starter never faces them), thruorder_counts is cleared for
+        the new pitcher (a real batter's times-through-order restarts against a
+        new arm), and "hooked" latches so no further checks happen (only ONE
+        starter-to-reliever handoff is modeled per side per game in this stage --
+        subsequent reliever-to-reliever changes still happen at existing inning-
+        boundary granularity in simulate_game, unchanged, per the task #144 step-2
+        scope: hook model wired ALONE, reliever selection/order still pregame).
+        A KNOWN, documented simplification: pitcher_shock_factors does NOT get
+        redrawn immediately for the new reliever mid-half-inning (it continues
+        using the OLD pitcher's shock for the remainder of THIS half-inning only)
+        -- the redraw happens naturally next inning via simulate_game's existing
+        id()-based change detection, which correctly fires exactly once since
+        simulate_game syncs its own bookkeeping the instant hook_state["hooked"]
+        flips True (see simulate_game). Deliberately accepted for this stage
+        rather than threading extra CRN/appearance-index plumbing through this
+        method for a second-order interaction that task #144 step 4 (SHOCK_SIGMA
+        refit) already expects to revisit."""
         state, outs, idx, runs = (20, 0, start_idx, 0) if auto_runner else (0, 0, start_idx, 0)
         runners: dict[int, int] = {}  # base (1/2/3) -> lineup_idx, only maintained when sb_rates is given
         if auto_runner and sb_rates is not None:
@@ -514,6 +579,41 @@ class GameSimulator:
                     break  # half-inning ended on a caught stealing
                 state = sum(1 << (b - 1) for b in runners) * 10 + outs
 
+            # Task #144/#145 state-conditioned starter-hook check, evaluated
+            # BEFORE this PA (using pre-PA exposure: this would-be Nth batter
+            # faced, runs allowed strictly before this PA, current margin) --
+            # matches exactly how the fitted hook table's cells are defined
+            # (see bullpen_usage_policy.build_starter_hook_events). Entirely
+            # skipped (byte-for-byte identical to before this existed) when
+            # hook_state is None or the starter has already been hooked.
+            if hook_state is not None and not hook_state["hooked"]:
+                pa_number = hook_state["pa_count"] + 1
+                margin_now = pitching_score_entering - (batting_score_entering + runs)
+                cell = (bucket_inning(inning), bucket_pa_count(pa_number),
+                        bucket_runs_allowed(hook_state["cum_runs_allowed"]), bucket_margin(margin_now))
+                p_baseline = hook_state["hook_table"].get(cell)
+                if p_baseline is not None:
+                    p_hook = apply_hook_frailty(p_baseline, hook_state["z"], inning)
+                    if crn_keys is not None:
+                        fires = crn_bool(p_hook, *crn_keys, at_bat_counter, DECISION_HOOK_FRAILTY)
+                    else:
+                        fires = self.rng.random() < p_hook
+                    if fires:
+                        hook_state["hooked"] = True
+                        hook_state["hook_inning"] = inning
+                        # Task #144 step 4: when tier selection is ALSO enabled for this side,
+                        # draw the reliever LIVE, conditioned on the exact margin at this hook
+                        # moment, instead of using a pregame-fixed next_reliever. Recorded back
+                        # into hook_state["next_reliever"] either way, so simulate_game's
+                        # post-call id()-sync (below) reads whichever reliever actually took over.
+                        if hook_state.get("tier_draw_fn") is not None:
+                            pitcher = hook_state["tier_draw_fn"](inning, margin_now)
+                        else:
+                            pitcher = hook_state["next_reliever"]
+                        hook_state["next_reliever"] = pitcher
+                        if thruorder_counts is not None:
+                            thruorder_counts.clear()
+
             # a switch-hitter ("S") always bats opposite the pitcher's hand by
             # definition -- that's the entire point of switch-hitting, not a
             # fixed attribute to look up like a regular batter's side.
@@ -551,6 +651,9 @@ class GameSimulator:
                 thruorder_counts[lineup_idx] = thruorder_counts.get(lineup_idx, 0) + 1
             if events is not None:
                 events.append({"batter_idx": lineup_idx, "outcome": outcome, "runs": runs_this_pa})
+            if hook_state is not None and not hook_state["hooked"]:
+                hook_state["pa_count"] += 1
+                hook_state["cum_runs_allowed"] += runs_this_pa
             runs += runs_this_pa
             idx += 1
             at_bat_counter += 1
@@ -602,7 +705,13 @@ class GameSimulator:
                        home_sb_rates: dict[int, dict[str, float]] | None = None,
                        away_sb_rates: dict[int, dict[str, float]] | None = None,
                        hfa_factors: dict[str, float] | None = None,
-                       crn_game_pk: int | None = None, crn_trial: int | None = None) -> tuple[int, int]:
+                       crn_game_pk: int | None = None, crn_trial: int | None = None,
+                       home_hook_context: dict | None = None,
+                       away_hook_context: dict | None = None,
+                       home_tier_context: dict | None = None,
+                       away_tier_context: dict | None = None,
+                       postseason: bool = False,
+                       hook_result: dict | None = None) -> tuple[int, int]:
         """home_lineup/away_lineup/home_pitcher/away_pitcher: player profiles,
         see simulate_half_inning. park_factors: the home team's stadium
         factors, applied to both teams' batting (a property of the park).
@@ -659,7 +768,86 @@ class GameSimulator:
         parameter existed. Also gates whether the task #137 latent
         pitcher-appearance shock (see _draw_pitcher_shock) is CRN-keyed or
         drawn from the plain sequential rng -- same rule as every other
-        stochastic decision in this class."""
+        stochastic decision in this class.
+
+        home_hook_context/away_hook_context: optional (task #144/#145)
+        {"hook_table": (inning_b,pa_count_b,runs_allowed_b,margin_b)->p_exit
+        lookup, "cutoff": the pregame-assumed starter-exit inning that
+        home_bullpen/away_bullpen was built around (see sample_bullpen_plan)}.
+        When given for a side, that side's STARTER hook timing becomes
+        state-conditioned (per-PA hazard against this trial's own developing
+        game state) INSTEAD of a fixed pregame cutoff -- reliever IDENTITY
+        and ORDER are completely unchanged (still exactly whatever
+        home_bullpen/away_bullpen assigned), only the inning each one starts
+        shifts to match the actual (possibly earlier or later than assumed)
+        hook point. Either omitted (the default, None) is byte-for-byte
+        identical to before this parameter existed: the starter pitches
+        through the pregame-assumed cutoff exactly as home_bullpen/
+        away_bullpen already encodes. See MODEL_DOCUMENTATION.md sec 11.18-
+        11.20 for the full mechanism/validation story.
+
+        home_tier_context/away_tier_context: optional (task #144 step 4)
+        {"cutoff": pregame-assumed starter-exit inning (same value passed to
+        the matching hook_context, if any), "tier_by_margin": P(tier|margin_b)
+        dict, "closer_by_situation": P(closer|inning_b,save_situation) dict,
+        "roster_weights": {pid: walk-forward usage+rest weight} (see
+        bullpen.build_team_bullpen_roster), "profile_lookup": pid->profile
+        callable, "closer_id": this team's identified closer or None,
+        "fallback_profile": profile used once the roster is exhausted}. When
+        given for a side, EVERY post-starter reliever selection for that side
+        (not just the first) is drawn LIVE, conditioned on the CURRENT
+        trial's own margin/save-situation at that exact inning, from the
+        WITHOUT-REPLACEMENT roster pool -- reweighting WITHIN the pregame
+        availability-weighted roster, never overriding rest-day availability
+        (see tier_selection.sample_tier_conditioned_reliever). Combines with
+        home_hook_context/away_hook_context if BOTH are given for a side: the
+        starter's exit timing stays state-conditioned (hook), and the
+        reliever who takes over -- and every one after -- is tier-drawn
+        live instead of using hook_context's static pregame `next_reliever`
+        or home_bullpen/away_bullpen at all (home_bullpen/away_bullpen and
+        hook_context's own `next_reliever` become irrelevant once tier_context
+        is given; the caller may pass home_bullpen=None in that case). If
+        ONLY tier_context is given (no hook_context) for a side, the starter
+        still exits at the pregame-assumed `cutoff` unchanged, but every
+        reliever from there on is tier-drawn live. Also the point where the
+        blowout/position-player-pitching unification (see blowout.py) lives:
+        once a side enters blowout mode, a tier-conditioned draw (naturally
+        favoring the "mopup" tier at extreme margins) is preferred over
+        `blowout_pitcher_profile` for as long as this side's roster pool
+        still has anyone available -- matching real bullpen-conservation
+        behavior (a position player is used specifically to save the
+        remaining bullpen for tomorrow, only once real arms are spent, not
+        reached for the instant the blowout threshold is crossed). Either
+        omitted (the default, None) is byte-for-byte identical to before
+        this parameter existed.
+
+        postseason: real MLB rule -- the automatic extra-innings runner (see
+        auto_runner in simulate_half_inning) does NOT apply in the
+        postseason; extra innings start bases-empty like any other inning.
+        When True, `auto_runner` is forced off regardless of inning, and
+        blowout/position-player-pitching substitution never triggers either
+        (real playoff rosters/incentives mean a team essentially never
+        concedes a game to save a reliever -- see blowout.py). Default False
+        is byte-for-byte identical to before this parameter existed; the
+        caller is expected to derive it from the schedule's own game_type
+        field (game_type != "R" among the season's real games, excluding
+        spring training/exhibition/all-star rows too -- see
+        MODEL_DOCUMENTATION.md for the exact game_type values observed in
+        this project's own schedule data).
+
+        hook_result: optional dict, populated in-place (same convention as
+        `events`) with {"home_hook_inning": ..., "away_hook_inning": ...} --
+        the ACTUAL exit inning for each side once hook_context fires (None
+        if that side has no hook_context, or hasn't been hooked by the time
+        the game ends). Needed by any caller doing per-inning/per-pitcher
+        prop attribution from its own pregame-built id_plan (see
+        bullpen.sample_bullpen_plan): home_bullpen/away_bullpen is shifted
+        internally to match the real hook timing (see
+        _shift_bullpen_after_hook), but a caller's separately-tracked id_plan
+        is not touched by this function and will silently misattribute
+        innings to the wrong reliever after a hook unless the caller applies
+        the identical shift itself using these values. Omitted (the default,
+        None) is byte-for-byte identical to before this parameter existed."""
         crn_enabled = crn_game_pk is not None and crn_trial is not None
         home_score = away_score = 0
         home_idx = away_idx = 0
@@ -678,13 +866,89 @@ class GameSimulator:
         home_appearance_idx = away_appearance_idx = 0
         home_pitcher_shock = self._draw_pitcher_shock(crn_game_pk, crn_trial, 0, home_appearance_idx)
         away_pitcher_shock = self._draw_pitcher_shock(crn_game_pk, crn_trial, 1, away_appearance_idx)
+
+        # Task #144 step 4: mutable per-side tier-selection state, built ONLY
+        # when a tier_context is given for that side. `available` is a fresh
+        # per-trial COPY of the pregame roster_weights (mutated via pop() as
+        # relievers are drawn, without-replacement -- the caller's own dict is
+        # never touched). `tier_labels` derives each reliever's tier from
+        # their OWN walk-forward roster weight (see tier_selection.py) --
+        # computed once, stable for the whole game even as `available` depletes.
+        def _build_tier_state(tier_context):
+            if tier_context is None:
+                return None
+            from src.models.tier_selection import tier_label_from_roster_weights
+            weights = tier_context["roster_weights"]
+            return {"available": dict(weights), "tier_labels": tier_label_from_roster_weights(weights)}
+
+        home_tier_state = _build_tier_state(home_tier_context)
+        away_tier_state = _build_tier_state(away_tier_context)
+
+        def _draw_tier_reliever(tier_context, tier_state, inning, margin, side_tag):
+            def uniform_fn(sub_idx):
+                if crn_enabled:
+                    return crn_uniform(crn_game_pk, crn_trial, inning, side_tag, DECISION_TIER_SELECT, sub_idx)
+                return self.rng.random()
+            pid, profile = sample_tier_conditioned_reliever(
+                tier_state["available"], tier_state["tier_labels"], tier_context["tier_by_margin"],
+                tier_context["closer_by_situation"], tier_context["closer_id"], inning, margin,
+                tier_context["profile_lookup"], uniform_fn,
+            )
+            return profile if profile is not None else tier_context["fallback_profile"]
+
+        # Task #144/#145: mutable per-side hook state, built ONLY when a
+        # hook_context is given for that side -- None (every existing caller)
+        # leaves home_hook_state/away_hook_state as None, and every branch
+        # below that reads them collapses to the exact pre-existing behavior.
+        def _build_hook_state(hook_context, bullpen, default_pitcher, side_tag, tier_context, tier_state):
+            if hook_context is None:
+                return None
+            cutoff = hook_context["cutoff"]
+            tier_draw_fn = (lambda inn, mgn: _draw_tier_reliever(tier_context, tier_state, inn, mgn, side_tag)) \
+                if tier_context is not None else None
+            # When tier selection is combined, the pregame next_reliever is irrelevant
+            # (the actual reliever is drawn live at hook-time -- see the hook-fire
+            # block in simulate_half_inning) -- skip resolving it from home_bullpen/
+            # away_bullpen, which the caller may legitimately pass as None in that case.
+            next_reliever = None if tier_draw_fn is not None else self._pitcher_for_inning(default_pitcher, bullpen, cutoff + 1)
+            z = (crn_normal(0.0, 1.0, crn_game_pk, crn_trial, side_tag, DECISION_HOOK_FRAILTY)
+                 if crn_enabled else self.rng.normal(0.0, 1.0))
+            return {"hook_table": hook_context["hook_table"], "z": z, "next_reliever": next_reliever,
+                    "hooked": False, "hook_inning": None, "pa_count": 0, "cum_runs_allowed": 0,
+                    "tier_draw_fn": tier_draw_fn}
+
+        home_hook_state = _build_hook_state(home_hook_context, home_bullpen, home_pitcher, 0, home_tier_context, home_tier_state)
+        away_hook_state = _build_hook_state(away_hook_context, away_bullpen, away_pitcher, 1, away_tier_context, away_tier_state)
+
         for inning in range(1, innings + 1):
-            if blowout_pitcher_profile is not None and not home_in_blowout \
+            # Postseason: position-player/mop-up substitution essentially never
+            # happens in October -- rosters/incentives are different (no team
+            # concedes a playoff game to save a reliever) -- so blowout mode can
+            # never trigger for a postseason game, matching real behavior.
+            if not postseason and blowout_pitcher_profile is not None and not home_in_blowout \
                     and inning >= self.BLOWOUT_MIN_INNING and (home_score - away_score) <= -self.BLOWOUT_MARGIN:
                 home_in_blowout = True
-            home_pitcher_this_inning = (
-                blowout_pitcher_profile if home_in_blowout else self._pitcher_for_inning(home_pitcher, home_bullpen, inning)
-            )
+            if home_in_blowout:
+                # Task #144 step 4 blowout/tier unification: prefer a real (tier-drawn,
+                # naturally mopup-heavy at this margin) reliever over the position-player
+                # profile for as long as this side's own roster pool has anyone left --
+                # a position player is used to CONSERVE the bullpen, not the instant the
+                # blowout threshold is crossed. Falls to blowout_pitcher_profile once the
+                # pool is genuinely exhausted, or unconditionally when tier_context is None.
+                if home_tier_context is not None and home_tier_state["available"]:
+                    home_pitcher_this_inning = _draw_tier_reliever(
+                        home_tier_context, home_tier_state, inning, home_score - away_score, 0)
+                else:
+                    home_pitcher_this_inning = blowout_pitcher_profile
+            elif home_hook_state is not None and not home_hook_state["hooked"]:
+                home_pitcher_this_inning = home_pitcher  # starter, state-conditioned exit -- see simulate_half_inning
+            elif home_tier_context is not None and home_hook_state is None and inning <= home_tier_context["cutoff"]:
+                home_pitcher_this_inning = home_pitcher  # starter, FIXED pregame cutoff (tier-only, no hook_context)
+            elif home_tier_context is not None:
+                home_pitcher_this_inning = _draw_tier_reliever(
+                    home_tier_context, home_tier_state, inning, home_score - away_score, 0)
+            else:
+                home_pitcher_this_inning = self._pitcher_for_inning(home_pitcher, home_bullpen, inning)
             if id(home_pitcher_this_inning) != last_home_pitcher_id:
                 away_thruorder_counts = {}
                 last_home_pitcher_id = id(home_pitcher_this_inning)
@@ -695,9 +959,21 @@ class GameSimulator:
             away_runs, away_idx = self.simulate_half_inning(
                 away_lineup, away_idx, home_pitcher_this_inning, park_factors=park_factors,
                 weather_factors=weather_factors, thruorder_counts=away_thruorder_counts, events=events,
-                catcher_factors=home_catcher_factor, sb_rates=away_sb_rates, auto_runner=inning >= 10,
+                catcher_factors=home_catcher_factor, sb_rates=away_sb_rates, auto_runner=inning >= 10 and not postseason,  # real MLB rule: no auto-runner in the postseason
                 crn_keys=away_crn_keys, pitcher_shock_factors=home_pitcher_shock,
+                inning=inning, hook_state=home_hook_state,
+                pitching_score_entering=home_score, batting_score_entering=away_score,
             )
+            if home_hook_state is not None and home_hook_state["hooked"] \
+                    and last_home_pitcher_id != id(home_hook_state["next_reliever"]):
+                # The starter was just hooked mid-call (thruorder_counts already
+                # cleared inside simulate_half_inning at the exact swap point --
+                # NOT redone here, to avoid double-clearing a reliever's own
+                # legitimately-accumulated tally from the rest of that half-inning).
+                last_home_pitcher_id = id(home_hook_state["next_reliever"])
+                home_appearance_idx += 1
+                home_pitcher_shock = self._draw_pitcher_shock(crn_game_pk, crn_trial, 0, home_appearance_idx)
+                home_bullpen = _shift_bullpen_after_hook(home_bullpen, home_hook_context["cutoff"], home_hook_state["hook_inning"])
             if events is not None:
                 for e in events[start_len:]:
                     e["inning"], e["side"], e["blowout"] = inning, "away", home_in_blowout
@@ -705,12 +981,24 @@ class GameSimulator:
             if inning >= 9 and home_score > away_score:
                 break  # would-be bottom half never happens: home already ahead
             walkoff_margin = (away_score - home_score) if inning >= 9 else None
-            if blowout_pitcher_profile is not None and not away_in_blowout \
+            if not postseason and blowout_pitcher_profile is not None and not away_in_blowout \
                     and inning >= self.BLOWOUT_MIN_INNING and (away_score - home_score) <= -self.BLOWOUT_MARGIN:
                 away_in_blowout = True
-            away_pitcher_this_inning = (
-                blowout_pitcher_profile if away_in_blowout else self._pitcher_for_inning(away_pitcher, away_bullpen, inning)
-            )
+            if away_in_blowout:
+                if away_tier_context is not None and away_tier_state["available"]:
+                    away_pitcher_this_inning = _draw_tier_reliever(
+                        away_tier_context, away_tier_state, inning, away_score - home_score, 1)
+                else:
+                    away_pitcher_this_inning = blowout_pitcher_profile
+            elif away_hook_state is not None and not away_hook_state["hooked"]:
+                away_pitcher_this_inning = away_pitcher  # starter, state-conditioned exit -- see simulate_half_inning
+            elif away_tier_context is not None and away_hook_state is None and inning <= away_tier_context["cutoff"]:
+                away_pitcher_this_inning = away_pitcher  # starter, FIXED pregame cutoff (tier-only, no hook_context)
+            elif away_tier_context is not None:
+                away_pitcher_this_inning = _draw_tier_reliever(
+                    away_tier_context, away_tier_state, inning, away_score - home_score, 1)
+            else:
+                away_pitcher_this_inning = self._pitcher_for_inning(away_pitcher, away_bullpen, inning)
             if id(away_pitcher_this_inning) != last_away_pitcher_id:
                 home_thruorder_counts = {}
                 last_away_pitcher_id = id(away_pitcher_this_inning)
@@ -722,15 +1010,34 @@ class GameSimulator:
                 home_lineup, home_idx, away_pitcher_this_inning, walkoff_margin=walkoff_margin,
                 park_factors=park_factors, weather_factors=weather_factors,
                 thruorder_counts=home_thruorder_counts, events=events,
-                catcher_factors=away_catcher_factor, sb_rates=home_sb_rates, auto_runner=inning >= 10,
+                catcher_factors=away_catcher_factor, sb_rates=home_sb_rates, auto_runner=inning >= 10 and not postseason,  # real MLB rule: no auto-runner in the postseason
                 hfa_factors=hfa_factors, crn_keys=home_crn_keys, pitcher_shock_factors=away_pitcher_shock,
+                inning=inning, hook_state=away_hook_state,
+                pitching_score_entering=away_score, batting_score_entering=home_score,
             )
+            if away_hook_state is not None and away_hook_state["hooked"] \
+                    and last_away_pitcher_id != id(away_hook_state["next_reliever"]):
+                last_away_pitcher_id = id(away_hook_state["next_reliever"])
+                away_appearance_idx += 1
+                away_pitcher_shock = self._draw_pitcher_shock(crn_game_pk, crn_trial, 1, away_appearance_idx)
+                away_bullpen = _shift_bullpen_after_hook(away_bullpen, away_hook_context["cutoff"], away_hook_state["hook_inning"])
             if events is not None:
                 for e in events[start_len:]:
                     e["inning"], e["side"], e["blowout"] = inning, "home", away_in_blowout
             home_score += home_runs
             if inning >= 9 and home_score != away_score:
                 break  # walk-off, or a top-of-9th-or-later deficit that stands
+        if hook_result is not None:
+            # Exposes the actual (possibly hook-shifted) exit inning so a
+            # caller doing PER-PITCHER prop attribution from a pregame-built
+            # id_plan (see bullpen.sample_bullpen_plan) can re-derive which
+            # inning each planned reliever ACTUALLY threw in, via the exact
+            # same shift _shift_bullpen_after_hook already applied to the
+            # bullpen dict itself -- home_bullpen/away_bullpen is byte-shifted
+            # internally above, but a caller's own separately-built id_plan
+            # is not, and silently mismatches without this.
+            hook_result["home_hook_inning"] = home_hook_state["hook_inning"] if home_hook_state is not None else None
+            hook_result["away_hook_inning"] = away_hook_state["hook_inning"] if away_hook_state is not None else None
         return home_score, away_score
 
 

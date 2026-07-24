@@ -102,6 +102,8 @@ DECISION_BULLPEN_PICK = 5
 DECISION_CLOSER_USAGE = 6
 DECISION_WEATHER_BUCKET = 7
 DECISION_PITCHER_SHOCK = 8  # task #137: latent per-pitcher-appearance "stuff" shock, see game_simulator.py
+DECISION_HOOK_FRAILTY = 9  # task #144/#145: per-PA state-conditioned starter-hook decision, see game_simulator.py
+DECISION_TIER_SELECT = 10  # task #144 step 4: state-conditioned reliever-tier selection, see game_simulator.py
 
 
 def half_inning_ordinal(inning: int, is_bottom: bool) -> int:

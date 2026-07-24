@@ -21,6 +21,23 @@ backtest, which replays each real historical game's ACTUAL pitcher-per-inning
 sequence -- that's the right tool for asking "does using per-inning pitcher
 identity help at all", but it can't be used on a game that hasn't been played
 yet. See validate_predictive_bullpen.py for the live-style validation.
+
+TRADE-DEADLINE GAP (fixed below): unlike a starter or a batter -- both of
+which get a genuinely live, same-day team-affiliation signal from the MLB
+Stats API's probable-pitcher/lineup fields -- a RELIEVER's team affiliation
+here is inferred entirely from historical PA rows (mark_pitching_team, using
+that specific game's own recorded home/away team, which is per-game-accurate
+once a game is actually ingested). A pitcher traded 5 days ago has zero (or
+a handful of) TeamB-tagged relief_log/closer_log rows, so
+build_team_bullpen_roster/identify_closer will either miss him entirely or
+badly understate his real role, while a newly-traded closer specifically
+will lose to his TeamB predecessor's still-decaying appearance count for
+WEEKS. `build_traded_pitcher_overrides` (below, fed by
+src.ingest.fetch.fetch_transactions's real trade data) fixes this by
+relabeling a just-traded pitcher's ENTIRE relief/closer history to his new
+team once he's past his trade's effective_date -- seeding his usage weight
+and closer-candidacy from his established PRIOR role rather than starting
+him cold. See MODEL_DOCUMENTATION.md for the fuller story.
 """
 
 import numpy as np
@@ -286,10 +303,74 @@ def build_closer_appearance_log(pa: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def identify_closer(closer_log: pd.DataFrame, team: str, target_date, window_days: int = CLOSER_WINDOW_DAYS):
+TRADE_OVERRIDE_LOOKBACK_DAYS = 60  # comfortably longer than ROSTER_WINDOW_DAYS=45 (the
+                                    # longest trailing window an override needs to survive
+                                    # for) -- see build_traded_pitcher_overrides.
+
+
+def _apply_traded_overrides(log: pd.DataFrame, traded_overrides: dict | None, target_date) -> pd.DataFrame:
+    """Relabels a just-traded pitcher's ENTIRE `team` history in `log` (both
+    pre- and post-trade rows -- his real established role, not just what
+    little he's done for the new team so far) to his new team, for any
+    pitcher in `traded_overrides` whose trade is already in effect as of
+    target_date. No-op (returns `log` unchanged, same object) when
+    traded_overrides is None/empty -- every existing caller is unaffected.
+
+    Deliberately does NOT expire the relabeling after some fixed horizon:
+    once past effective_date, both his pre-trade (relabeled) and real
+    post-trade appearances count toward his new team, and the CALLER's own
+    existing trailing-window filter (ROSTER_WINDOW_DAYS/CLOSER_WINDOW_DAYS)
+    already limits how far back any of this can matter -- well past that
+    window, his real new-team appearances (if he's actually still pitching
+    there) dominate on their own, no separate expiry needed."""
+    if not traded_overrides:
+        return log
+    target_ts = pd.Timestamp(target_date)
+    log = log.copy()
+    for pid, info in traded_overrides.items():
+        if pd.Timestamp(info["effective_date"]) <= target_ts:
+            log.loc[log["pitcher"] == pid, "team"] = info["new_team"]
+    return log
+
+
+def build_traded_pitcher_overrides(transactions: pd.DataFrame, team_id_to_abbrev: dict,
+                                    target_date, lookback_days: int = TRADE_OVERRIDE_LOOKBACK_DAYS) -> dict:
+    """{pitcher_id: {"new_team": abbrev, "effective_date": Timestamp}} for
+    real trades in the trailing `lookback_days` before target_date -- see
+    src.ingest.fetch.fetch_transactions for the source data and this
+    module's own docstring for why this exists. Keeps only the MOST RECENT
+    trade per pitcher (a pitcher traded twice in one window keeps his latest
+    team). Trades to a team_id not in `team_id_to_abbrev` (e.g. a Mexican/
+    winter-league team appearing in the same feed) are silently skipped --
+    not one of this project's tracked MLB teams."""
+    if transactions.empty:
+        return {}
+    target_ts = pd.Timestamp(target_date)
+    window_start = target_ts - pd.Timedelta(days=lookback_days)
+    dates = pd.to_datetime(transactions["date"])
+    sub = transactions[(dates >= window_start) & (dates <= target_ts)].sort_values("date")
+    overrides = {}
+    for _, row in sub.iterrows():
+        new_team = team_id_to_abbrev.get(row["to_team_id"])
+        if new_team is None:
+            continue
+        overrides[row["pitcher_id"]] = {"new_team": new_team, "effective_date": pd.Timestamp(row["date"])}
+    return overrides
+
+
+def identify_closer(closer_log: pd.DataFrame, team: str, target_date, window_days: int = CLOSER_WINDOW_DAYS,
+                     traded_overrides: dict | None = None):
     """The pitcher with the most 9th+-inning relief appearances for `team` in
     the trailing `window_days` strictly before target_date -- walk-forward-safe.
-    Returns None if there's no usable history yet (e.g. very early in a season)."""
+    Returns None if there's no usable history yet (e.g. very early in a season).
+
+    traded_overrides: optional (see build_traded_pitcher_overrides) -- a
+    newly-traded pitcher's closer_log history is relabeled to `team` BEFORE
+    filtering, so a just-acquired real closer is recognized immediately
+    instead of losing to his new team's still-decaying incumbent for weeks.
+    None (every existing caller) is byte-for-byte identical to before this
+    parameter existed."""
+    closer_log = _apply_traded_overrides(closer_log, traded_overrides, target_date)
     target_ts = pd.Timestamp(target_date)
     window_start = target_ts - pd.Timedelta(days=window_days)
     dates = pd.to_datetime(closer_log["game_date"])
@@ -311,7 +392,8 @@ def build_all_appearance_log(pa: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_team_bullpen_roster(relief_log: pd.DataFrame, all_appearance_log: pd.DataFrame,
-                               team: str, target_date: str, window_days: int = ROSTER_WINDOW_DAYS) -> dict:
+                               team: str, target_date: str, window_days: int = ROSTER_WINDOW_DAYS,
+                               traded_overrides: dict | None = None) -> dict:
     """{pitcher_id: weight} for `team` as of target_date -- walk-forward-safe
     (only appearances STRICTLY BEFORE target_date). weight = how many times
     this pitcher appeared in relief for this team in the trailing
@@ -320,7 +402,15 @@ def build_team_bullpen_roster(relief_log: pd.DataFrame, all_appearance_log: pd.D
     rest-day availability discount specific to target_date (see
     REST_AVAILABILITY_WEIGHT). A trailing window rather than full-season
     pooling deliberately tracks roster churn (call-ups, trades, injuries)
-    that a full-season blend would smear over."""
+    that a full-season blend would smear over.
+
+    traded_overrides: optional (see build_traded_pitcher_overrides) -- a
+    newly-traded pitcher's relief_log history is relabeled to `team` BEFORE
+    filtering, so his usage weight reflects his real established role
+    instead of starting cold (or being invisible entirely) on his new team.
+    None (every existing caller) is byte-for-byte identical to before this
+    parameter existed."""
+    relief_log = _apply_traded_overrides(relief_log, traded_overrides, target_date)
     target_ts = pd.Timestamp(target_date)
     window_start = target_ts - pd.Timedelta(days=window_days)
     dates = pd.to_datetime(relief_log["game_date"])

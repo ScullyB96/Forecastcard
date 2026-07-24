@@ -2272,6 +2272,648 @@ inning pitch-count miss, margin-null anomaly) stay named suspects for interpreti
 acceptance test if the bullpen gap doesn't close all the way — not mysteries to
 re-discover.
 
+### 11.21 Task #144 step 2: the σ1 opener diagnostic (cleared) + the hook model wired
+into game_simulator.py behind a flag, byte-identity confirmed
+
+Per the pre-registered opening move from the prior session's close, before trusting
+`HOOK_FRAILTY_SIGMA1=3.8` (a large log-odds parameter) in the simulator, two checks
+ran against 2023-24 fit data:
+
+1. **Are openers/bullpen-day starters contaminating the fit target?** Flagged
+   (pitcher, season) combos with a repeatable early-exit signature (median exit
+   inning <=2 across >=3 starts that season) as opener-like -- 35 such combos,
+   1.93% of all starts. Checked their overlap with the frailty fit TARGET (starts
+   reaching "inning 4 with 5+ runs allowed"): **0 of 1085 such starts came from a
+   flagged opener-pattern pitcher.** Openers are not contaminating the target at all.
+2. **Is the model's implied per-start P(exit by inning 2) distribution bimodal** (the
+   "quick-hook day vs. untouchable day" worry)? No -- smoothly decaying, unimodal,
+   ZERO starts above 40% implied probability across the whole 2023-24 fit sample
+   (max bin 20-40%, only 0.62% of starts). The large log-odds sigma does NOT
+   translate into unrealistic near-certain outcomes, because it's applied to
+   realistically tiny baseline hazards (the mean-preserving transform compresses
+   naturally at low p) -- confirming 3.8 is a fact about how compressed the
+   marginal hazards are at this scale, not evidence of a hidden bimodal
+   subpopulation or an opener-contamination artifact.
+
+**Both checks cleared cleanly** -- proceeded to wiring.
+
+**Wiring**: `src/models/hook_frailty.py` (NEW) holds the pure hook-frailty math
+(bucket_inning/pa_count/runs_allowed/margin, hook_frailty_sigma, solve_pre_noise_logit,
+apply_hook_frailty) split out of `bullpen_usage_policy.py` specifically so
+`game_simulator.py` can import it without a circular import (bullpen_usage_policy.py
+-> bullpen.py -> game_simulator.py for OUTCOMES) -- `bullpen_usage_policy.py`
+re-imports from it for backward compatibility. `crn.py` gained
+`DECISION_HOOK_FRAILTY=9`.
+
+`GameSimulator.simulate_half_inning` gained `inning`/`hook_state`/
+`pitching_score_entering`/`batting_score_entering` (all optional, None/0 default =
+byte-identical to before). `hook_state` is a MUTABLE dict `simulate_game` builds and
+threads through every half-inning a given starter pitches in a given trial:
+`{"hook_table", "z" (this trial's frailty latent, drawn once), "next_reliever",
+"hooked" (latches True permanently on the FIRST hook), "hook_inning", "pa_count",
+"cum_runs_allowed"}`. Evaluated once per PA, BEFORE that PA is simulated (using
+pre-PA exposure: this would-be Nth batter faced, runs allowed strictly before this
+PA, current margin -- exactly matching how the fitted table's cells were defined).
+If the hazard fires, the reliever swaps in STARTING WITH that exact batter (the
+starter never faces them) -- this can happen MID-half-inning, which is why the swap
+lives inside `simulate_half_inning` itself rather than only at `simulate_game`'s
+existing between-inning boundary. thruorder_counts is cleared at the exact swap
+point (a batter's times-through-order restarts against a new arm).
+
+**Scope, deliberately bounded to "hook model alone"**: only the STARTER's own exit
+point becomes state-conditioned; reliever IDENTITY and ORDER are completely
+untouched -- once hooked, `_shift_bullpen_after_hook` (NEW module function) does a
+ONE-TIME rebuild of the pregame `{inning: profile}` bullpen plan, reusing the EXACT
+same reliever sequence `sample_bullpen_plan` already assigned (innings cutoff+1..N),
+just shifted to start at the ACTUAL hook inning instead of the pregame-assumed
+cutoff. All subsequent reliever-to-reliever transitions stay at the existing
+inning-boundary granularity, unchanged -- only ONE mid-half-inning pitcher swap is
+possible per side per game (starter -> first reliever). `simulate_game` syncs its
+own `id()`-based pitcher-change bookkeeping (appearance_idx, pitcher-shock redraw)
+immediately when a hook fires, specifically to prevent the EXISTING next-inning
+change-detection from double-clearing thruorder_counts a reliever has already
+legitimately started accumulating. One documented, deliberately-accepted
+simplification: the task #137 pitcher-shock does NOT redraw immediately at the
+swap (continues using the OLD pitcher's shock for the remainder of that one
+half-inning only) -- it redraws naturally next inning via the existing mechanism;
+threading extra CRN/appearance-index plumbing through `simulate_half_inning` for
+this second-order interaction wasn't worth it given step 4 (SHOCK_SIGMA refit)
+already expects to revisit this interaction anyway.
+
+**Byte-identity gate**: ran 500 games across 3 configurations (CRN-keyed with
+shock_sigma=0.40, plain-rng with shock_sigma=0.40, no-bullpen-dict with
+shock_sigma=0) comparing the pre-change code (loaded from git HEAD under a distinct
+module name) against the new code with every new param omitted -- **500/500 byte-
+identical** (exact score AND exact full per-PA event log match) across all three.
+
+**Sanity check** (not yet the real decomposition test, just a directional check
+before trusting the mechanism further): with hook_context enabled, a deliberately
+"bad" starter (elevated HR/hit rates) got pulled at mean inning 4.18 across 500
+CRN-keyed trials, vs. mean inning 6.19 for a deliberately "good" starter -- the
+correct direction and roughly the same ~2-inning gap magnitude as the real
+trail_big-vs-lead_big split from task #144 step 1's own validation (4.45 vs. 6.30).
+
+**Status**: task #144 step 2 (wire hook model alone, byte-identity check) is
+COMPLETE. Remaining staged steps, in order: run the decomposition's bullpen swap
+(re-run `validate_oracle_vs_predictive.py`'s ORACLE_BULLPEN-vs-FULL_PREDICTIVE
+comparison with this mechanism live, requires computing real `cutoff`/`hook_table`
+inputs for the decomposition's own bullpen-construction path) -> add tier selection
+(the reliever-choice half of task #144 step 1, not yet wired) -> re-run -> refit
+`SHOCK_SIGMA` down (pre-registered, expected to shrink once state-conditioned
+variance is added) -> final acceptance grid (Brier/CRPS primary, SU guardrail only,
+2026 holdout read once after freezing). Per §11.18/11.19/11.20.
+
+### 11.22 Task #144 step 3: hook-model-alone wired into the decomposition's
+predictive bullpen arm — a real, honest NULL (not a revert signal, a staging signal)
+
+Ran the actual test: `validate_oracle_vs_predictive.py`'s FULL_PREDICTIVE arm
+(bullpen source = predictive) with `hook_frailty_enabled` toggled, at full canonical
+scale (n=2409 real games, K=50), restricted to **test_seasons={2025} only** --
+genuinely held out from `HOOK_TABLE_FIT_SEASONS={2023,2024}` (a new module constant
+in `validate_oracle_vs_predictive.py`, alongside `build_hook_table`, which fits the
+same frozen policy task #145 already validated and reuses it here). `run_decomposition`
+gained a `hook_frailty_enabled: bool = False` param that, when True and the bullpen
+source is predictive, wires `home_hook_context`/`away_hook_context` into
+`simulate_game` using the SAME `expected_innings`-derived cutoff `sample_bullpen_plan`
+itself assumes (so the hook mechanism's "pregame cutoff" exactly matches what the
+reliever sequence was actually built around).
+
+**Result (paired bootstrap, `ab_significance.py`, n=2409, 10000 resamples)**:
+
+| Comparison | SU delta | Brier delta | Verdict |
+|---|---|---|---|
+| hook_enabled vs. no_hook | -1.04pp, CI (-2.78, +0.75) | -0.0010, CI (-0.0035, +0.0015) | **NOISE** — CI includes zero on both |
+| ORACLE_BULLPEN vs. hook_enabled | +4.28pp, CI (+2.03, +6.48) | -0.0076, CI (-0.0112, -0.0040) | **REAL** — gap still fully present |
+
+Hook-model-alone (reliever IDENTITY/ORDER still entirely pregame-fixed, unchanged
+from `sample_bullpen_plan`) produces **no measurable full-stack SU/Brier
+improvement** at this scope, and the gap against the ORACLE_BULLPEN ceiling is
+essentially the SAME size as the original task #143 decomposition found
+(3.95pp/0.0079) -- timing alone has not closed it.
+
+**This is not a revert signal — it's exactly the staging signal the plan was built
+to produce.** Task #144's own step-1 spec fit TWO components (starter-hook timing
+AND reliever-tier selection) precisely because either one alone was a hypothesis,
+not a certainty, about where the oracle bullpen's advantage lives. Wiring hook-alone
+first and testing it in isolation (rather than wiring both at once) was the
+isolate-one-factor discipline this project has used everywhere else (GB/FB
+multiplier, bat-tracking, pitcher-stuff K-multiplier, etc.) -- and it just did its
+job: it tells us the accuracy benefit does NOT come from timing alone. Plausible
+reasons, none yet distinguished: (a) reliever CHOICE (leverage arm vs. mop-up,
+matching the real 82%-vs-53% split task #144 step 1 already validated) may be the
+dominant real driver, with timing a necessary but insufficient piece; (b) the
+`SHOCK_SIGMA` interaction (still frozen at 0.40, pre-registered for refit-down in
+step 4) may be partially masking a real but small gain; (c) shifting WHEN a fixed
+reliever pool enters may simply not move full-game W/L or margin outcomes much if
+the pool's aggregate talent is what actually matters, not the exact inning boundary.
+
+**Logged to the metrics ledger** (both arms, full config_flags + this finding in
+the notes field, matching the project's self-documenting-row convention).
+
+**Next step, per the already-staged plan (not paused for reconsideration — this
+result is what continuing to step 4 was always contingent on)**: wire reliever TIER
+selection (the other half of task #144 step 1, `fit_tier_policy`'s validated
+leverage/middle/mopup shares and closer identification, not yet wired into
+`sample_bullpen_plan`/`simulate_game` at all) and re-run this SAME comparison with
+BOTH mechanisms live, to see whether tier selection is what actually closes the gap,
+either alone or combined with hook timing.
+
+### 11.23 Task #144 step 4: reliever tier selection wired + the full 2×2 factorial —
+neither mechanism, alone or combined, closes the gap (a real, humbling null)
+
+**Wiring**: `src/models/tier_selection.py` (NEW, dependency-free, same
+circular-import reasoning as `hook_frailty.py`) holds
+`tier_label_from_roster_weights` (derives each reliever's tier from their OWN
+walk-forward roster weight — top third by trailing usage+rest weight =
+"leverage", middle third = "middle", bottom third = "mopup" — rather than
+`build_reliever_tier_log`'s season-long tercile, which that function's own
+docstring already flags as not walk-forward-safe) and
+`sample_tier_conditioned_reliever` (draws one reliever, conditioned on the
+CURRENT trial's margin/save-situation via the validated policy table,
+reweighting WITHIN the pregame availability-weighted roster — never overriding
+rest-day availability). `crn.py` gained `DECISION_TIER_SELECT=10`.
+`bullpen_usage_policy.build_tier_policy_dicts` fits the same frozen policy
+(`fit_tier_policy`, 2023-2024) into plain dicts for O(1) simulator lookup —
+one documented approximation: the fitted `tier_by_margin` probabilities used
+season-long tier labels, while simulation-time tier ASSIGNMENT uses the
+walk-forward roster-weight ranking — related but not identical conventions,
+flagged rather than reconciled (would require refitting against
+walk-forward-derived labels directly).
+
+`GameSimulator.simulate_game`/`simulate_half_inning` gained
+`home_tier_context`/`away_tier_context` (optional, None-default). When given,
+EVERY post-starter reliever selection — not just the first — is drawn live;
+combines cleanly with `hook_context` (the reliever who takes over at the hook
+moment is now tier-drawn instead of a pregame-fixed pick) or works standalone
+(the starter still exits at the fixed pregame cutoff, but every reliever from
+there on is tier-drawn). This is also where the blowout/position-player
+unification from the original spec went live: once a side enters blowout mode,
+a tier-conditioned draw (naturally mopup-heavy at extreme margins) is preferred
+over `blowout_pitcher_profile` for as long as the roster pool has anyone left —
+a position player is used to CONSERVE the bullpen, not the instant the blowout
+threshold is crossed. Byte-identity re-confirmed (500/500 games across 3
+configs) after this wiring; the hook-only sanity check (bad-starter mean hook
+inning 4.18 vs good-starter 6.19) also re-confirmed unchanged. A standalone
+tier-selection unit test confirmed the mechanism reproduces the real validated
+leverage/mopup shares by margin closely (e.g. lead_big: 70.0% leverage drawn
+vs. 69.5% real; trail_big: 52.2% vs. 53.1% real).
+
+**The full 2×2 factorial (paired bootstrap, n=2409, K=50, test_seasons={2025}
+only — genuinely held out from both fit periods)**:
+
+| Config | SU | Brier | vs. no-mechanism baseline |
+|---|---|---|---|
+| no_hook_no_tier (baseline) | 54.21% | 0.2485 | — |
+| tier_only | 53.67% | 0.2485 | NOISE (SU CI (-2.16,+1.08)pp) |
+| hook_only | 53.18% | 0.2475 | NOISE (SU CI (-2.78,+0.75)pp) |
+| hook_and_tier | 52.68% | 0.2496 | NOISE (SU CI (-3.36,+0.33)pp) |
+
+**Every pairwise comparison among the four configs is NOISE** — tier_only,
+hook_only, and hook_and_tier are statistically indistinguishable from the
+baseline AND from each other (hook_and_tier vs. tier_only: NOISE; hook_and_tier
+vs. hook_only: NOISE). **This contradicts the pre-registered expectation** that
+tier-only would carry most of the recoverable gap — it does not measurably
+close it, and combining both mechanisms does not improve on either alone.
+
+The gap against the ORACLE_BULLPEN ceiling remains REAL and essentially
+UNCHANGED in magnitude across every predictive configuration: tier_only
+SU+3.78pp/Brier-0.0087 (both REAL, CI excludes zero); hook_and_tier
+SU+4.77pp/Brier-0.0097 (both REAL) — the same order of magnitude as the
+original task #143 finding (+3.95pp/-0.0079). **Neither mechanism closes any
+measurable fraction of the oracle-vs-predictive bullpen gap.**
+
+**Three honest, undistinguished explanations, logged so a future session
+doesn't have to rediscover them**:
+1. The real effect may simply be smaller than n=2409/K=50 can resolve (SU CI
+   width here is ~2.7-3.7pp — a true ~1pp effect is unmeasurable by
+   construction, the same "K=50 noise floor" lesson this project has hit
+   before).
+2. The endogeneity ceiling task #143's own verification pass already
+   identified: the REAL oracle bullpen sequence encodes the game's ACTUAL
+   script (a manager who KNOWS the score pulls accordingly) — information no
+   pregame-blind, probabilistic mechanism can fully reproduce regardless of
+   sophistication. Some of the ~4pp gap may simply be structurally
+   unrecoverable, not a modeling shortfall.
+3. Game-level SU/Brier may not be the right lens for a bullpen-USAGE
+   mechanism at all — its value may show up in dispersion (std(z)) or
+   prop-level accuracy (innings pitched, saves, holds) rather than in final
+   win probability. Neither has been checked yet in this session.
+
+**Both mechanisms remain individually validated** as reproducing REAL
+historical usage patterns on their own terms (task #145's hook-timing
+calibration; this section's tier-share calibration) — this is a full-stack
+downstream-accuracy null, not evidence the underlying policy tables are wrong.
+Logged to the metrics ledger (both new arms, full notes). **Neither mechanism
+is deployed**; both stay dormant, off-by-default, byte-identity-gated
+infrastructure — matching this project's standing "keep only on genuine
+net-positive, revert cleanly otherwise" discipline (the same fate as isotonic
+calibration, the arsenal-tercile adjustment, and the whiff-rate factor
+earlier this session), pending the dispersion/prop-calibration check the
+original plan staged as the next step regardless of which SU/Brier
+configuration "won" (none did).
+
+**Post-hoc reasoning (reviewer, same day) on WHY tier-only carried nothing
+measurable, converted to actual runs rather than left as a bare null**: the
+82%-vs-53% leverage-share split by margin is a real, validated behavioral
+pattern, but its RUN-VALUE consequence at game scale is small — the true-talent
+ERA gap between a team's leverage arm and its middle reliever is roughly
+0.3-0.5 runs, deployed over one or two innings, and only in the subset of
+trials where the state-conditioned draw actually diverges from what the
+usage-weighted pregame sampler would have picked anyway (recent-usage weight
+is ALREADY leverage-correlated, so the two often agree). Net expected effect:
+a few hundredths of a run per game — invisible at this protocol's ±3pp SU CIs,
+plausibly invisible at any realistic CI. This reframes the earlier task #143
+close-game-slice "~2pp recoverable" estimate too: that slice's oracle sequences
+still encode true bullpen AVAILABILITY (who warmed up yesterday, who's
+nursing something, who the manager privately trusts that week that particular
+week) — information, not behavior, and no policy fit on PUBLIC usage patterns
+can recover it regardless of sophistication. **Honest revision: the
+pregame-recoverable bullpen headroom is probably substantially smaller than
+the earlier ~2pp estimate, and this factorial is the measurement that
+established that, not a failure to find it.**
+
+**One line for the ledger, so a future session doesn't re-derive this whole
+arc from scratch**: *the policy tables (hook-timing, tier-share) remain valid
+descriptions of real managerial behavior; the null is about downstream
+game-level value, and the remaining oracle-vs-predictive bullpen gap is now
+believed to be predominantly AVAILABILITY information plus SCRIPT
+endogeneity — neither recoverable from a pregame-knowable, behavior-only
+policy, however well-fit.*
+
+**Next step, pre-registered and falsifiable (not yet run)**: the hook
+mechanism makes a direct, testable prediction about a quantity `props.py`
+actually sells — the distribution of starter outs/innings pitched. Compare
+simulated starter-outs distributions (baseline vs. hook-enabled) against real
+2025: calibration of P(starter completes 5), P(exits by inning 4), the full
+histogram, not just the game-level aggregate. Same logic for tier selection
+against reliever-inning attribution (feeds reliever K props, and any future
+saves/holds props). This is the lens where these two mechanisms were actually
+built to show value — within-game usage realism is a PROP-level quantity, not
+a win-probability one, so a game-level SU/Brier null doesn't settle whether
+they're worth anything. **If starter-outs calibration improves materially**:
+keep the hook mechanism deployed for the props path specifically, documented
+as a distribution-realism fix with NO game-level accuracy claim — the exact
+`SHOCK_SIGMA` precedent (a variance/distribution-shape correction, not a
+point-metric win). **If it doesn't improve even that**: archive both
+mechanisms cleanly — the null is then total, not partial, and there's no
+residual mystery left to chase.
+
+## 11.24 Calendar-driven hardening (2026-07-24): trade-deadline handling +
+postseason correctness fixes, prioritized by real dates rather than model quality
+
+Reviewer-prompted: the model was built/validated on full regular seasons; the
+back half of the calendar breaks specific assumptions, some rules-certain
+(not hypothetical). Ordered by real deadline; two items built and tested this
+session, the rest scoped and tracked for later.
+
+### Built: trade-deadline transaction/closer handling (this week's deadline)
+
+**The gap, confirmed by direct investigation**: unlike a starter or batter —
+both genuinely live via the MLB Stats API's probable-pitcher/lineup fields —
+a RELIEVER's team affiliation has NO live signal anywhere in this pipeline.
+`build_team_bullpen_roster`/`identify_closer` (`bullpen.py`) infer team
+purely from historical PA rows. Confirmed directly: a pitcher traded 5 days
+ago is either invisible (zero ingested relief appearances for his new team
+yet) or badly understated (a handful of new-team appearances vs. his real
+established role); a newly-traded CLOSER specifically loses to his new
+team's incumbent (whose appearance count is still decaying from BEFORE the
+trade) for weeks.
+
+**Fix**: `src/ingest/fetch.py` gained `fetch_transactions(start_date,
+end_date)` — the MLB Stats API's free `/transactions` endpoint, filtered to
+real trades (`typeCode=="TR"`) with an actual player attached. Confirmed
+directly against live data before trusting the dedup logic: multi-player
+trades reuse the SAME transaction id across each distinct player (a real
+3-for-2 trade produced 3 rows, one per player, all sharing one id) — an
+earlier draft deduped by id alone and would have silently dropped 2 of 3
+players; the shipped version dedupes on `(transaction_id, pitcher_id)`.
+
+`src/models/bullpen.py` gained `build_traded_pitcher_overrides` (turns real
+trade rows into `{pitcher_id: {"new_team", "effective_date"}}`, keeping only
+the most recent trade per pitcher) and `_apply_traded_overrides` (relabels a
+traded pitcher's ENTIRE relief/closer history — both pre- and post-trade
+rows — to his new team once past `effective_date`, seeding his usage
+weight/closer-candidacy from his real established role instead of starting
+cold). Deliberately does not expire the relabeling on its own timer — the
+CALLER's own existing trailing window (`ROSTER_WINDOW_DAYS=45`/
+`CLOSER_WINDOW_DAYS=90`) already bounds how far this can matter, and well
+past that window his real new-team appearances (if he's still there) simply
+dominate on their own. `build_team_bullpen_roster`/`identify_closer` gained
+`traded_overrides: dict | None = None` (byte-identical when omitted, checked
+directly). `props.py`/`generate_daily_props.py` wire this through `ctx`,
+fetching a trailing `TRADE_OVERRIDE_LOOKBACK_DAYS=60`-day transaction window
+each run (wrapped in a try/except — a network hiccup here must not break the
+whole daily run, same resilience convention as the RotoWire fetch).
+
+**Confirmed on real data**: without the override, a real 2025 reliever with
+80 relief appearances for his real team is correctly absent from a
+hypothetical new team's roster; with a synthetic trade override, he
+correctly appears with a real, non-zero weight. Same confirmed for
+`identify_closer`. Byte-identity confirmed for the `traded_overrides=None`
+default path.
+
+**Diagnostic run (reviewer-requested): did the EXISTING, unfixed predictive
+bullpen show a measurable post-deadline dip in 2025?** Reused the
+already-saved `hook_decomp_FULL_PREDICTIVE_no_hook_2025.parquet` (task #147,
+n=2409, no new compute), split by real calendar month. Result: **no
+detectable dip** — July SU=52.99%/Brier=0.2510 vs. August SU=52.97%/
+Brier=0.2479 (Brier actually slightly better in August; two-sample
+t-test p=0.996 for SU, p=0.648 for Brier, both indistinguishable from noise).
+Honest reading: this doesn't undermine the fix (the underlying mechanism gap
+is directly, mechanistically confirmed above on real data, independent of
+this aggregate check) — it means a month-level aggregate isn't sensitive
+enough to detect an effect concentrated in the handful of games each week
+where a JUST-traded reliever specifically pitches, diluted by every other
+game in the month having nothing to do with any trade. Same "aggregate
+metric too coarse to see a real, narrowly-concentrated effect" pattern as
+task #144's tier-selection null.
+
+### Built: postseason auto-runner + blowout-substitution correctness fix
+
+**The bug (rules-certain, same class as the original zombie-runner fix)**:
+the real MLB automatic extra-innings runner rule does NOT apply in the
+postseason — playoff extra innings start bases-empty, same as any other
+inning — but `simulate_game` set `auto_runner=inning >= 10` unconditionally.
+Confirmed via direct investigation: zero postseason/game_type awareness
+existed anywhere in `src/` before this fix. Schedule data's actual
+`game_type` values (confirmed directly, 2023 season): `R`=regular season
+(2430), `S`=spring training (467), `E`=exhibition (24), `D`=division series
+(14), `L`=league championship (14), `F`=wild card (8), `W`=world series (5),
+`A`=all-star (1) — matches the standard MLB Stats API convention, plus three
+categories (`S`/`E`/`A`) worth excluding alongside true postseason handling.
+
+**Fix**: `GameSimulator.simulate_game` gained `postseason: bool = False`.
+When True: `auto_runner` is forced off regardless of inning for both
+half-innings; the blowout/position-player-pitching trigger (`home_in_blowout`/
+`away_in_blowout`) can never fire either — real playoff rosters/incentives
+mean a team essentially never concedes a game to save a reliever for
+tomorrow (there is no tomorrow if you lose). Default False is byte-for-byte
+identical to before this parameter existed (re-confirmed: 500/500 games
+across 3 configs). Also confirmed directly that the underlying data pipeline
+ALREADY fully excludes non-regular-season rows at the PA-table-build layer
+(`build_pa_table.py` filters `game_type=="R"`) and redundantly at every
+validator's own schedule read — postseason games cannot currently
+contaminate any backtest/validation set, they are simply unsupported for
+live prediction (`generate_daily_props.py` filters to `game_type=="R"` when
+selecting games, so postseason games get ZERO props today, not wrong ones).
+
+**Wired end-to-end the same day (reviewer-prompted re-prioritization: "the
+pipeline turns on in October" was too important a plumbing gap to leave
+until the postseason itself)**: `generate_daily_props.py`'s `games_for_date`
+now selects `game_type in {"R","F","D","L","W"}` (a new
+`GAME_TYPES_TO_PREDICT` constant, deliberately excluding `S`/`E`/`A`), and
+`postseason = row.game_type in POSTSEASON_GAME_TYPES` is threaded through
+`generate_game_props` → `simulate_game` for each game. Default path
+(`postseason=False`, every existing caller) untouched.
+
+**Dress rehearsal (same day, real data, zero new ingestion)**: ran the ACTUAL
+`build_pregame_context`/`generate_game_props` pipeline against all 47 real
+2025 postseason games (Wild Card through World Series, real posted lineups
+and probable pitchers, already fully cached — `lineups_2025.parquet` covers
+all 47 games since the whole season was bulk-ingested) with `postseason=True`,
+n_trials=20. **45/47 succeeded outright**, producing sensible win
+probabilities across the full bracket (e.g. LAD@TOR World Series games in
+the 0.45-0.65 range). **The 2 failures are a REAL, concrete instance of task
+#149** (not hypothetical): `ValueError: no pregame snapshot for player id
+800050 as of 2025-10-01/10-02 (likely an MLB debut with zero PA history)` —
+a player who evidently debuted mid-postseason (a September call-up pressed
+into playoff action) and has no cached history at all. The pipeline's
+existing `except ValueError` catch in the daily-props loop means this fails
+SAFELY today (skips that one game, doesn't crash the whole run) — but this
+dress rehearsal is exactly why task #149 (a real player, a real date, not a
+hypothetical edge case) is worth resolving properly before the real
+postseason, not left as "probably fine."
+
+**Status: task #150's plumbing slice is DONE, not just scoped.** The
+remaining piece of #150 (nothing left, folded into this) is complete; what's
+left is task #151 (the bigger regime-change modeling, still genuinely
+blocked on a postseason-inclusive PA table) and task #149 (debut-player
+handling, now with a real reproduction case attached).
+
+### Built, same day: task #149's generic-debut-profile fallback (the last
+known way the pipeline produces nothing on a playoff night)
+
+The reproduction case from the dress rehearsal (player id 800050) turned out
+to be a BATTER, not a pitcher as first guessed — a September call-up
+outfielder who started two 2025 Wild Card games (batting 5th/7th for CLE)
+with zero cached MLB history at all. Not a random missing player: exactly
+the kind of injury-replacement/emergency call-up a deep October run
+surfaces, on the highest-visibility slates of the year.
+
+**Fix**: `props.py` gained `build_generic_debut_profile(pa, player_col,
+season, league_rates_this_season)` — reuses `true_talent.build_debut_rate`
+(task #119's already-validated, walk-forward-safe empirical debut-cohort
+rate per outcome, confirmed BELOW league average) rather than inventing a
+new quartile heuristic. This is a narrower, previously-untested reuse of
+that same validated data: task #119's `use_debut_prior` flag (applying the
+debut rate as the ONGOING cold-start prior inside the regular Marcel blend
+for every player) was tested full-stack and found NULL — this is a
+LAST-RESORT fallback only for a player who would otherwise crash the whole
+game's prop generation, a different and much narrower claim that was never
+tested and isn't contradicted by that earlier null result. `effective_n=0`
+for every outcome (an already-handled, documented edge case in
+`sample_posterior_rate` — "a fully cold-started player with zero weight").
+Precomputed once per (batter/pitcher, season) in `build_pregame_context`
+(cheap, and every debut player in a season needs the identical fallback
+regardless of who they are) and wired as the fallback path in
+`batter_profile`/`pitcher_profile` inside `generate_game_props`, replacing
+their previous `return None` (which fed into the ValueError). The original
+missing-snapshot ValueError check stays in place as a defense-in-depth
+backstop (e.g. if a season isn't in the precomputed dict at all), not the
+primary path anymore. Flagged, not hidden: `generate_game_props` now returns
+`debut_fallback_pids`, printed by `generate_daily_props.py` and stamped as a
+`used_debut_fallback` column in the saved output — same transparency
+convention as the existing lineup-source flags.
+
+**Confirmed on the exact real reproduction case** (player 800050, game_pk
+813071): previously raised `ValueError`, now generates successfully
+(`home_win_prob=0.60`) with `debut_fallback_pids=[800050]` correctly
+recorded. **Re-ran the full 47-game postseason dress rehearsal: 47/47 now
+succeed** (up from 45/47) — the pipeline produces a prediction for every
+real 2025 postseason game with zero crashes.
+
+**Task #149 is closed.**
+
+**Still pending (task #151 only)**:
+1. Task #151, October part 2 (the regime change): playoff bullpen usage is a different
+   distribution than anything this project's models were fit on (starters
+   hooked much earlier, aces in relief, top arms on short rest, the bottom
+   of the pen unused) — exactly the miss task #144's hook-frailty/tier-
+   selection mechanisms were built to express, which nulled out for the
+   REGULAR season specifically because regular-season usage is already
+   well-approximated by the pregame plan (see sec 11.23) -- October is where
+   usage deviates hardest from that plan. Scoping: fit playoff-specific
+   policy OFFSETS from 2022-2025 postseason data (small n -- borrow strength
+   from the regular-season tables, don't refit from scratch), flag on for
+   postseason games only, judge on prop-level sanity (starter-outs
+   distributions vs. real playoff starts) rather than SU -- full-stack
+   validation at playoff sample sizes is not possible, this ships on
+   mechanism-correctness grounds like the auto-runner fix. REQUIRES first
+   building a postseason-inclusive PA table/ingestion path, since the
+   current one structurally excludes ALL non-regular-season rows at build
+   time (confirmed above) -- there is currently zero postseason PA data to
+   fit from.
+2. Fold in the known postseason scoring-environment shift (~0.25 runs/game
+   lower than regular season -- pitching concentration, cold) as a small
+   October adjustment, validated against 2022-2025 postseason totals (same
+   prerequisite as #1: needs postseason PA/schedule data not currently kept).
+3. Tag postseason games explicitly in the metrics ledger once any of the
+   above starts producing predictions for them, so a future "why did
+   October's Brier spike" question has a one-word answer instead of
+   silently blending into monthly reads. Note: `daily_props_*.parquet`
+   outputs already carry a `postseason` column per game as of this session's
+   fix, so this is now mostly a matter of reading that column into the
+   ledger's own row rather than adding new plumbing.
+
+## 11.25 Task #144 closed on the lens it was actually built for: the
+starter-outs calibration check (hook KEPT props-path-only), and the
+weather-CRPS re-read (closed null) — two pre-registered reads, one session
+(2026-07-24)
+
+Sec 11.23 pre-registered a decisive next step and an exact decision rule
+before doing any more work on task #144: sec 11.23's game-level SU/Brier
+null never actually tested the metric the hook/tier mechanisms were BUILT to
+move — the starter-outs distribution itself. Ran that check, plus a
+zero-new-compute weather-CRPS re-read "same sitting," per the pre-registered
+spec.
+
+### Read 1: starter-outs calibration — hook mechanism WINS, materially and
+in the exact tail it claims to fix
+
+**Method**: for 794 real, complete-lineup 2025 regular-season games, drove
+the actual two-sided PA-by-PA Monte Carlo (real lineups both sides, real
+starters, K=20 trials/game) with the HOME starter under `hook_context` (task
+#144/#145's frailty-corrected exit mechanism) vs. BASELINE (today's
+deterministic pregame cutoff, `round(expected_innings)` — zero within-game
+variance by construction). Away side kept its real starter fixed the whole
+game (isolates the home starter's own hook-timing measurement without
+letting away-bullpen depth confound it). Compared both against the REAL
+recorded exit inning, on the full outs histogram (CRPS) plus the three
+quantities props actually prices — P(completes 5), P(exits by the 4th),
+P(completes 7) — segmented ONCE by pregame run-value tercile
+(`run_value_screen.run_value` on the starter's own pregame rates), since the
+hook mechanism's whole claim is about the shelled tail.
+
+**Result — decisive, not marginal**:
+
+| | hook-enabled | baseline (deterministic) |
+|---|---|---|
+| CRPS(starter outs), aggregate | **0.747**, 95% CI [0.696,0.799] | 0.908, 95% CI [0.845,0.971] |
+| delta (hook − baseline) | **−0.161, 95% CI [−0.203,−0.120] — CI excludes zero** | |
+
+CRPS improvement holds in **every** run-value tercile, largest in the
+worst-pitchers (shelled-tail) tercile exactly as designed: −0.227 (CI
+[−0.299,−0.155]), vs. −0.140 (mid) and −0.118 (best-pitchers).
+
+The three props-priced quantities (aggregate, real vs. baseline-error vs.
+hook-error):
+
+| metric | real | baseline (err) | hook (err) |
+|---|---|---|---|
+| P(completes 5) | 0.835 | 0.982 (**0.147**) | 0.848 (**0.013**) |
+| P(exits by 4th) | 0.076 | 0.009 (**0.067**) | 0.065 (**0.011**) |
+| P(completes 7) | 0.183 | 0.000 (**0.183**) | 0.289 (**0.106**) |
+
+The deterministic baseline has essentially ZERO early-exit tail by
+construction (a fixed cutoff can't produce a start that ends early) and
+never produces a start past 6 innings at all (histogram: 0% at innings
+7/8/9) — the exact shelled-start and workhorse-start scenarios a prop
+bettor actually cares about were entirely unmodeled before this. In the
+worst-pitchers tercile specifically, P(exits by 4th) error drops from 0.068
+(baseline) to 0.003 (hook) — a ~23x reduction in the single quantity this
+mechanism was purpose-built to fix. Hook does somewhat overshoot P(completes
+7) in aggregate (0.289 vs. real 0.183), but this remains a large net
+improvement over baseline's flat 0.000.
+
+**Decision, per the pre-registered rule**: hook-enabled materially improves
+starter-outs calibration, especially the early-exit tail → **shipped to the
+props path ONLY**. `src/models/props.py` gained `build_hook_table` (same
+frozen 2023-2024-fit policy as task #145/§11.18-11.20, reused verbatim) and
+`hook_table` in `build_pregame_context`'s returned ctx; `generate_game_props`
+now builds `home_hook_context`/`away_hook_context` (cutoff = the same
+`max(1, round(expected_innings))` `sample_bullpen_plan` already uses) and
+passes them into every trial's `simulate_game` call. **Documented, per the
+exact `SHOCK_SIGMA` precedent, as a distribution-realism fix with NO
+game-level win-probability claim** — that lens stays a confirmed null (sec
+11.23) and the mechanism stays OFF in `validate_game_simulator.py`/
+`validate_oracle_vs_predictive.py`'s own oracle backtest, which remains
+byte-identical to before this session.
+
+**A real correctness bug this wiring would otherwise have introduced, caught
+and fixed before shipping**: `props.py`'s pitcher-level prop attribution
+(which real pitcher_id gets credit for a given simulated PA — feeds every
+individual-pitcher K/BB/hits/runs prop) worked by checking whether an
+inning fell at-or-before the STATIC pregame cutoff, then falling back to a
+pregame-built `{inning: pitcher_id}` id_plan otherwise. With hook_context
+live, the starter's real exit inning can now legitimately differ from that
+static cutoff (earlier OR later) every trial — silently misattributing
+relief innings to the wrong reliever (or crediting the starter for innings a
+reliever actually threw, and vice versa) in precisely the trials where the
+hook fired away from the pregame assumption, which is the whole point of
+having it. Fixed by adding an optional `hook_result: dict | None = None`
+out-param to `GameSimulator.simulate_game` (populated in-place with the
+actual `home_hook_inning`/`away_hook_inning`, mirroring how `events` already
+works) so `props.py` can invert `_shift_bullpen_after_hook`'s own shift
+formula (`orig_inning = pregame_cutoff + (real_inning − real_hook_inning)`)
+and look up the CORRECT planned id_plan slot for each real inning — the
+exact same shift the simulator already silently applies to `home_bullpen`/
+`away_bullpen` itself, just applied to the caller's separate id_plan too.
+Confirmed via a 5-game smoke test (`generate_game_props` end-to-end, no
+crashes) that per-pitcher attribution differentiates cleanly between
+starters (~24-26 mean batters faced, matching real 6-inning-ish workloads)
+and single/multi-inning relievers (~3-9 each) with no obviously duplicated
+or dropped innings.
+
+**Tier selection (the other half of task #144 step 4) is explicitly NOT
+deployed by this decision.** Its own specific claim — reliever-inning
+attribution / feeding reliever K and future saves/holds props — was never
+the metric tested this session (this read was scoped to the starter-outs
+question only, per the pre-registered spec). It stays dormant, validated
+on its own behavioral terms (§11.23's leverage/mopup share calibration), off
+by default, pending that separate check in a future session. §11.23's null
+is upgraded from "unresolved lens question" to **partially closed**: closed
+and REVERSED (real win, not a null) on the starter-outs lens specifically;
+still open on the reliever-attribution lens.
+
+### Read 2: weather-CRPS re-read — the null holds, book closed
+
+**Method**: zero new compute. Re-scored the ALREADY-SAVED
+`oracle_vs_predictive_{FULL_PREDICTIVE,ORACLE_WEATHER}.parquet` game-level
+summaries (n=7229, task #143's original decomposition) on CRPS(total runs)
+via the closed-form Gaussian CRPS formula (each arm's per-game mean/std
+defines a Normal forecast for home+away runs) instead of SU/Brier — the
+metric-appropriate lens for a distributional/variance-shape question like
+weather uncertainty, where SU/Brier was always a weak fit. Segmented by a
+pre-registered "forecast-horizon proxy": how climatologically surprising
+each game's REAL recorded weather bucket was for its park/month (P(bucket |
+that park's own real history that month), pooled across all cached seasons,
+via the already-existing `weather_forecast.climatological_bucket_distribution`)
+— low probability = the real weather deviated most from what a
+climatology-only predictive arm assumes, the scenario where that arm is
+most disadvantaged relative to the oracle (real-recorded) arm.
+
+**Result**: CRPS(total) delta (predictive − oracle) = +0.0040, 95% CI
+[−0.0002, +0.0081] — **CI includes zero, null**, and it holds in the
+highest-deviation tercile too (mean climatological probability 0.043 — genuinely
+rare weather for that park/month): delta +0.0050, 95% CI [−0.0016, +0.0117],
+still including zero. Mid and low-deviation terciles: +0.0011 and +0.0058
+respectively, both null.
+
+**Decision, per the pre-registered rule**: the null holds even in the
+high-deviation slice → **book closed on weather**. The 48-hour
+point-forecast-narrowing fix (flagged in task #143's own weather-scoping
+note as a plausible but untested improvement) is NOT justified by this
+result — climatology alone already matches real-recorded weather's CRPS
+contribution closely enough, across the full range of how unusual that
+weather was, that a live forecast API's additional narrowing has no
+demonstrated room to help. No code changed by this read; it is a
+documentation-only closure of an open question.
+
+**One line for the ledger**: *starter-outs calibration is a genuine,
+material win for hook-frailty (props-path-only, no game-level claim);
+weather-CRPS is a clean, tail-inclusive null — the 48-hour forecast fix is
+not worth building.*
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):

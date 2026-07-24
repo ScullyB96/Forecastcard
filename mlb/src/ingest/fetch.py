@@ -320,6 +320,52 @@ def fetch_schedule_day(date: str) -> tuple[Path, Path]:
     return sched_path, lineup_path
 
 
+def fetch_transactions(start_date: str, end_date: str) -> pd.DataFrame:
+    """Real trade transactions from the MLB Stats API's free `/transactions`
+    endpoint (trade-deadline hardening) -- feeds bullpen.build_traded_pitcher_
+    overrides, which seeds a just-traded reliever's usage weight/closer-
+    candidacy from his PRIOR team's role instead of starting him cold on his
+    new team (see bullpen.py's module docstring for why this matters: a
+    reliever's team affiliation, unlike a starter's or batter's, has NO live
+    signal anywhere else in this project -- it's inferred entirely from
+    historical PA rows, which lag real trades by however long ingestion + the
+    player's first appearance for his new team takes).
+
+    Returns one row per (transaction, player) -- typeCode=="TR" (trade) only,
+    "person" field required (the API also emits TEAM-level duplicate records
+    for the same trade with NO player attached, e.g. a bare fromTeam/toTeam
+    pair -- filtered out here). Confirmed directly against the live API:
+    multi-player trades reuse the SAME transaction id across each distinct
+    player (e.g. one 3-for-2 trade produced 3 rows all sharing one id) -- so
+    dedup keys on (transaction_id, pitcher_id), NOT transaction_id alone
+    (an earlier draft of this function deduped by id only and would have
+    silently dropped 2 of 3 players in that exact real trade)."""
+    r = requests.get(f"{MLB_API_BASE}/transactions",
+                      params={"startDate": start_date, "endDate": end_date}, timeout=30)
+    r.raise_for_status()
+    txns = r.json().get("transactions", [])
+    rows = []
+    seen = set()
+    for t in txns:
+        if t.get("typeCode") != "TR" or "person" not in t:
+            continue
+        from_team, to_team = t.get("fromTeam"), t.get("toTeam")
+        if not from_team or not to_team:
+            continue
+        key = (t["id"], t["person"]["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "transaction_id": t["id"], "pitcher_id": t["person"]["id"], "pitcher_name": t["person"]["fullName"],
+            "from_team_id": from_team["id"], "to_team_id": to_team["id"],
+            "date": t.get("effectiveDate", t.get("date")),
+        })
+    return pd.DataFrame(rows, columns=[
+        "transaction_id", "pitcher_id", "pitcher_name", "from_team_id", "to_team_id", "date",
+    ])
+
+
 SAVANT_SPRINT_SPEED_URL = "https://baseballsavant.mlb.com/leaderboard/sprint_speed"
 
 

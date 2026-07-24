@@ -51,8 +51,9 @@ import numpy as np
 import pandas as pd
 
 from src.ingest.build_pa_table import build_and_save_pa_table
-from src.ingest.fetch import fetch_schedule_day
+from src.ingest.fetch import fetch_schedule_day, fetch_transactions
 from src.ingest.fetch_rotowire_lineups import build_todays_rotowire_lineups, rotowire_lineup_for_team
+from src.models.bullpen import build_traded_pitcher_overrides, TRADE_OVERRIDE_LOOKBACK_DAYS
 from src.models.lineup_projection import project_lineup_platoon_aware
 from src.models.props import build_pregame_context, generate_game_props
 from src.models.validate_game_simulator import predominant_hand
@@ -60,10 +61,20 @@ from src.pipeline.daily_update import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
 
+POSTSEASON_GAME_TYPES = {"F", "D", "L", "W"}  # wild card, division series, league
+                                                # championship, world series -- confirmed
+                                                # against this project's own schedule data
+                                                # (see MODEL_DOCUMENTATION.md sec 11.24).
+                                                # Deliberately excludes "S"(spring training)/
+                                                # "E"(exhibition)/"A"(all-star) -- real games
+                                                # this project has never modeled or intends to.
+GAME_TYPES_TO_PREDICT = {"R"} | POSTSEASON_GAME_TYPES
+
+
 def games_for_date(target_date: str) -> pd.DataFrame:
     season = int(target_date[:4])
     sched = pd.read_parquet(DATA_RAW / f"schedule_{season}.parquet")
-    return sched[(sched["date"] == target_date) & (sched["game_type"] == "R")]
+    return sched[(sched["date"] == target_date) & (sched["game_type"].isin(GAME_TYPES_TO_PREDICT))]
 
 
 def lineup_for_game(schedule: pd.DataFrame, lineups: pd.DataFrame, pitcher_hand: pd.Series, game_pk: int,
@@ -124,6 +135,30 @@ if __name__ == "__main__":
     schedule = pd.read_parquet(DATA_RAW / f"schedule_{season}.parquet")
     lineups = pd.read_parquet(DATA_RAW / f"lineups_{season}.parquet")
 
+    # Trade-deadline hardening: a reliever's team affiliation (unlike a starter's
+    # or batter's) has NO live signal anywhere else in this pipeline -- it's
+    # inferred entirely from historical PA rows, which lag a real trade by
+    # however long it takes him to actually pitch (and get ingested) for his
+    # new team. Real trade data from the free MLB Stats API's /transactions
+    # endpoint fixes this by seeding a just-traded reliever's usage weight/
+    # closer-candidacy from his established PRIOR role (see bullpen.py's
+    # module docstring). Same resilience convention as the RotoWire fetch
+    # above: a network hiccup here must not break the whole daily run.
+    print("fetching recent trades (trade-deadline hardening)...", flush=True)
+    try:
+        lookback_start = str(_dt.date.today() - _dt.timedelta(days=TRADE_OVERRIDE_LOOKBACK_DAYS))
+        transactions = fetch_transactions(lookback_start, target_date)
+        team_id_to_abbrev = pd.concat([
+            schedule[["home_team_id", "home_team"]].rename(columns={"home_team_id": "id", "home_team": "abbrev"}),
+            schedule[["away_team_id", "away_team"]].rename(columns={"away_team_id": "id", "away_team": "abbrev"}),
+        ]).drop_duplicates(subset="id").set_index("id")["abbrev"].to_dict()
+        traded_overrides = build_traded_pitcher_overrides(transactions, team_id_to_abbrev, target_date)
+        print(f"  {len(traded_overrides)} pitcher(s) with an active trade override", flush=True)
+    except Exception as e:
+        print(f"  trade fetch failed ({e}) -- proceeding without overrides for today", flush=True)
+        traded_overrides = {}
+    ctx["traded_overrides"] = traded_overrides
+
     # RotoWire confirmed/expected lineups -- a real, editorially-curated
     # middle tier between "real posted MLB lineup" and this project's own
     # historical-recency projection (see fetch_rotowire_lineups.py). Only
@@ -182,19 +217,29 @@ if __name__ == "__main__":
         print(f"  {row.away_team} @ {row.home_team}: {row.away_probable_pitcher_name} vs "
               f"{row.home_probable_pitcher_name}{flag_str}", flush=True)
 
+        is_postseason = row.game_type in POSTSEASON_GAME_TYPES
         try:
             props = generate_game_props(
                 ctx, season, row.game_pk, row.home_team, row.away_team, target_date,
                 home_ids, away_ids, int(home_pid), int(away_pid),
                 venue_name=row.venue_name, n_trials=n_trials, rng=rng,
+                postseason=is_postseason,
             )
         except ValueError as e:
             print(f"    skipped: {e}", flush=True)
             continue
+        if props["debut_fallback_pids"]:
+            # task #149: a true debut with zero cached history anywhere used the
+            # generic (below-league-average) debut profile instead of crashing
+            # this game -- flagged, not hidden, same transparency convention as
+            # the lineup-source flags above.
+            print(f"    note: player id(s) {props['debut_fallback_pids']} had no cached history "
+                  f"(true MLB debut) -- used generic debut-cohort profile", flush=True)
         results.append({
             "game_pk": row.game_pk, "matchup": f"{row.away_team} @ {row.home_team}",
             "home_lineup_source": home_source, "away_lineup_source": away_source,
-            "real_weather": has_real_weather, **props["game_props"],
+            "real_weather": has_real_weather, "postseason": is_postseason,
+            "used_debut_fallback": bool(props["debut_fallback_pids"]), **props["game_props"],
         })
 
     summary = pd.DataFrame(results)

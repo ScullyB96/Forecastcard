@@ -83,6 +83,9 @@ from src.models.bullpen import (
     nearest_prior_pitcher_snapshot,
     sample_bullpen_plan,
 )
+from src.models.bullpen_usage_policy import (
+    attach_margin, build_starter_hook_events, fit_hook_policy, build_tier_policy_dicts,
+)
 from src.models.game_simulator import OUTCOMES, GameSimulator
 from src.models.lineup_projection import project_lineup_platoon_aware
 from src.models.umpire_factor import resolve_umpire_factor
@@ -97,10 +100,33 @@ DECISION_WEATHER_SAMPLE = 101  # ad-hoc CRN tag, local to this validator (not on
                                 # in this file's own per-trial loop)
 
 
+HOOK_TABLE_FIT_SEASONS = {2023, 2024}  # matches task #145's own fit period exactly --
+                                        # keep this decomposition's hook-enabled comparison
+                                        # restricted to test seasons OUTSIDE this set (2025)
+                                        # to stay genuinely walk-forward-safe, not in-sample.
+
+
+def build_hook_table(pa: pd.DataFrame) -> dict:
+    """Task #144 step 3: the same frozen starter-hook policy fit in task #145
+    (fit_hook_policy on 2023-2024), reused here to wire hook-frailty into the
+    decomposition's PREDICTIVE bullpen arm. Returns the (inning_b,pa_count_b,
+    runs_allowed_b,margin_b)->p_exit dict GameSimulator.simulate_game's
+    home_hook_context/away_hook_context expects."""
+    pa_m = attach_margin(pa)
+    events = build_starter_hook_events(pa_m)
+    fit_events = events[events["season"].isin(HOOK_TABLE_FIT_SEASONS)]
+    hook_table_df = fit_hook_policy(fit_events)
+    return hook_table_df.set_index(["inning_b", "pa_count_b", "runs_allowed_b", "margin_b"])["p_exit"].to_dict()
+
+
 def build_predictive_tables(pa: pd.DataFrame, shared: dict, all_schedules: pd.DataFrame) -> dict:
     """Every additional table the PREDICTIVE side of each of the 4 dimensions
     needs, beyond what build_shared_tables already provides for the oracle
     side. See module docstring for what each feeds."""
+    print("[predictive] building starter-hook table (task #144/#145)...", flush=True)
+    hook_table = build_hook_table(pa)
+    print("[predictive] building reliever-tier policy tables (task #144 step 4)...", flush=True)
+    tier_by_margin, closer_by_situation = build_tier_policy_dicts(pa)
     print("[predictive] building bullpen snapshot + expected starter innings...", flush=True)
     bullpen_snap = build_bullpen_snapshot(pa, shared["park_factors_long"])
     expected_innings = build_expected_starter_innings(pa).set_index(["pitcher", "game_pk"])["expected_innings"]
@@ -129,16 +155,38 @@ def build_predictive_tables(pa: pd.DataFrame, shared: dict, all_schedules: pd.Da
         all_appearance_log=all_appearance_log, closer_log=closer_log, catcher_log=catcher_log,
         historical_game_buckets=historical_game_buckets, venue_by_team_season=venue_by_team_season,
         pitcher_snap_dates=pitcher_snap_dates, batter_snap_dates=batter_snap_dates,
+        hook_table=hook_table, tier_by_margin=tier_by_margin, closer_by_situation=closer_by_situation,
     )
 
 
 def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_games: int, n_trials: int,
                        sources: dict, shock_sigma: float = SHOCK_SIGMA, seed: int = 42,
-                       output_path=None, verbose: bool = True) -> pd.DataFrame:
+                       output_path=None, verbose: bool = True,
+                       hook_frailty_enabled: bool = False,
+                       tier_selection_enabled: bool = False) -> pd.DataFrame:
     """sources: {"lineup": "oracle"|"predictive", "bullpen": ..., "weather": ..., "catcher": ...}.
     CRN-paired throughout (crn_game_pk=game_pk, crn_trial=trial for every
     simulate_game call) so any two configs that agree on a dimension's source
-    stay synchronized on that dimension's own random draws."""
+    stay synchronized on that dimension's own random draws.
+
+    tier_selection_enabled: task #144 step 4 -- when True AND sources["bullpen"]
+    is "predictive", reliever CHOICE (not just the starter's hook timing) also
+    becomes state-conditioned: every post-starter reliever is drawn live from
+    the walk-forward roster, conditioned on that trial's own current margin/
+    save-situation via the validated tier policy (build_tier_policy_dicts).
+    Combines with hook_frailty_enabled if both are True. Same walk-forward
+    caveat as hook_frailty_enabled: TIER_POLICY_FIT_SEASONS={2023,2024} (see
+    bullpen_usage_policy.py) -- only trust this on test_seasons={2025}.
+
+    hook_frailty_enabled: task #144 step 3 -- when True AND sources["bullpen"]
+    is "predictive", the state-conditioned starter-hook mechanism (task #144/
+    #145) is wired into that game's simulate_game call, using the SAME
+    `expected_innings`-derived cutoff sample_bullpen_plan already assumed for
+    the pregame reliever sequence (see build_hook_table). Default False keeps
+    every existing caller byte-for-byte identical. IMPORTANT: build_hook_table
+    fits on 2023-2024 (HOOK_TABLE_FIT_SEASONS) -- only trust this flag's
+    result on test_seasons genuinely outside that set (i.e. 2025), or it's
+    an in-sample read, not a real held-out test."""
     pa = shared["pa"]
     park_factors_wide = shared["park_factors_wide"]
     hfa_factors_by_season = shared["hfa_factors_by_season"]
@@ -183,6 +231,9 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
     venue_by_team_season = predictive["venue_by_team_season"]
     pitcher_snap_dates = predictive["pitcher_snap_dates"]
     batter_snap_dates = predictive["batter_snap_dates"]
+    hook_table = predictive["hook_table"]
+    tier_by_margin = predictive["tier_by_margin"]
+    closer_by_situation = predictive["closer_by_situation"]
 
     rng = np.random.default_rng(seed)
 
@@ -366,10 +417,32 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
             away_roster_profiles, away_roster_weights = build_roster_profiles(away_team)
             home_exp_ip = expected_innings.get((home_pitcher_id, game_pk), 5.4)
             away_exp_ip = expected_innings.get((away_pitcher_id, game_pk), 5.4)
+            # task #144 step 3: same cutoff sample_bullpen_plan itself derives from
+            # expected_innings (max(1, round(...))) -- reused here so the hook
+            # mechanism's "pregame-assumed cutoff" matches EXACTLY what the reliever
+            # sequence below was actually built around.
+            home_hook_cutoff = max(1, round(home_exp_ip))
+            away_hook_cutoff = max(1, round(away_exp_ip))
             home_fallback = fallback_profile(home_team)
             away_fallback = fallback_profile(away_team)
             home_closer_id = identify_closer(closer_log, home_team, game_date)
             away_closer_id = identify_closer(closer_log, away_team, game_date)
+            # task #144 step 4: the STATIC (per-game, not per-trial) half of each side's
+            # tier context -- roster_weights/profile_lookup/closer_id/fallback_profile
+            # are the same walk-forward inputs every trial draws from; "cutoff" reuses
+            # the SAME expected_innings-derived value the hook context (if any) uses.
+            home_tier_context_base = {
+                "cutoff": home_hook_cutoff, "tier_by_margin": tier_by_margin,
+                "closer_by_situation": closer_by_situation, "roster_weights": home_roster_weights,
+                "profile_lookup": lambda pid: home_roster_profiles[pid],
+                "closer_id": home_closer_id, "fallback_profile": home_fallback,
+            }
+            away_tier_context_base = {
+                "cutoff": away_hook_cutoff, "tier_by_margin": tier_by_margin,
+                "closer_by_situation": closer_by_situation, "roster_weights": away_roster_weights,
+                "profile_lookup": lambda pid: away_roster_profiles[pid],
+                "closer_id": away_closer_id, "fallback_profile": away_fallback,
+            }
 
         # --- CATCHER: oracle (real starting catcher) vs predictive (recency-inferred) ---
         catcher_source = sources["catcher"]
@@ -408,6 +481,8 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
                             ttop_factors=ttop_factors[season], shock_sigma=shock_sigma)
         sim_home, sim_away = [], []
         for trial in range(n_trials):
+            home_hook_context = away_hook_context = None
+            home_tier_context = away_tier_context = None
             if bullpen_source == "oracle":
                 home_bullpen_plan, away_bullpen_plan = home_bullpen_fixed, away_bullpen_fixed
             else:
@@ -419,6 +494,12 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
                     rng, away_pitcher, away_exp_ip, away_roster_weights,
                     lambda pid: away_roster_profiles[pid], away_fallback, closer_id=away_closer_id,
                 )
+                if hook_frailty_enabled:
+                    home_hook_context = {"hook_table": hook_table, "cutoff": home_hook_cutoff}
+                    away_hook_context = {"hook_table": hook_table, "cutoff": away_hook_cutoff}
+                if tier_selection_enabled:
+                    home_tier_context = home_tier_context_base
+                    away_tier_context = away_tier_context_base
 
             if weather_source == "oracle":
                 weather_factors_this_trial = weather_factors_fixed
@@ -442,6 +523,8 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
                 home_sb_rates=home_sb_rates, away_sb_rates=away_sb_rates,
                 hfa_factors=hfa_factors_by_season.get(season),
                 crn_game_pk=game_pk, crn_trial=trial,
+                home_hook_context=home_hook_context, away_hook_context=away_hook_context,
+                home_tier_context=home_tier_context, away_tier_context=away_tier_context,
             )
             sim_home.append(h)
             sim_away.append(a)
