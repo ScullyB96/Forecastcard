@@ -1,0 +1,627 @@
+"""The deliverable the whole project was built toward: not just a final
+score, but a full per-at-bat Monte Carlo simulation of one specific game,
+aggregated into per-batter, per-pitcher, per-inning, and per-game prop
+probabilities -- the same "predict every inning, every player, every at bat"
+system originally asked for.
+
+Uses the PREDICTIVE (live-usable) path throughout, not the oracle backtest:
+each team's real probable lineup/starter, park factors, this game's actual
+weather, a roster-aware sampled bullpen (starter's own walk-forward projected
+innings, then a SPECIFIC reliever sampled per inning -- weighted by recent
+usage and rest-day availability for this exact date, resampled fresh every
+trial -- see bullpen.py's sample_bullpen_plan), and dynamic
+blowout/position-player-pitching substitution once a team is down 8+ runs in
+the 8th inning or later (see blowout.py). This is the same machinery
+validated in validate_predictive_bullpen.py and validate_game_simulator.py,
+just run once per game at higher trial count and with full event-level
+tracking turned on (see game_simulator.py's `events` parameter) instead of
+only the final score.
+
+First-version scope, clearly flagged: RBI is approximated as runs scored on
+that specific PA (our transition table's own runs_scored output) -- close to
+but not identical to official MLB RBI rules in every edge case (e.g. a
+run-scoring double play charges no RBI in real scoring), a reasonable
+simplification given this project's PA-level, not out-by-out, event
+granularity. Stolen bases, defensive plays, and pitcher win/loss are out of
+scope -- this only covers what the underlying simulation actually models.
+"""
+
+import numpy as np
+import pandas as pd
+
+from src.models.base_out_transitions import TransitionTable
+from src.models.blowout import build_position_player_profile
+from src.models.bullpen import (
+    build_all_appearance_log,
+    build_bullpen_snapshot,
+    build_closer_appearance_log,
+    build_expected_starter_innings,
+    build_relief_appearance_log,
+    build_team_bullpen_roster,
+    identify_closer,
+    nearest_prior_bullpen,
+    nearest_prior_pitcher_snapshot,
+    sample_bullpen_plan,
+)
+from src.models.game_simulator import (
+    OUTCOMES,
+    GameSimulator,
+    build_league_rates_by_season,
+    build_state_factors_by_season,
+    build_wide_platoon_multipliers,
+    build_wide_pregame_rates,
+)
+from src.models.catcher_framing import (
+    build_catcher_appearance_log,
+    build_catcher_framing_factors_by_season,
+    identify_starting_catcher,
+    resolve_catcher_factor,
+)
+from src.models.expected_stats import (
+    build_pregame_bat_speed,
+    build_pregame_sprint_speed,
+    load_bat_speed_by_season,
+    player_game_bacon_gb_snapshot,
+    player_game_barrel_snapshot,
+    player_game_gb_fb_rate_snapshot,
+    player_game_groundball_rate_snapshot,
+    player_game_pulled_air_snapshot,
+    player_game_xbacon_snapshot,
+)
+from src.models.park_factors import build_outcome_park_factors, build_hfa_factors
+from src.models.spray import build_pull_rate_by_season, build_pull_rate_snapshot, resolve_batter_pull_tercile
+from src.models.spray import attach_pull_tercile_column
+from src.models.ttop import build_ttop_factors_by_season
+from src.models.umpire_factor import build_umpire_factors_by_season, resolve_live_umpire_factor
+from src.models.defense_factor import resolve_defense_factor, team_game_defense_snapshot
+from src.models.baserunning import build_season_sb_stats, build_pregame_sb_rates, resolve_sb_rates
+from src.models.weather import attach_weather_bucket, bucket_weather, build_weather_factors_by_season
+from src.models.weather_forecast import build_historical_game_buckets, resolve_weather_distribution, sample_weather_bucket
+from src.models.validate_game_simulator import build_profile, player_game_snapshot, predominant_hand, SHOCK_SIGMA
+from src.utils.paths import DATA_PROCESSED, DATA_RAW
+
+HIT_OUTCOMES = {"single", "double", "triple", "home_run"}
+TOTAL_BASES = {"single": 1, "double": 2, "triple": 3, "home_run": 4}
+N_TRIALS = 1000
+
+
+def build_pregame_context(pa: pd.DataFrame) -> dict:
+    """Every walk-forward table the props generator needs, built once and
+    reused across as many games as you want to generate props for -- the
+    expensive part; generating props for one more game after this is cheap."""
+    # park-neutralize batter/pitcher rates BEFORE this project's own per-game
+    # park_factors multiplier acts on them below (see park_factors_wide) --
+    # otherwise a park effect gets double-counted (true_talent.build_pregame_rates).
+    park_factors_long = build_outcome_park_factors(pa)
+    batter_wide = build_wide_pregame_rates(pa, "batter", park_factors_long)
+    pitcher_wide = build_wide_pregame_rates(pa, "pitcher", park_factors_long)
+    all_schedules = pd.concat(
+        [pd.read_parquet(p) for p in sorted(DATA_RAW.glob("schedule_*.parquet"))], ignore_index=True
+    )
+    all_lineups = pd.concat(
+        [pd.read_parquet(p) for p in sorted(DATA_RAW.glob("lineups_*.parquet"))], ignore_index=True
+    )
+    # defense composite is walk-forward PER SEASON (uses that season's own
+    # prior-season OAA) -- team_game_defense_snapshot doesn't filter by season
+    # itself, so each call is restricted to that season's own game_pks (via
+    # the PA table's own season tagging) before building, else a game_pk from
+    # a DIFFERENT season would silently get the wrong season's walk-forward
+    # OAA. Concatenated afterward -- game_pk is globally unique across
+    # seasons, so no collision risk.
+    defense_snap_frames = []
+    for season in sorted(pa["season"].unique()):
+        season_game_pks = pa.loc[pa["season"] == season, "game_pk"].unique()
+        season_lineups = all_lineups[all_lineups["game_pk"].isin(season_game_pks)]
+        season_schedule = all_schedules[all_schedules["game_pk"].isin(season_game_pks)]
+        defense_snap_frames.append(team_game_defense_snapshot(season_lineups, season_schedule, season))
+    defense_snap = pd.concat(defense_snap_frames, ignore_index=True)
+    pull_rate_pa = build_pull_rate_by_season(pa)
+    pull_rate_snapshot = build_pull_rate_snapshot(pa, pull_rate_pa)
+    pa_with_weather = attach_weather_bucket(pa, all_schedules)
+    pa_with_weather = attach_pull_tercile_column(pa_with_weather, pull_rate_pa)
+    pitcher_snap = player_game_snapshot(pitcher_wide, "pitcher")
+    batter_snap = player_game_snapshot(batter_wide, "batter")
+    xbacon_snap = player_game_xbacon_snapshot(pa)
+    barrel_snap = player_game_barrel_snapshot(pa)
+    pulled_air_snap = player_game_pulled_air_snapshot(pa)
+    bacon_gb_snap = player_game_bacon_gb_snapshot(pa)
+    gb_rate_snap = player_game_groundball_rate_snapshot(pa)
+    gbfb_pitcher_snap = player_game_gb_fb_rate_snapshot(pa)  # task #120, GB/FB pitcher HR-share -- KEPT, real full-stack win
+    # season-level (not per-game), so precompute for every season present rather
+    # than per-game like the other expected-stats snapshots above.
+    sprint_speed_by_season = {season: build_pregame_sprint_speed(season) for season in pa["season"].unique()}
+    # season-level (not per-game), same convention as sprint_speed_by_season above.
+    bat_speed_raw = load_bat_speed_by_season(sorted(pa["season"].unique()))
+    bat_speed_by_season = {season: build_pregame_bat_speed(bat_speed_raw, season) for season in pa["season"].unique()}
+    # season-level (not per-game), same convention as sprint_speed_by_season above.
+    season_sb_stats = build_season_sb_stats(pa)
+    sb_rates_by_season = {season: build_pregame_sb_rates(season_sb_stats, season) for season in pa["season"].unique()}
+    game_dates = pa[["game_pk", "game_date"]].drop_duplicates()
+    return dict(
+        league_rates=build_league_rates_by_season(pa),
+        state_factors=build_state_factors_by_season(pa),
+        ttop_factors=build_ttop_factors_by_season(pa),
+        pull_rate_snapshot=pull_rate_snapshot,
+        batter_platoon=build_wide_platoon_multipliers(pa, "batter").set_index(["batter", "season"]),
+        pitcher_platoon=build_wide_platoon_multipliers(pa, "pitcher").set_index(["pitcher", "season"]),
+        batter_hand=predominant_hand(pa, "batter"),
+        pitcher_hand=predominant_hand(pa, "pitcher"),
+        park_factors_wide=park_factors_long.pivot(
+            index=["team", "season"], columns="outcome", values="park_factor"
+        ),
+        hfa_factors_by_season=build_hfa_factors(pa),
+        weather_factors_by_season=build_weather_factors_by_season(pa_with_weather),
+        catcher_factors_by_season=build_catcher_framing_factors_by_season(sorted(pa["season"].unique())),
+        catcher_log=build_catcher_appearance_log(pa),
+        umpire_factors_by_season=build_umpire_factors_by_season(sorted(pa["season"].unique())),
+        game_weather=all_schedules[["game_pk", "weather_condition", "weather_temp", "weather_wind"]]
+        .drop_duplicates("game_pk").set_index("game_pk"),
+        historical_game_buckets=build_historical_game_buckets(all_schedules),
+        bullpen_snap=build_bullpen_snapshot(pa, park_factors_long),
+        expected_innings=build_expected_starter_innings(pa).set_index(["pitcher", "game_pk"])["expected_innings"],
+        relief_log=build_relief_appearance_log(pa),
+        all_appearance_log=build_all_appearance_log(pa),
+        closer_log=build_closer_appearance_log(pa),
+        blowout_profile=build_position_player_profile(pa),
+        batter_snap=batter_snap,
+        batter_snap_dates=batter_snap.merge(game_dates, on="game_pk"),
+        pitcher_snap=pitcher_snap,
+        pitcher_snap_dates=pitcher_snap.merge(game_dates, on="game_pk"),
+        xbacon_snap=xbacon_snap,
+        xbacon_snap_dates=xbacon_snap.merge(game_dates, on="game_pk"),
+        barrel_snap=barrel_snap,
+        barrel_snap_dates=barrel_snap.merge(game_dates, on="game_pk"),
+        pulled_air_snap=pulled_air_snap,
+        pulled_air_snap_dates=pulled_air_snap.merge(game_dates, on="game_pk"),
+        bacon_gb_snap=bacon_gb_snap,
+        bacon_gb_snap_dates=bacon_gb_snap.merge(game_dates, on="game_pk"),
+        gb_rate_snap=gb_rate_snap,
+        gb_rate_snap_dates=gb_rate_snap.merge(game_dates, on="game_pk"),
+        gbfb_pitcher_snap=gbfb_pitcher_snap,
+        gbfb_pitcher_snap_dates=gbfb_pitcher_snap.merge(game_dates, on="game_pk"),
+        sprint_speed_by_season=sprint_speed_by_season,
+        bat_speed_by_season=bat_speed_by_season,
+        sb_rates_by_season=sb_rates_by_season,
+        # defense_snap already has its own team/game_date columns (keyed by
+        # (game_pk, team), not by an individual player) -- no separate
+        # "_dates" merge needed, unlike the player-keyed snapshots above; it's
+        # already in the exact shape nearest_prior_bullpen expects.
+        defense_snap=defense_snap,
+        transitions=TransitionTable(pa),
+    )
+
+
+def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, away_team: str, game_date: str,
+                         home_ids: list, away_ids: list, home_pitcher_id: int, away_pitcher_id: int,
+                         venue_name: str | None = None,
+                         n_trials: int = N_TRIALS, rng: np.random.Generator | None = None) -> dict:
+    """Run n_trials full-game Monte Carlo simulations (predictive bullpen,
+    this game's real park + weather) and return aggregated prop
+    probabilities. home_ids/away_ids: 9 batter IDs in real batting order.
+    venue_name: needed only when this game's real weather isn't posted yet --
+    used to resolve a forecast/climatological fallback (see weather_forecast.py).
+    """
+    rng = rng or np.random.default_rng()
+    batter_snap = ctx["batter_snap"][ctx["batter_snap"]["game_pk"] == game_pk].set_index("batter")
+    pitcher_snap = ctx["pitcher_snap"][ctx["pitcher_snap"]["game_pk"] == game_pk].set_index("pitcher")
+    xbacon_snap = ctx["xbacon_snap"][ctx["xbacon_snap"]["game_pk"] == game_pk].set_index("batter")
+    barrel_snap = ctx["barrel_snap"][ctx["barrel_snap"]["game_pk"] == game_pk].set_index("batter")
+    pulled_air_snap = ctx["pulled_air_snap"][ctx["pulled_air_snap"]["game_pk"] == game_pk].set_index("batter")
+    bacon_gb_snap = ctx["bacon_gb_snap"][ctx["bacon_gb_snap"]["game_pk"] == game_pk].set_index("batter")
+    gb_rate_snap = ctx["gb_rate_snap"][ctx["gb_rate_snap"]["game_pk"] == game_pk].set_index("batter")
+    gbfb_pitcher_snap = ctx["gbfb_pitcher_snap"][ctx["gbfb_pitcher_snap"]["game_pk"] == game_pk].set_index("pitcher")
+    speed_snap = ctx["sprint_speed_by_season"].get(season, pd.Series(dtype=float))
+    bat_speed_snap = ctx["bat_speed_by_season"].get(season, pd.Series(dtype=float))
+
+    def batter_profile(pid):
+        # exact game_pk match works for a BACKTEST (a historical game_pk
+        # always has real PA data for its actual participants); a genuinely
+        # future, never-played game_pk never will, so fall back to this
+        # batter's own most recent pregame snapshot as of this date.
+        if pid in batter_snap.index:
+            row = batter_snap.loc[pid]
+        else:
+            row = nearest_prior_pitcher_snapshot(ctx["batter_snap_dates"], pid, game_date, game_pk)
+            if row is None:
+                return None
+        key = (pid, season)
+        prow = ctx["batter_platoon"].loc[key] if key in ctx["batter_platoon"].index else None
+        hand = ctx["batter_hand"].get(pid, "R")
+        tercile = resolve_batter_pull_tercile(ctx["pull_rate_snapshot"], pid, hand, game_date, game_pk)
+        if pid in xbacon_snap.index:
+            xbacon = xbacon_snap.loc[pid, "pregame_xbacon"]
+        else:
+            xrow = nearest_prior_pitcher_snapshot(ctx["xbacon_snap_dates"], pid, game_date, game_pk)
+            xbacon = xrow["pregame_xbacon"] if xrow is not None else None
+        if pid in barrel_snap.index:
+            barrel = barrel_snap.loc[pid, "pregame_barrel_rate"]
+        else:
+            brow = nearest_prior_pitcher_snapshot(ctx["barrel_snap_dates"], pid, game_date, game_pk)
+            barrel = brow["pregame_barrel_rate"] if brow is not None else None
+        if pid in pulled_air_snap.index:
+            pulled_air = pulled_air_snap.loc[pid, "pregame_pulled_air_rate"]
+        else:
+            parow = nearest_prior_pitcher_snapshot(ctx["pulled_air_snap_dates"], pid, game_date, game_pk)
+            pulled_air = parow["pregame_pulled_air_rate"] if parow is not None else None
+        if pid in bacon_gb_snap.index:
+            bacon_gb = bacon_gb_snap.loc[pid, "pregame_bacon_gb"]
+        else:
+            bgrow = nearest_prior_pitcher_snapshot(ctx["bacon_gb_snap_dates"], pid, game_date, game_pk)
+            bacon_gb = bgrow["pregame_bacon_gb"] if bgrow is not None else None
+        if pid in gb_rate_snap.index:
+            gb_rate = gb_rate_snap.loc[pid, "pregame_gb_rate"]
+        else:
+            gbrow = nearest_prior_pitcher_snapshot(ctx["gb_rate_snap_dates"], pid, game_date, game_pk)
+            gb_rate = gbrow["pregame_gb_rate"] if gbrow is not None else None
+        sprint_speed = speed_snap.loc[pid] if pid in speed_snap.index else None
+        bat_speed = bat_speed_snap.loc[pid] if pid in bat_speed_snap.index else None
+        return build_profile(row, prow, hand, pull_tercile=tercile, pregame_xbacon=xbacon, pregame_barrel_rate=barrel,
+                              pregame_bacon_gb=bacon_gb, pregame_sprint_speed=sprint_speed, pregame_gb_rate=gb_rate,
+                              pregame_bat_speed=bat_speed, pregame_pulled_air_rate=pulled_air)
+
+    def _pitcher_gb_fb(pid):
+        if pid in gbfb_pitcher_snap.index:
+            row = gbfb_pitcher_snap.loc[pid]
+            return row["pregame_gb_rate_pitcher"], row["pregame_fb_rate_pitcher"]
+        row = nearest_prior_pitcher_snapshot(ctx["gbfb_pitcher_snap_dates"], pid, game_date, game_pk)
+        if row is None:
+            return None, None
+        return row["pregame_gb_rate_pitcher"], row["pregame_fb_rate_pitcher"]
+
+    def pitcher_profile(pid):
+        if pid in pitcher_snap.index:
+            row = pitcher_snap.loc[pid]
+        else:
+            row = nearest_prior_pitcher_snapshot(ctx["pitcher_snap_dates"], pid, game_date, game_pk)
+            if row is None:
+                return None
+        key = (pid, season)
+        prow = ctx["pitcher_platoon"].loc[key] if key in ctx["pitcher_platoon"].index else None
+        gb_p, fb_p = _pitcher_gb_fb(pid)
+        return build_profile(row, prow, ctx["pitcher_hand"].get(pid, "R"),
+                              pregame_gb_rate_pitcher=gb_p, pregame_fb_rate_pitcher=fb_p)
+
+    def roster_pitcher_profile(pid):
+        # a sampled roster reliever may not have pitched in THIS exact game
+        # (unlike the two starters), so fall back to their own most recent
+        # pregame snapshot as of this date -- see nearest_prior_pitcher_snapshot.
+        if pid in pitcher_snap.index:
+            row = pitcher_snap.loc[pid]
+        else:
+            row = nearest_prior_pitcher_snapshot(ctx["pitcher_snap_dates"], pid, game_date, game_pk)
+            if row is None:
+                return None
+        key = (pid, season)
+        prow = ctx["pitcher_platoon"].loc[key] if key in ctx["pitcher_platoon"].index else None
+        gb_p, fb_p = _pitcher_gb_fb(pid)
+        return build_profile(row, prow, ctx["pitcher_hand"].get(pid, "R"),
+                              pregame_gb_rate_pitcher=gb_p, pregame_fb_rate_pitcher=fb_p)
+
+    home_lineup = [batter_profile(pid) for pid in home_ids]
+    away_lineup = [batter_profile(pid) for pid in away_ids]
+    home_pitcher = pitcher_profile(home_pitcher_id)
+    away_pitcher = pitcher_profile(away_pitcher_id)
+
+    # real per-runner stolen-base attempt/success rates this game (see
+    # baserunning.py) -- the BATTING team's own skill, resolved directly from
+    # the lineup (real or projected) already built above, keyed by lineup index.
+    sb_rates_this_season = ctx["sb_rates_by_season"].get(season, pd.DataFrame(columns=["player", "attempt_rate", "success_rate"]))
+    home_sb_rates = resolve_sb_rates(sb_rates_this_season, home_ids)
+    away_sb_rates = resolve_sb_rates(sb_rates_this_season, away_ids)
+    missing = [pid for pid, prof in zip(home_ids + away_ids, home_lineup + away_lineup) if prof is None]
+    if home_pitcher is None:
+        missing.append(home_pitcher_id)
+    if away_pitcher is None:
+        missing.append(away_pitcher_id)
+    if missing:
+        raise ValueError(f"no pregame snapshot for player id(s) {missing} as of {game_date} "
+                          f"(likely an MLB debut with zero PA history in our cached data)")
+
+    park_key = (home_team, season)
+    park_factors = None
+    if park_key in ctx["park_factors_wide"].index:
+        row = ctx["park_factors_wide"].loc[park_key]
+        park_factors = {o: row.get(o, 1.0) if pd.notna(row.get(o, 1.0)) else 1.0 for o in OUTCOMES}
+    hfa_factors = ctx["hfa_factors_by_season"].get(season)
+
+    # real posted weather is FIXED for every trial (we know it); missing
+    # weather is instead RESOLVED ONCE into a distribution here (the one
+    # part of this that costs a network call, if a forecast is available)
+    # and then SAMPLED FRESH each trial below -- propagating real day-to-day
+    # weather uncertainty into the simulated outcome distribution, same as
+    # every other stochastic element in this project.
+    weather_factors = None
+    weather_dist = None
+    if game_pk in ctx["game_weather"].index:
+        wx = ctx["game_weather"].loc[game_pk]
+        bucket = bucket_weather(wx["weather_condition"], wx["weather_temp"], wx["weather_wind"])
+        if bucket is not None:
+            weather_factors = ctx["weather_factors_by_season"].get(season, {}).get(bucket)
+        elif venue_name is not None:
+            weather_dist = resolve_weather_distribution(ctx["historical_game_buckets"], venue_name, game_date)
+
+    def fallback_profile(team):
+        # the old flat pooled aggregate rate -- only used if a team has no
+        # roster/rest history at all (e.g. earliest games of a season).
+        row = nearest_prior_bullpen(ctx["bullpen_snap"], team, game_date, game_pk)
+        if row is None:
+            return None
+        neutral = {o: 1.0 for o in OUTCOMES}
+        return {"rates": {o: row[f"pregame_rate_{o}"] for o in OUTCOMES}, "hand": "R",
+                "same_mult": neutral, "opp_mult": neutral}
+
+    def build_roster_profiles(team):
+        raw = build_team_bullpen_roster(ctx["relief_log"], ctx["all_appearance_log"], team, game_date)
+        profiles, weights = {}, {}
+        for pid, w in raw.items():
+            prof = roster_pitcher_profile(pid)
+            if prof is not None:
+                profiles[pid] = prof
+                weights[pid] = w
+        return profiles, weights
+
+    home_roster_profiles, home_roster_weights = build_roster_profiles(home_team)
+    away_roster_profiles, away_roster_weights = build_roster_profiles(away_team)
+    home_exp_ip = ctx["expected_innings"].get((home_pitcher_id, game_pk), 5.4)
+    away_exp_ip = ctx["expected_innings"].get((away_pitcher_id, game_pk), 5.4)
+    home_fallback = fallback_profile(home_team)
+    away_fallback = fallback_profile(away_team)
+    home_closer_id = identify_closer(ctx["closer_log"], home_team, game_date)
+    away_closer_id = identify_closer(ctx["closer_log"], away_team, game_date)
+
+    home_catcher_id = identify_starting_catcher(ctx["catcher_log"], home_team, game_date)
+    away_catcher_id = identify_starting_catcher(ctx["catcher_log"], away_team, game_date)
+    home_catcher_factor = resolve_catcher_factor(ctx["catcher_factors_by_season"], season, home_catcher_id)
+    away_catcher_factor = resolve_catcher_factor(ctx["catcher_factors_by_season"], season, away_catcher_id)
+
+    # real home-plate umpire for THIS specific game -- fetched live (works
+    # same-day once MLB posts the crew; neutral fallback otherwise, see
+    # umpire_factor.py's resolve_live_umpire_factor). Applies identically to
+    # BOTH teams' batting (one umpire calls the whole game), so it's
+    # multiplied into both catcher-factor dicts rather than threaded as a
+    # separate simulator parameter, same as the oracle backtest does.
+    umpire_factor = resolve_live_umpire_factor(ctx["umpire_factors_by_season"], season, game_pk)
+    home_catcher_factor = {o: home_catcher_factor[o] * umpire_factor[o] for o in home_catcher_factor}
+    away_catcher_factor = {o: away_catcher_factor[o] * umpire_factor[o] for o in away_catcher_factor}
+
+    # real defensive alignment this game (see defense_factor.py) -- exact
+    # game_pk match works once the real lineup is posted; falls back to this
+    # team's own most recent real defensive alignment otherwise (same
+    # nearest_prior_bullpen fallback the predictive bullpen roster uses).
+    # Disjoint outcome keys (single/double/triple) from catcher/umpire's
+    # strikeout/walk, so a plain dict merge is safe.
+    home_defense_row = nearest_prior_bullpen(ctx["defense_snap"], home_team, game_date, game_pk)
+    away_defense_row = nearest_prior_bullpen(ctx["defense_snap"], away_team, game_date, game_pk)
+    home_defense_factor = resolve_defense_factor(
+        home_defense_row["infield_oaa"] if home_defense_row is not None else None,
+        home_defense_row["outfield_oaa"] if home_defense_row is not None else None,
+    )
+    away_defense_factor = resolve_defense_factor(
+        away_defense_row["infield_oaa"] if away_defense_row is not None else None,
+        away_defense_row["outfield_oaa"] if away_defense_row is not None else None,
+    )
+    home_catcher_factor = {**home_catcher_factor, **home_defense_factor}
+    away_catcher_factor = {**away_catcher_factor, **away_defense_factor}
+
+    transitions, league_rates, state_factors = ctx["transitions"], ctx["league_rates"], ctx["state_factors"]
+    sim = GameSimulator(transitions, league_rates[season], rng, state_factors=state_factors[season],
+                        ttop_factors=ctx["ttop_factors"][season], shock_sigma=SHOCK_SIGMA)
+
+    all_events, final_scores = [], []
+    for trial in range(n_trials):
+        # a specific reliever is SAMPLED per inning (roster-weighted by
+        # recent usage + rest-day availability), resampled fresh every trial
+        # since which reliever actually pitches is itself part of the
+        # uncertainty a Monte Carlo simulation should propagate.
+        home_bullpen, home_id_plan = sample_bullpen_plan(
+            rng, home_pitcher, home_exp_ip, home_roster_weights,
+            lambda pid: home_roster_profiles[pid], home_fallback, closer_id=home_closer_id,
+        )
+        away_bullpen, away_id_plan = sample_bullpen_plan(
+            rng, away_pitcher, away_exp_ip, away_roster_weights,
+            lambda pid: away_roster_profiles[pid], away_fallback, closer_id=away_closer_id,
+        )
+        trial_weather_factors = weather_factors
+        if trial_weather_factors is None and weather_dist:
+            sampled_bucket = sample_weather_bucket(weather_dist, rng)
+            trial_weather_factors = ctx["weather_factors_by_season"].get(season, {}).get(sampled_bucket)
+        events = []
+        h, a = sim.simulate_game(
+            home_lineup, away_lineup, home_pitcher, away_pitcher, innings=18,
+            park_factors=park_factors, weather_factors=trial_weather_factors,
+            home_bullpen=home_bullpen, away_bullpen=away_bullpen,
+            blowout_pitcher_profile=ctx["blowout_profile"], events=events,
+            home_catcher_factor=home_catcher_factor, away_catcher_factor=away_catcher_factor,
+            home_sb_rates=home_sb_rates, away_sb_rates=away_sb_rates,
+            hfa_factors=hfa_factors,
+        )
+        final_scores.append((h, a))
+        for e in events:
+            e["trial"] = trial
+            # pitching team = the OTHER side's team label; a blowout PA is
+            # attributed to a generic "TEAM_POSITION_PLAYER" pseudo-id rather
+            # than whichever starter/bullpen id_plan would otherwise say for
+            # that inning, since blowout_pitcher_profile overrides both.
+            pitching_team = home_team if e["side"] == "away" else away_team
+            if e["blowout"]:
+                e["pitcher_id"] = f"{pitching_team}_POSITION_PLAYER"
+            elif e["inning"] <= max(round(home_exp_ip if e["side"] == "away" else away_exp_ip), 1):
+                e["pitcher_id"] = home_pitcher_id if e["side"] == "away" else away_pitcher_id
+            else:
+                id_plan = home_id_plan if e["side"] == "away" else away_id_plan
+                # id_plan only has entries for innings 1..N_TRIALS's sample_bullpen_plan
+                # innings=9 default, but simulate_game runs up to 18 -- extra-inning
+                # PAs mirror GameSimulator._pitcher_for_inning's own fallback (the most
+                # recently known pitcher, not a generic placeholder), so props
+                # attribution matches who the simulation actually had pitching.
+                if e["inning"] in id_plan:
+                    e["pitcher_id"] = id_plan[e["inning"]]
+                else:
+                    prior_innings = [i for i in id_plan if i < e["inning"]]
+                    e["pitcher_id"] = id_plan[max(prior_innings)] if prior_innings else "BULLPEN_FALLBACK"
+            e["batter_id"] = (away_ids if e["side"] == "away" else home_ids)[e["batter_idx"]]
+        all_events.extend(events)
+
+    events_df = pd.DataFrame(all_events)
+    scores_df = pd.DataFrame(final_scores, columns=["home_score", "away_score"])
+    return {
+        "batter_props": _batter_props(events_df, n_trials),
+        "pitcher_props": _pitcher_props(events_df, n_trials),
+        "inning_props": _inning_props(events_df, n_trials),
+        "game_props": _game_props(scores_df, n_trials),
+    }
+
+
+# Empirically-fit post-hoc calibration for batter game-level "at least N"
+# props -- see validate_prop_calibration.py, the first-ever check of whether this
+# project's PROP-LEVEL probabilities (not just final-score accuracy) are genuinely
+# calibrated against real outcomes. Found real, consistently-reproducible overconfidence:
+# Monte Carlo trial variance expresses MORE night-to-night differentiation between
+# batters than real single-game outcomes support (unsurprising at only ~4 PA/batter/
+# game -- a much smaller single-game information budget than a pitcher's ~20-25 batters
+# faced, which is why pitcher props needed no such correction, see p_6plus_k). A simple
+# linear recalibration toward league average, validated via 5 INDEPENDENT random
+# train/test splits (never trust one split -- see this project's own history with
+# rare-outcome-category calibration, which failed exactly this test for several
+# categories) is kept ONLY for props whose correction beats the raw/uncorrected
+# model's Brier score in 4-5 of 5 splits -- anything weaker is left uncorrected
+# rather than "fixed" on what amounts to a coin flip.
+#
+# REFIT 2026-07-23 (task #138), after task #137 (the latent pitcher-appearance shock)
+# went live: the shock widens the simulated distribution, making raw prop probabilities
+# LESS overconfident than before -- so the correction needed today is smaller, AND,
+# critically, the 5-split stability test itself now excludes two props that used to
+# pass: p_1plus_hit (was 4-5/5, now only 3/5 post-shock) and p_1plus_rbi (now only
+# 2/5 -- the exact same instability signature that excluded p_1plus_hr originally).
+# Both are left uncorrected below, same treatment as p_1plus_hr. Re-run the 5-split
+# check (scratchpad script, or promote it into validate_prop_calibration.py) before
+# ever re-adding either -- do not just re-plug new coefficients without re-checking
+# stability, since that's exactly the shortcut that would have missed this.
+BATTER_PROP_CALIBRATION = {
+    "p_2plus_hits": (0.1106, 0.4892),  # 5/5 splits
+    "p_1plus_bb": (0.0804, 0.6442),  # 4/5 splits
+}
+
+
+def _apply_batter_prop_calibration(df: pd.DataFrame) -> pd.DataFrame:
+    for prop, (a, b) in BATTER_PROP_CALIBRATION.items():
+        df[prop] = np.clip(a + b * df[prop], 0.001, 0.999)
+    return df
+
+
+def _batter_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
+    """Per batter_id: probability of 1+/2+ hits, HR, walk, strikeout, RBI,
+    and the mean simulated total-bases/hits/RBI across trials."""
+    events_df = events_df.copy()
+    events_df["is_hit"] = events_df["outcome"].isin(HIT_OUTCOMES)
+    events_df["is_hr"] = events_df["outcome"] == "home_run"
+    events_df["is_bb"] = events_df["outcome"].isin({"walk", "intent_walk"})
+    events_df["is_k"] = events_df["outcome"] == "strikeout"
+    events_df["bases"] = events_df["outcome"].map(TOTAL_BASES).fillna(0)
+
+    per_trial = events_df.groupby(["batter_id", "trial"]).agg(
+        hits=("is_hit", "sum"), hr=("is_hr", "sum"), bb=("is_bb", "sum"),
+        k=("is_k", "sum"), rbi=("runs", "sum"), bases=("bases", "sum"), pa=("outcome", "size"),
+    ).reset_index()
+
+    def summarize(g):
+        n = len(g)
+        return pd.Series({
+            "pa_per_game": g["pa"].mean(),
+            "p_1plus_hit": (g["hits"] >= 1).mean(),
+            "p_2plus_hits": (g["hits"] >= 2).mean(),
+            "p_1plus_hr": (g["hr"] >= 1).mean(),
+            "p_1plus_bb": (g["bb"] >= 1).mean(),
+            "p_1plus_rbi": (g["rbi"] >= 1).mean(),
+            "mean_total_bases": g["bases"].mean(),
+            "mean_hits": g["hits"].mean(),
+            "mean_k": g["k"].mean(),
+        })
+
+    result = per_trial.groupby("batter_id").apply(summarize, include_groups=False)
+    return _apply_batter_prop_calibration(result)
+
+
+def _pitcher_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
+    """Per pitcher_id: mean/median strikeouts thrown, walks, hits, earned
+    runs allowed, and outs recorded (an innings-pitched proxy) across trials."""
+    events_df = events_df.copy()
+    events_df["is_k"] = events_df["outcome"] == "strikeout"
+    events_df["is_bb"] = events_df["outcome"].isin({"walk", "intent_walk"})
+    events_df["is_hit"] = events_df["outcome"].isin(HIT_OUTCOMES)
+
+    per_trial = events_df.groupby(["pitcher_id", "trial"]).agg(
+        k=("is_k", "sum"), bb=("is_bb", "sum"), hits=("is_hit", "sum"),
+        runs_allowed=("runs", "sum"), batters_faced=("outcome", "size"),
+    ).reset_index()
+
+    def summarize(g):
+        return pd.Series({
+            "mean_k": g["k"].mean(), "mean_bb": g["bb"].mean(), "mean_hits_allowed": g["hits"].mean(),
+            "mean_runs_allowed": g["runs_allowed"].mean(), "mean_batters_faced": g["batters_faced"].mean(),
+            "p_6plus_k": (g["k"] >= 6).mean(),
+        })
+
+    return per_trial.groupby("pitcher_id").apply(summarize, include_groups=False)
+
+
+def _inning_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
+    """P(1+ run scored) per team (side) per inning, across trials."""
+    per_trial = events_df.groupby(["side", "inning", "trial"])["runs"].sum().reset_index()
+    return per_trial.groupby(["side", "inning"])["runs"].apply(lambda s: (s >= 1).mean()).unstack("side")
+
+
+def _game_props(scores_df: pd.DataFrame, n_trials: int) -> dict:
+    total = scores_df["home_score"] + scores_df["away_score"]
+    margin = scores_df["home_score"] - scores_df["away_score"]
+    return {
+        "home_win_prob": (margin > 0).mean(),
+        "away_win_prob": (margin < 0).mean(),
+        "mean_home_score": scores_df["home_score"].mean(),
+        "mean_away_score": scores_df["away_score"].mean(),
+        "mean_total": total.mean(),
+        "p_over_8.5": (total > 8.5).mean(),
+        "p_under_8.5": (total < 8.5).mean(),
+        "home_covers_minus_1_5": (margin > 1.5).mean(),
+        "away_covers_plus_1_5": (margin > -1.5).mean(),
+    }
+
+
+if __name__ == "__main__":
+    pa = pd.read_parquet(DATA_PROCESSED / "pa_table_2023_2026.parquet")
+    print("building pregame context (all walk-forward tables)...", flush=True)
+    ctx = build_pregame_context(pa)
+
+    season = 2025
+    lineups = pd.read_parquet(DATA_RAW / f"lineups_{season}.parquet")
+    schedule = pd.read_parquet(DATA_RAW / f"schedule_{season}.parquet")
+    complete = lineups.groupby(["game_pk", "team_side"]).size()
+    complete_games = complete[complete == 9].reset_index()["game_pk"].unique()
+    reg = schedule[(schedule["game_type"] == "R") & (schedule["status"] == "Final") & (schedule["game_pk"].isin(complete_games))]
+    demo = reg.sample(1, random_state=7).iloc[0]
+    game_pk = int(demo["game_pk"])
+    game_lu = lineups[lineups["game_pk"] == game_pk]
+    home_ids = game_lu[game_lu["team_side"] == "home"].sort_values("batting_order")["player_id"].tolist()
+    away_ids = game_lu[game_lu["team_side"] == "away"].sort_values("batting_order")["player_id"].tolist()
+    game_pa = pa[pa.game_pk == game_pk]
+    home_pitcher_id = int(game_pa[game_pa.inning_topbot == "Top"].sort_values(["inning", "at_bat_number"])["pitcher"].iloc[0])
+    away_pitcher_id = int(game_pa[game_pa.inning_topbot == "Bot"].sort_values(["inning", "at_bat_number"])["pitcher"].iloc[0])
+
+    print(f"generating props for game {game_pk}: {demo['away_team']} @ {demo['home_team']} "
+          f"({demo['date']}), {N_TRIALS} trials...", flush=True)
+    rng = np.random.default_rng(0)
+    props = generate_game_props(
+        ctx, season, game_pk, demo["home_team"], demo["away_team"], demo["date"],
+        home_ids, away_ids, home_pitcher_id, away_pitcher_id, n_trials=N_TRIALS, rng=rng,
+    )
+
+    print(f"\n=== actual result: {demo['away_team']} {demo['away_score']} @ {demo['home_team']} {demo['home_score']} ===")
+    print("\n--- game props ---")
+    for k, v in props["game_props"].items():
+        print(f"  {k}: {v:.3f}")
+    print("\n--- batter props (home lineup, batting order) ---")
+    print(props["batter_props"].loc[[pid for pid in home_ids if pid in props["batter_props"].index]].round(3).to_string())
+    print("\n--- pitcher props ---")
+    print(props["pitcher_props"].round(2).to_string())
+    print("\n--- inning-by-inning P(1+ run) ---")
+    print(props["inning_props"].round(3).to_string())
