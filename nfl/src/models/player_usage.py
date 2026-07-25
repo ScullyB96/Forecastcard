@@ -157,14 +157,19 @@ if __name__ == "__main__":
     corr_c = np.corrcoef(test_c["pregame_carry_share_calc"], test_c["carry_share_calc"])[0, 1]
     print(f"CARRY SHARE:  test MAE={mae_c:.4f}  naive={naive_mae_c:.4f}  corr={corr_c:.3f}")
 
-    # --- TD-per-touch rate (Bayesian shrinkage, prior_weight=15 validated by decile calibration) ---
+    # --- TD-per-touch rate (Bayesian shrinkage). prior_weight=30 -- raised from an
+    # earlier 15 that was only ever validated via aggregate decile calibration, never
+    # swept. A proper sweep (2026-07) found aggregate MAE/calibration are flat from
+    # prior_weight=10 to 130, but 15 under-regularizes extreme small-sample outliers
+    # (a rookie with a real 5-TD-on-22-target stretch still projected at 3.3x league
+    # average after shrinkage). 30 costs nothing in validated aggregate accuracy. ---
     league_rec_td_rate = shares["receiving_tds"].sum() / shares["targets"].sum()
     league_rush_td_rate = shares["rushing_tds"].sum() / shares["carries"].sum()
 
-    rec_td_engine = TdRateEngine(league_rate=league_rec_td_rate, prior_weight=15.0)
+    rec_td_engine = TdRateEngine(league_rate=league_rec_td_rate, prior_weight=30.0)
     rec_td_result = rec_td_engine.run_walk_forward(shares[shares["targets"] > 0], "receiving_tds", "targets")
 
-    rush_td_engine = TdRateEngine(league_rate=league_rush_td_rate, prior_weight=15.0)
+    rush_td_engine = TdRateEngine(league_rate=league_rush_td_rate, prior_weight=30.0)
     rush_td_result = rush_td_engine.run_walk_forward(shares[shares["carries"] > 0], "rushing_tds", "carries")
 
     print(f"\nTD RATE priors: league rec TD/target={league_rec_td_rate:.4f}  league rush TD/carry={league_rush_td_rate:.4f}")

@@ -34,9 +34,9 @@ if __name__ == "__main__":
 
     league_rec_td_rate = shares["receiving_tds"].sum() / shares["targets"].sum()
     league_rush_td_rate = shares["rushing_tds"].sum() / shares["carries"].sum()
-    rec_td_engine = TdRateEngine(league_rate=league_rec_td_rate, prior_weight=15.0)
+    rec_td_engine = TdRateEngine(league_rate=league_rec_td_rate, prior_weight=30.0)
     rec_td_result = rec_td_engine.run_walk_forward(shares[shares["targets"] > 0], "receiving_tds", "targets")
-    rush_td_engine = TdRateEngine(league_rate=league_rush_td_rate, prior_weight=15.0)
+    rush_td_engine = TdRateEngine(league_rate=league_rush_td_rate, prior_weight=30.0)
     rush_td_result = rush_td_engine.run_walk_forward(shares[shares["carries"] > 0], "rushing_tds", "carries")
 
     pr_table = build_pass_rate_table(pbp)

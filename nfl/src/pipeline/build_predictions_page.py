@@ -62,13 +62,58 @@ def latest_predictions_file() -> tuple[int, int, str]:
     return season, week, path
 
 
-def build_page(season: int, week: int, games: pd.DataFrame) -> str:
+def _statline_rows(team_props: pd.DataFrame) -> str:
+    if team_props.empty:
+        return "<div class=\"stat-row\"><span class=\"stat-name\">No roster data available</span></div>"
+    rows = []
+    qb = team_props[team_props["position"] == "QB"]
+    if not qb.empty:
+        r = qb.iloc[0]
+        rows.append(
+            f"<div class=\"stat-row\"><span class=\"stat-name\">{r['player']} <small>QB</small></span>"
+            f"<span class=\"stat-line\">{r['proj_completions']:.0f}/{r['proj_pass_attempts']:.0f}, "
+            f"{r['proj_passing_yards']:.0f} yd, {r['proj_passing_tds']:.1f} TD, {r['proj_interceptions']:.1f} INT</span></div>"
+        )
+    non_qb = team_props[team_props["position"] != "QB"]
+    if "status_note" in non_qb.columns:
+        non_qb = non_qb[non_qb["status_note"] != "OUT"]
+    skill = non_qb.sort_values("td_probability", ascending=False).head(4)
+    for r in skill.itertuples():
+        bits = []
+        if r.proj_targets > 0.3:
+            bits.append(f"{r.proj_receptions:.0f} rec, {r.proj_rec_yards:.0f} yd")
+        if r.proj_carries > 0.3:
+            bits.append(f"{r.proj_carries:.0f} car, {r.proj_rush_yards:.0f} yd")
+        bits.append(f"{r.td_probability:.0%} TD")
+        rows.append(
+            f"<div class=\"stat-row\"><span class=\"stat-name\">{r.player} <small>{r.position}</small></span>"
+            f"<span class=\"stat-line\">{', '.join(bits)}</span></div>"
+        )
+    return "\n".join(rows)
+
+
+def build_page(season: int, week: int, games: pd.DataFrame, props: pd.DataFrame | None = None) -> str:
     cards = []
     for g in games.itertuples():
         home, away = g.home, g.away
         home_name = TEAMS.get(home, (home, "#555555", "#999999"))
         away_name = TEAMS.get(away, (away, "#555555", "#999999"))
         home_win = g.our_home_pts >= g.our_away_pts
+
+        game_props = props[props["game_id"] == g.game_id] if props is not None else None
+        stats_block = ""
+        if game_props is not None and not game_props.empty:
+            away_stats = _statline_rows(game_props[game_props["team"] == away])
+            home_stats = _statline_rows(game_props[game_props["team"] == home])
+            stats_block = f"""
+          <details class="statlines">
+            <summary>Expected statlines</summary>
+            <div class="stat-team">{away}</div>
+            {away_stats}
+            <div class="stat-team">{home}</div>
+            {home_stats}
+          </details>"""
+
         cards.append(f"""
         <div class="card">
           <div class="row {'winner' if not home_win else ''}">
@@ -80,7 +125,7 @@ def build_page(season: int, week: int, games: pd.DataFrame) -> str:
             <span class="swatch" style="background:{home_name[1]}"></span>
             <span class="team">{home}<small>{home_name[0]}</small></span>
             <span class="score">{g.our_home_pts:.0f}</span>
-          </div>
+          </div>{stats_block}
         </div>""")
 
     return f"""<title>Week {week} &middot; {season} Predictions</title>
@@ -181,6 +226,42 @@ h1 {{
   text-align: right;
 }}
 .row.winner .score {{ color: var(--accent); }}
+.statlines {{
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+}}
+.statlines summary {{
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}}
+.stat-team {{
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 0.6rem 0 0.15rem;
+}}
+.stat-row {{
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.82rem;
+  padding: 0.2rem 0;
+  color: var(--muted);
+}}
+.stat-name {{ color: var(--ink); white-space: nowrap; }}
+.stat-name small {{ color: var(--muted); font-weight: 400; }}
+.stat-line {{
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}}
 footer {{
   text-align: center;
   color: var(--muted);
@@ -215,7 +296,9 @@ if __name__ == "__main__":
         season, week, path = latest_predictions_file()
 
     games = pd.read_parquet(path)
-    html = build_page(season, week, games)
+    props_path = DATA_PROCESSED / f"props_{season}_wk{week}.parquet"
+    props = pd.read_parquet(props_path) if props_path.exists() else None
+    html = build_page(season, week, games, props)
     out_path = args.out or str(DATA_PROCESSED / f"predictions_page_{season}_wk{week}.html")
     with open(out_path, "w") as f:
         f.write(html)

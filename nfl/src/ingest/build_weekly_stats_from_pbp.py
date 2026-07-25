@@ -23,7 +23,14 @@ def build_weekly_stats(pbp: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame
     pass_plays = pbp[(pbp["play_type"] == "pass") & pbp["passer_player_id"].notna()]
     passing = (
         pass_plays.groupby(["season", "week", "posteam", "passer_player_id"])
-        .agg(attempts=("passer_player_id", "size"), passing_epa=("epa", "sum"))
+        .agg(
+            attempts=("passer_player_id", "size"),
+            passing_epa=("epa", "sum"),
+            completions=("complete_pass", "sum"),
+            passing_yards=("passing_yards", "sum"),
+            passing_tds=("pass_touchdown", "sum"),
+            interceptions=("interception", "sum"),
+        )
         .reset_index()
         .rename(columns={"posteam": "recent_team", "passer_player_id": "player_id"})
     )
@@ -57,7 +64,8 @@ def build_weekly_stats(pbp: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame
         rushing, on=["season", "week", "recent_team", "player_id"], how="outer"
     ).merge(passing, on=["season", "week", "recent_team", "player_id"], how="outer")
     for c in ["targets", "receptions", "receiving_yards", "receiving_tds", "carries", "rushing_yards",
-              "rushing_tds", "attempts", "passing_epa"]:
+              "rushing_tds", "attempts", "passing_epa", "completions", "passing_yards", "passing_tds",
+              "interceptions"]:
         merged[c] = merged[c].fillna(0)
 
     # position + display name from weekly_rosters (already covers through 2025)
@@ -75,7 +83,7 @@ if __name__ == "__main__":
         columns=[
             "season", "week", "season_type", "posteam", "play_type", "receiver_player_id",
             "rusher_player_id", "passer_player_id", "epa", "complete_pass", "receiving_yards",
-            "rushing_yards", "pass_touchdown", "rush_touchdown",
+            "rushing_yards", "pass_touchdown", "rush_touchdown", "passing_yards", "interception",
         ],
     )
     pbp_2025 = pbp[pbp["season"] == 2025]
