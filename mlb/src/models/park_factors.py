@@ -23,6 +23,29 @@ from src.utils.paths import DATA_RAW, DATA_PROCESSED
 ROLLING_YEARS = 3
 OUTCOMES = list(STABILIZATION_PA.keys())
 
+# Real physical-building relocations (2026-07-25, verified against real schedule
+# data): the A's left Oakland Coliseum for Sutter Health Park in 2025 (plus a
+# handful of 2026 games at Las Vegas Ballpark), and the Rays left Tropicana Field
+# for George M. Steinbrenner Field for ONE season (2025, hurricane damage to the
+# Trop) before returning to Tropicana Field in 2026. Every OTHER team that shows
+# more than one `venue_name` across 2023-2026 is a same-building sponsorship
+# rename, not a relocation (confirmed directly: Guaranteed Rate Field/Rate Field,
+# Minute Maid Park/Daikin Park, Dodger Stadium/UNIQLO Field at Dodger Stadium all
+# have the SAME team playing 79-81 games/season at what is, physically, the one
+# building) -- those don't need canonicalizing below since venue_name never
+# feeds the actual factor math, only the venue-CONTINUITY check this dict exists
+# for. Mapping is old-name -> current-name; both keys and the mapped-to value
+# are treated as equivalent by `_canonical_venue`.
+VENUE_RENAME_ALIASES = {
+    "Guaranteed Rate Field": "Rate Field",
+    "Minute Maid Park": "Daikin Park",
+    "UNIQLO Field at Dodger Stadium": "Dodger Stadium",
+}
+
+
+def _canonical_venue(venue_name: str) -> str:
+    return VENUE_RENAME_ALIASES.get(venue_name, venue_name)
+
 
 def team_home_road_runs(schedule: pd.DataFrame) -> pd.DataFrame:
     """One row per (team, season): runs/game at home vs. on the road."""
@@ -33,11 +56,33 @@ def team_home_road_runs(schedule: pd.DataFrame) -> pd.DataFrame:
         home_runs_per_game=("total_runs", "mean"), home_games=("total_runs", "size"),
         primary_venue=("venue_name", lambda s: s.mode().iloc[0]),
     ).reset_index().rename(columns={"home_team": "team"})
+    home["canonical_venue"] = home["primary_venue"].map(_canonical_venue)
     road = reg.groupby(["season", "away_team"]).agg(
         road_runs_per_game=("total_runs", "mean"), road_games=("total_runs", "size"),
     ).reset_index().rename(columns={"away_team": "team"})
 
     return home.merge(road, on=["season", "team"], how="inner")
+
+
+def _same_venue_rolling_mean(g: pd.DataFrame, value_col: str) -> pd.Series:
+    """For each row (a team's one season), average `value_col` over that
+    team's own PRIOR seasons that were played at the SAME canonical venue as
+    THIS row -- not just the most recent 3 calendar seasons regardless of
+    ballpark. A plain `.rolling(3)` silently blends a relocated team's old
+    park into its new one's factor (confirmed real for the A's: Oakland
+    Coliseum bleeding into the Sutter Health Park factor) or dilutes a
+    returning team's stable history with a one-off displaced season
+    (confirmed real for the Rays: one 2025 season at Steinbrenner Field
+    diluting the 2026 Tropicana Field factor they'd already established
+    across 2023-2024). `g` must already be sorted by season."""
+    out = []
+    venues = g["canonical_venue"].to_numpy()
+    values = g[value_col].to_numpy()
+    for i in range(len(g)):
+        same_venue_prior = [values[j] for j in range(i) if venues[j] == venues[i]]
+        recent = same_venue_prior[-ROLLING_YEARS:]
+        out.append(sum(recent) / len(recent) if recent else float("nan"))
+    return pd.Series(out, index=g.index)
 
 
 def build_park_factors(seasons: list[int]) -> pd.DataFrame:
@@ -50,17 +95,56 @@ def build_park_factors(seasons: list[int]) -> pd.DataFrame:
         frames.append(team_home_road_runs(sched))
     all_seasons = pd.concat(frames, ignore_index=True).sort_values(["team", "season"])
 
-    # 3-year rolling window over seasons STRICTLY BEFORE each one (shift(1)
-    # before rolling) -- a season's own data must never contribute to its own
-    # park factor.
-    all_seasons["home_runs_sum"] = all_seasons.groupby("team")["home_runs_per_game"].transform(
-        lambda s: s.shift(1).rolling(ROLLING_YEARS, min_periods=1).mean()
+    # Same-venue rolling window over seasons STRICTLY BEFORE each one -- a
+    # season's own data must never contribute to its own park factor, AND
+    # (2026-07-25 fix) a DIFFERENT ballpark's history must never contribute
+    # to a relocated/returning team's current-venue factor either.
+    all_seasons["home_runs_sum"] = all_seasons.groupby("team", group_keys=False).apply(
+        lambda g: _same_venue_rolling_mean(g, "home_runs_per_game"), include_groups=False
     )
-    all_seasons["road_runs_sum"] = all_seasons.groupby("team")["road_runs_per_game"].transform(
-        lambda s: s.shift(1).rolling(ROLLING_YEARS, min_periods=1).mean()
+    all_seasons["road_runs_sum"] = all_seasons.groupby("team", group_keys=False).apply(
+        lambda g: _same_venue_rolling_mean(g, "road_runs_per_game"), include_groups=False
     )
     all_seasons["park_factor"] = all_seasons["home_runs_sum"] / all_seasons["road_runs_sum"]
     return all_seasons
+
+
+def _team_venue_lookup(seasons: list[int]) -> pd.DataFrame:
+    """(season, team, canonical_venue) for every season present -- reads the
+    raw schedule files directly (same source `team_home_road_runs` uses),
+    since the PA table itself carries no venue_name column. Needed so
+    `build_outcome_park_factors` (which only receives `pa`, not schedule) can
+    apply the same same-venue-only rolling window as `build_park_factors`."""
+    frames = []
+    for season in seasons:
+        path = DATA_RAW / f"schedule_{season}.parquet"
+        if not path.exists():
+            continue
+        sched = pd.read_parquet(path)
+        reg = sched[(sched["game_type"] == "R") & (sched["status"] == "Final")]
+        primary = reg.groupby(["season", "home_team"])["venue_name"].agg(
+            lambda s: s.mode().iloc[0]
+        ).reset_index().rename(columns={"home_team": "team", "venue_name": "primary_venue"})
+        frames.append(primary)
+    lookup = pd.concat(frames, ignore_index=True)
+    lookup["canonical_venue"] = lookup["primary_venue"].map(_canonical_venue)
+    return lookup[["season", "team", "canonical_venue"]]
+
+
+def _same_venue_rolling_sum(g: pd.DataFrame, value_col: str) -> pd.Series:
+    """Same logic as `_same_venue_rolling_mean` but summing (for PA-count/
+    event-count columns, not per-game rates) -- see that function's docstring
+    for why a plain calendar-year rolling window is wrong for a relocated or
+    displaced-then-returned team. `g` must already be sorted by season and
+    carry a `canonical_venue` column."""
+    out = []
+    venues = g["canonical_venue"].to_numpy()
+    values = g[value_col].to_numpy()
+    for i in range(len(g)):
+        same_venue_prior = [values[j] for j in range(i) if venues[j] == venues[i]]
+        recent = same_venue_prior[-ROLLING_YEARS:]
+        out.append(sum(recent) if recent else 0.0)
+    return pd.Series(out, index=g.index)
 
 
 def team_home_road_outcome_rates(pa: pd.DataFrame) -> pd.DataFrame:
@@ -140,13 +224,18 @@ def build_outcome_park_factors(pa: pd.DataFrame) -> pd.DataFrame:
     team's park effect RELATIVE to the league (Coors still up, Seattle still
     down) while removing the estimator's systematic upward bias."""
     rates = team_home_road_outcome_rates(pa)
+    venue_lookup = _team_venue_lookup(sorted(pa["season"].unique().tolist()))
+    rates = rates.merge(venue_lookup, on=["season", "team"], how="left")
     rates = rates.sort_values(["team", "outcome", "season"])
-    grp = rates.groupby(["team", "outcome"])
-    # shift(1) first: a season's own data must never contribute to its own park factor
-    home_roll_pa = grp["home_pa"].transform(lambda s: s.shift(1).rolling(ROLLING_YEARS, min_periods=1).sum())
-    home_roll_ev = grp["home_events"].transform(lambda s: s.shift(1).rolling(ROLLING_YEARS, min_periods=1).sum())
-    road_roll_pa = grp["road_pa"].transform(lambda s: s.shift(1).rolling(ROLLING_YEARS, min_periods=1).sum())
-    road_roll_ev = grp["road_events"].transform(lambda s: s.shift(1).rolling(ROLLING_YEARS, min_periods=1).sum())
+    grp = rates.groupby(["team", "outcome"], group_keys=False)
+    # SAME-VENUE rolling window (2026-07-25 fix, see _same_venue_rolling_mean's
+    # docstring) -- a season's own data must never contribute to its own park
+    # factor, and (the actual fix) a DIFFERENT ballpark's history must never
+    # contribute to a relocated/returning team's current-venue factor either.
+    home_roll_pa = grp.apply(lambda g: _same_venue_rolling_sum(g, "home_pa"), include_groups=False)
+    home_roll_ev = grp.apply(lambda g: _same_venue_rolling_sum(g, "home_events"), include_groups=False)
+    road_roll_pa = grp.apply(lambda g: _same_venue_rolling_sum(g, "road_pa"), include_groups=False)
+    road_roll_ev = grp.apply(lambda g: _same_venue_rolling_sum(g, "road_events"), include_groups=False)
 
     league_rate_by_outcome = rates.groupby("outcome").apply(
         lambda d: d["home_events"].sum() / d["home_pa"].sum(), include_groups=False

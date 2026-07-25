@@ -3044,6 +3044,91 @@ park×pull) were correctly hedged the first time. No code changed by this
 section — pure statistical verification of existing and newly-screened
 claims.
 
+## 11.27 A real, live park-factor bug: relocated/displaced teams were
+getting the WRONG ballpark's history (2026-07-25, prompted by an external
+review flagging the two 2025-new venues — the actual bug turned out to be
+different and more precise than the review's own framing, and directly
+affects tonight's Rays game)
+
+An external review of this documentation flagged Sutter Health Park (A's,
+new 2025) and George M. Steinbrenner Field (Rays, new 2025) as a park-factor
+gap, framed as "sparse data collapsing to neutral via the clip guards."
+**Verified against real schedule data before acting on it** (this project's
+own standing discipline: don't trust a claim, including an external one,
+without checking it against ground truth) — the actual situation is
+different and, for the Rays specifically, the review's framing was
+backwards for the CURRENT season:
+
+- **A's (ATH)**: real relocation, Oakland Coliseum (2023-2024) → Sutter
+  Health Park (2025-2026, plus 6 stray 2026 games at Las Vegas Ballpark).
+- **Rays (TB)**: Tropicana Field (2023-2024) → George M. Steinbrenner Field
+  for exactly ONE season (2025, hurricane damage to the Trop) → **back to
+  Tropicana Field in 2026**. The Rays are NOT still playing at Steinbrenner
+  — they're back in their dome, with a real home game tonight (2026-07-25
+  vs. CLE) and tomorrow.
+- Every OTHER team showing >1 `venue_name` across 2023-2026 (CWS, HOU, LAD)
+  is a same-building SPONSORSHIP RENAME (Guaranteed Rate Field→Rate Field,
+  Minute Maid Park→Daikin Park, Dodger Stadium→UNIQLO Field at Dodger
+  Stadium) — cosmetic, not a relocation, and irrelevant to the actual bug
+  since `venue_name` never fed the park-factor MATH before this fix, only
+  display metadata.
+
+**The real mechanism, confirmed directly in `park_factors.py`**:
+`build_outcome_park_factors`/`build_park_factors` roll a team's own
+home/road history over the prior 3 CALENDAR seasons, keyed by team code
+only — with no venue-continuity check at all. This silently blends a
+relocated team's OLD ballpark into its new one's factor (ATH's 2025/2026
+factors were built partly or entirely from Oakland Coliseum data, a
+famously pitcher-friendly park, understating whatever Sutter Health Park
+truly is), and — the part that matters for TONIGHT — **dilutes a
+RETURNING team's already-stable history with a one-off displaced season**:
+TB's pre-fix 2026 HR factor (0.980) blended 2 real Tropicana Field seasons
+with 1 Steinbrenner Field season, right as the Rays came back to their real,
+well-established dome. Not a sparse-data/cold-start problem — an actively
+wrong one, silently confident rather than conservatively neutral.
+
+**Fix**: `park_factors.py` gained `VENUE_RENAME_ALIASES` (canonicalizes the
+3 known cosmetic renames so THEY don't get wrongly cold-started) and
+`_same_venue_rolling_mean`/`_same_venue_rolling_sum` — instead of a plain
+`.rolling(3)` over the last 3 calendar seasons, each team's rolling window
+now looks back through its own season history and takes the most recent
+(up to 3) seasons played at the SAME canonical venue as the season being
+computed, skipping non-matching seasons rather than just the most recent
+ones. `build_outcome_park_factors` (the one actually wired into
+`props.py`/`game_simulator.py`) gained `_team_venue_lookup` to source venue
+continuity from the raw schedule files (the PA table itself carries no
+`venue_name` column), merged in before rolling.
+
+**Verified on real data**:
+
+| team | season | before | after | why |
+|---|---|---|---|---|
+| ATH (HR) | 2025 | 0.968 (Oakland-contaminated) | 0.968* | first Sutter Health season, correctly falls to neutral shrinkage — *value coincidentally close pre/post here, but now for the RIGHT reason (no real history) not the wrong one (Oakland history) |
+| ATH (HR) | 2026 | 0.980 (2:1 Oakland:Sutter blend) | 0.947 | now pure 2025 Sutter Health data |
+| TB (HR) | 2025 | 0.944 (correct — pre-Steinbrenner) | 0.968 | first Steinbrenner season, correctly falls to neutral shrinkage instead of stale Tropicana data |
+| TB (HR) | 2026 | 0.980 (2yr Trop + 1yr Steinbrenner) | **0.946** | now pure 2023-2024 Tropicana Field data, Steinbrenner season correctly excluded — **this is tonight's number** |
+
+Confirmed no regression for the other 28 teams: their factors move by a
+small (mean 0.4%, max ~8%) amount purely from the population-mean
+renormalization step re-centering after ATH/TB's raw factors changed — the
+SAME renormalization mechanism already in place, unmodified, doing exactly
+what it's supposed to do when any team's factor shifts. `build_park_factors`
+(the simpler runs-based diagnostic function, not used in production) got
+the identical fix for consistency, confirmed via its own `__main__` report.
+
+**Scope note, honestly flagged**: this fixes the CURRENT (2026) season
+correctly, which is what matters for tonight's game and the rest of this
+season. It does NOT (and structurally cannot, without external ballpark
+dimension/physics data this project doesn't have) give Sutter Health Park
+or Steinbrenner Field a BETTER-than-neutral factor when they have zero or
+minimal same-venue history — that's the same fallback the project's
+existing `PARK_FACTOR_PRIOR_PA` shrinkage already provides for any
+cold-start case, and remains the honest answer until enough real
+same-venue seasons accumulate. Seeding a brand-new venue with an external
+physics/dimensions prior (as suggested) is a legitimate future idea but a
+different, separate, and more speculative build than this bug fix — not
+combined with it here.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):
