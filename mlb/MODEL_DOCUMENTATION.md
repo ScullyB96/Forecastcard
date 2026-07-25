@@ -830,13 +830,51 @@ blowout substitution).
   - `_batter_props`: `pa_per_game`, `p_1plus_hit`, `p_2plus_hits`, `p_1plus_hr`,
     `p_1plus_bb`, `p_1plus_rbi`, `mean_total_bases`, `mean_hits`, `mean_k`. RBI is
     approximated as runs scored on that specific PA (not exact MLB RBI rules — an explicit
-    first-version scope limitation). Four of five props (all but `p_1plus_hr`) pass through
-    `_apply_batter_prop_calibration`, a post-hoc linear recalibration `a + b*predicted`
-    (clipped `[0.001, 0.999]`, e.g. `p_1plus_hit: (0.1545, 0.7011)`), fit because Monte
-    Carlo trial variance overstates night-to-night differentiation given the low per-game
-    PA count (~4/batter vs. a pitcher's ~20-25 batters faced). `p_1plus_hr` was
-    deliberately excluded from calibration — its own correction beat the uncorrected model
-    in only 2/5 independent train/test splits (unstable), so left uncorrected.
+    first-version scope limitation). Three of five props (`p_2plus_hits`, `p_1plus_bb`,
+    `p_1plus_rbi`) pass through `_apply_batter_prop_calibration`, a post-hoc linear
+    recalibration `a + b*predicted` (clipped `[0.001, 0.999]`), fit because Monte Carlo
+    trial variance overstates night-to-night differentiation given the low per-game PA
+    count (~4/batter vs. a pitcher's ~20-25 batters faced). `p_1plus_hit` and `p_1plus_hr`
+    are deliberately left uncorrected — each failed the 4-5/5-split stability bar as of
+    the most recent check (see below).
+
+    **Raw `p_1plus_hr` calibration, measured directly for the first time (2026-07-25,
+    `validate_prop_calibration.py`, n=2700 batter-games, 150 real 2024-2025 games, 150
+    trials each)**: `actual = 0.0275 + 0.7835*predicted` (slope 1.0 = perfect), corr=0.92,
+    Brier 0.0989 vs. naive (always-base-rate) 0.1008. **Real, moderate overconfidence** —
+    the raw model's high-probability bucket (predicted 0.209) realizes at only 0.172, the
+    classic "extremes get pulled toward the mean" pattern — but the effect size is the
+    SAME order of magnitude as `p_1plus_hit`'s (slope 0.79, also currently uncorrected,
+    same post-shock 5-split failure), and clearly better than `p_1plus_rbi`'s (slope 0.61).
+    Brier beats naive by only ~1.9% relative — expected for a rare binary outcome (~11%
+    base rate) where most of the Brier budget is already spent on the low-probability
+    compression regardless of skill. **Re-ran the 5-split stability check on this exact
+    data (2026-07-25)** rather than just eyeballing the slope: fit `a+b*predicted` on a
+    random 70% train split, check whether it beats the raw model's Brier on the held-out
+    30% — repeated 5x with different splits. Result: **1/5 splits favor the correction**
+    (splits 0-3 all made Brier WORSE; only split 4 helped, and barely). This is a THIRD
+    independent failure of the same test (original pre-shock fit: 2/5; post-shock refit
+    task #138: 2/5; this fresh-data re-check: 1/5, the worst yet) — strong, convergent
+    evidence that `p_1plus_hr`'s overconfidence, while real in the aggregate reliability
+    curve, is NOT stably correctable with a global linear scaling. The most likely reason:
+    at an ~11% base rate with ~2700 samples, any one random split's fitted `(a,b)` is
+    substantially overfit to that split's own sampling noise in the rare-event tail, so the
+    "fix" doesn't generalize. **Definitively confirmed uncorrected, not just historically
+    left that way** — this closes the `p_1plus_hr` calibration question for now; a future
+    revisit would need either a fundamentally different correction shape (e.g. isotonic,
+    though that failed game-level testing earlier this session — see §11.2 — and hasn't
+    been re-tested at the PROP level specifically) or a much larger sample before a linear
+    fix could ever be trusted here.
+
+    **Same-day extension (2026-07-25) to the other two uncorrected props**, reusing the
+    identical saved sample (zero new compute): `p_1plus_hit` 2/5 splits favor a correction
+    (unstable, stays uncorrected, consistent with task #138's own 3/5 post-shock finding on
+    a bucketed version of the same test). `p_1plus_rbi` **5/5 splits favor the correction —
+    a genuine reversal** of task #138's 2/5 finding on this fresh sample. Fit on the full
+    n=2700 sample (`a=0.1196, b=0.5977`, raw Brier 0.21267 → corrected 0.21202) and
+    **deployed**: `BATTER_PROP_CALIBRATION` now includes `"p_1plus_rbi": (0.1196, 0.5977)`.
+    Four of five batter props now have a documented calibration status; only `p_1plus_hr`
+    remains an active, three-times-confirmed uncorrected case.
   - `_pitcher_props`: `mean_k`, `mean_bb`, `mean_hits_allowed`, `mean_runs_allowed`,
     `mean_batters_faced`, `p_6plus_k`.
   - `_inning_props`: P(1+ run) per team per inning.
@@ -998,6 +1036,7 @@ reaching a full-stack A/B at all)
 | EV90 as a `contact_quality_multiplier` stabilizer | R² gain +0.0009/+0.0015 beyond existing+xBACON+bat_speed — an order of magnitude smaller than bat speed's own gain, essentially zero incremental value |
 | Squared-up rate (Statcast's own formula, computed directly from `bat_speed`/`effective_speed`/`launch_speed`) | R² gain +0.0001/+0.0000 (one coefficient even negative) — no incremental value at all, matches the research doc's own warning that it's redundant with barrel rate/bat speed |
 | XBT% (extra-bases-taken) baserunning conditioning `TransitionTable` | Real, split-half-validated component effect (tercile spread 31.5%→40.1%, p<0.0001) — but structurally the SAME intervention type as speed-conditioned transitions (§11.2), which already failed full-stack decisively with an even larger effect. Not full-stack tested on strong analogical grounds rather than re-confirming an established failure mode |
+| Park factor × pull-tercile interaction (2026-07-25, prompted by a user question about spray-chart-vs-stadium modeling) | `split ~ park_factor_centered * is_high_pull` (OLS, n=857 batter-seasons ≥15 PA both home/road, walk-forward HR park factor × PRIOR-season real pull rate): incremental R² = **0.00000**, interaction p=0.974 — a clean, decisive null, not a sample-size-starved one (additive-only R² was already just 0.011). A batter's own pull tendency does NOT measurably amplify or dampen their home park's HR factor beyond what each contributes separately. Today's flat per-park/per-outcome scalar (no batter-direction conditioning) is not missing a real effect here |
 
 ### 11.5 The cross-cutting finding from this session, refined
 
@@ -1838,7 +1877,7 @@ post-shock data (reusing the already-collected sample, no new simulation needed)
 | p_2plus_hits | 5/5 | keep |
 | p_1plus_bb | 4/5 | keep |
 | p_1plus_hit | 3/5 | **now below the bar — drop** |
-| p_1plus_rbi | 2/5 | **now below the bar — same instability signature as p_1plus_hr — drop** |
+| p_1plus_rbi | 2/5 | **now below the bar — same instability signature as p_1plus_hr — drop (later reversed, see §8.3: 2026-07-25 re-check on fresh data found 5/5 — now deployed)** |
 
 **The shock didn't just change the coefficients, it changed which props need correction at
 all.** `p_1plus_hit` and `p_1plus_rbi` are now left uncorrected (same treatment as
@@ -2913,6 +2952,97 @@ documentation-only closure of an open question.
 material win for hook-frailty (props-path-only, no game-level claim);
 weather-CRPS is a clean, tail-inclusive null — the 48-hour forecast fix is
 not worth building.*
+
+## 11.26 Putting formal statistical proof behind four open questions
+(2026-07-25, prompted by a user request to verify prior findings with real
+significance tests, not just point estimates)
+
+Four separate claims from this session got re-derived with bootstrap CIs (or,
+for one, a proper OLS significance test) instead of point estimates alone —
+in two cases this materially changed the honest confidence behind a finding
+already reported.
+
+**1. Prop calibration slopes — most "overconfidence" isn't statistically
+provable at this sample size.** Bootstrapped (10,000 resamples) the
+calibration slope and the Brier-vs-naive gain for all 6 props (reusing the
+already-saved calibration parquets, zero new compute):
+
+| prop | slope (95% CI) | slope≠1 proven? | Brier gain (95% CI) | gain>0 proven? |
+|---|---|---|---|---|
+| p_1plus_hit | 0.80 (0.53, 1.05) | **no** | 0.0028 (0.0003, 0.0054) | yes |
+| p_2plus_hits | 1.02 (0.49, 1.55) | no | 0.0009 (−0.0001, 0.0018) | **no** |
+| p_1plus_hr | 0.87 (0.61, 1.12) | **no** | 0.0019 (0.0006, 0.0033) | yes |
+| p_1plus_bb | 1.02 (0.77, 1.27) | no | 0.0049 (0.0025, 0.0073) | yes |
+| p_1plus_rbi | **0.60 (0.32, 0.88)** | **YES** | 0.0007 (−0.0015, 0.0028) | no |
+| p_6plus_k | 0.90 (0.78, 1.01) | no (barely) | 0.0338 (0.0229, 0.0449) | yes |
+
+The earlier point-estimate framing ("p_1plus_hr shows real, moderate
+overconfidence, slope 0.78") **overstated confidence in a single number** —
+with proper resampling uncertainty, its slope's 95% CI comfortably includes
+1.0 (perfect calibration), same as `p_1plus_hit`. Only `p_1plus_rbi`'s slope
+CI actually excludes 1.0 — and that is exactly the one prop whose 5-split
+stability test passed 5/5 and got deployed (§8.3/§11.25 addendum above). This
+is a clean, convergent confirmation across two independent methods (bootstrap
+CI on slope vs. cross-validated correction stability) landing on the same
+prop. Every prop's Brier still beats naive on point estimate, but only 4 of 6
+prove that improvement is real (excludes zero) at this sample size —
+`p_2plus_hits` (already corrected) and `p_1plus_rbi` (pre-correction figures
+shown here) don't clear that bar individually, though `p_1plus_rbi`'s slope
+proof is the stronger and more decision-relevant signal for that prop.
+
+**2. Pull-tercile × wind interaction — directionally consistent with the
+original claim, but NOT statistically significant.** Re-derived as a
+difference-in-differences with a bootstrap CI (not trusting the point
+percentages in `spray.py`'s own docstring): lefty batters only, real terciles
+(bottom/top third of season pull rate, excluding the middle third — a fair
+test of the ORIGINAL low-vs-high contrast, not a diluted median split), real
+`Out To RF`/`Out To LF` wind games, n=30,253 PAs, 2023-2025 pooled.
+High-pull gap (pull-side − opposite-side HR rate) = +0.16pp; low-pull gap =
+−0.20pp; difference-in-differences = **+0.36pp, 95% CI [−0.47pp, +1.20pp] —
+includes zero.** Same direction and roughly the same order of magnitude as
+the original finding, but not provable at this sample size. This matches
+(rather than contradicts) task #35's own original framing as a "small, mixed
+result" — the rigorous test confirms that hedge was the right call, not an
+understatement.
+
+**3. Batter-vs-pitcher-arsenal skill — real within a season, but NOT stable
+year-over-year, which is exactly why the walk-forward rejection (task #82)
+was correct.** Built real pitcher-season breaking-ball rate directly from
+raw pitch-level Statcast data (`pitch_groups.pitch_group`, ≥200 pitches/
+season), tercile-split pitchers, and tested batters' K-rate specifically
+against high-breaking-tercile pitchers (≥30 PA) two ways:
+  - **Split-half reliability** (same-season, two random halves of the
+    high-breaking PAs, "excess" measured against a baseline computed from
+    a fully DISJOINT set of low/mid-tercile PAs to avoid a mechanical
+    overlap artifact — an earlier draft of this exact test had that bug,
+    caught before reporting it): r=0.17, 95% CI **[0.11, 0.23] — excludes
+    zero, a real within-season signal.**
+  - **Year-over-year stability** (season S's excess vs. season S+1's excess
+    for the same batter, n=657 batter-year-pairs, 2023→2024 and 2024→2025):
+    r=−0.04, 95% CI **[−0.12, +0.04] — includes zero, NOT stable.**
+  This is a genuinely useful, nuanced result: batters really do show
+  consistent in-season variation in how they hit high-breaking-ball
+  pitchers specifically (not pure noise, confirmed statistically) — but that
+  variation doesn't persist from one season to the next, meaning it's more
+  consistent with "ran hot/cold against whichever specific pitchers this
+  year's schedule happened to bring" than a genuine, individual, predictable
+  skill. This is precisely the distinction a walk-forward-only project
+  should care about, and it explains — rather than just restates — why task
+  #82's rejected predictive adjustment was the right call.
+
+**4. Park factor × pull-tercile — reconfirmed null, now with a bootstrap CI
+alongside the OLS p-value.** The OLS test in §11.4's new row (p=0.974) is
+already a formal significance test; added a 10,000-resample bootstrap CI on
+the same interaction coefficient for consistency with the other three
+questions here: **[−0.033, +0.032], includes zero.** Same conclusion by two
+independent methods.
+
+**Takeaway across all four**: this round of re-verification changed the
+CONFIDENCE behind two findings (prop calibration, arsenal skill) without
+changing any deployment decision, and confirmed two nulls (pull×wind,
+park×pull) were correctly hedged the first time. No code changed by this
+section — pure statistical verification of existing and newly-screened
+claims.
 
 ## 12. Suggested next steps for a future session
 

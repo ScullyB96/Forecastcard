@@ -642,13 +642,21 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
 # critically, the 5-split stability test itself now excludes two props that used to
 # pass: p_1plus_hit (was 4-5/5, now only 3/5 post-shock) and p_1plus_rbi (now only
 # 2/5 -- the exact same instability signature that excluded p_1plus_hr originally).
-# Both are left uncorrected below, same treatment as p_1plus_hr. Re-run the 5-split
-# check (scratchpad script, or promote it into validate_prop_calibration.py) before
-# ever re-adding either -- do not just re-plug new coefficients without re-checking
-# stability, since that's exactly the shortcut that would have missed this.
+# Both were left uncorrected at that point, same treatment as p_1plus_hr. Re-run the
+# 5-split check (scratchpad script, or promote it into validate_prop_calibration.py)
+# before ever re-adding either -- do not just re-plug new coefficients without
+# re-checking stability, since that's exactly the shortcut that would have missed this.
+#
+# RE-CHECKED 2026-07-25 on a fresh 150-game/2024-2025 sample (row-level 5-split test,
+# not bucketed): p_1plus_hit 2/5 (still unstable, stays uncorrected), p_1plus_hr 1/5
+# (still unstable, third confirmation), p_1plus_rbi **5/5 -- a genuine reversal**,
+# fit on the FULL n=2700 sample and added below (raw Brier 0.21267 -> corrected
+# 0.21202, real if modest). See MODEL_DOCUMENTATION.md sec 8.3/8.5 for the full
+# reliability-curve numbers behind this decision.
 BATTER_PROP_CALIBRATION = {
     "p_2plus_hits": (0.1106, 0.4892),  # 5/5 splits
     "p_1plus_bb": (0.0804, 0.6442),  # 4/5 splits
+    "p_1plus_rbi": (0.1196, 0.5977),  # 5/5 splits (2026-07-25 re-check)
 }
 
 
