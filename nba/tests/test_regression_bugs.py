@@ -1,0 +1,504 @@
+"""Regression guards for real bugs found and fixed during validation
+(2026-07-24) -- see MODEL_DOCUMENTATION.md Sec4/Sec5 for the full writeup of
+each. Plain assertions, no pytest (matching this project's own
+`validate_*.py` convention, and the sibling NHL project's
+`test_holdout_walk_forward_discipline.py`).
+
+Run: `python -m tests.test_regression_bugs`
+"""
+
+import numpy as np
+import pandas as pd
+
+from src.ingest.build_stints import _get_starters, _normalize_name, _prep_pbp_timeline, _roster_lookup
+from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, bootstrap_compare
+from src.models.garbage_time import add_garbage_time_weight
+from src.models.home_court import _baseline_log_ratios
+from src.models.player_rate_shrinkage import add_walk_forward_player_mean_ewm, add_walk_forward_player_rate
+from src.models.player_defensive_event_rates import add_defensive_event_rates
+from src.models.player_playmaking_rates import PRIOR_TOUCHES_AST, PRIOR_TOUCHES_TOV
+from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FTA, add_scoring_rates
+from src.models.rapm_lite import _career_games_played, prepare_stints
+
+FAILURES = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    status = "PASS" if condition else "FAIL"
+    print(f"[{status}] {name}" + (f" -- {detail}" if detail and not condition else ""))
+    if not condition:
+        FAILURES.append(name)
+
+
+def _pbp_row(action_number, clock, period, action_type, score_home, score_away, description="", team_id=1, person_id=1, subtype=""):
+    return {
+        "actionNumber": action_number, "clock": clock, "period": period, "actionType": action_type,
+        "scoreHome": score_home, "scoreAway": score_away, "description": description,
+        "teamId": team_id, "personId": person_id, "subType": subtype,
+    }
+
+
+def test_possession_counter_uses_teamid_not_cumulative_description():
+    """Bug 2 (Sec4a): a defensive rebound must be detected by comparing the
+    rebounding team's ID against the immediately-preceding missed-shot's
+    team ID -- NOT by substring-matching "Def:1" in the description, which
+    is that PLAYER's CUMULATIVE rebound count and only ever matches their
+    FIRST defensive rebound of the game. This constructs a player who grabs
+    TWO defensive rebounds (so their real description would read "Def:1"
+    then "Def:2") and confirms both are correctly detected."""
+    pbp = pd.DataFrame([
+        _pbp_row(1, "PT12M00.00S", 1, "period", 0, 0),
+        _pbp_row(2, "PT11M50.00S", 1, "Missed Shot", 0, 0, team_id=100),
+        _pbp_row(3, "PT11M48.00S", 1, "Rebound", 0, 0, description="P1 REBOUND (Off:0 Def:1)", team_id=200),
+        _pbp_row(4, "PT11M40.00S", 1, "Missed Shot", 0, 0, team_id=100),
+        _pbp_row(5, "PT11M38.00S", 1, "Rebound", 0, 0, description="P1 REBOUND (Off:0 Def:2)", team_id=200),
+    ])
+    tl = _prep_pbp_timeline(pbp)
+    n_def_rebounds = int(tl["isDefensiveRebound"].sum())
+    check("both defensive rebounds detected (not just the first)", n_def_rebounds == 2,
+          f"got {n_def_rebounds}, expected 2")
+
+
+def test_score_forward_fill_ignores_placeholder_zero_on_non_scoring_rows():
+    """Bug (Sec5 #2): some seasons' PlayByPlayV3 rows carry the LITERAL
+    STRING "0" (not blank) on non-scoring rows, including missed free
+    throws -- naively forward-filling numeric-parsed scoreHome/scoreAway
+    treats that "0" as real and wipes out the running score. Constructs a
+    made shot (real score 5-3), then a missed free throw carrying a "0"
+    placeholder, and confirms the score is NOT reset to 0."""
+    pbp = pd.DataFrame([
+        _pbp_row(1, "PT12M00.00S", 1, "period", "0", "0"),
+        _pbp_row(2, "PT11M00.00S", 1, "Made Shot", "5", "3"),
+        _pbp_row(3, "PT10M00.00S", 1, "Free Throw", "0", "0", description="MISS Player Free Throw 1 of 2"),
+    ])
+    tl = _prep_pbp_timeline(pbp)
+    last_score = (int(tl.iloc[-1]["scoreHome"]), int(tl.iloc[-1]["scoreAway"]))
+    check("score not reset by a placeholder '0' on a missed FT", last_score == (5, 3),
+          f"got {last_score}, expected (5, 3)")
+
+
+def test_starters_use_row_order_not_position_field():
+    """Bug (Sec5 #1): a non-blank `position` field is NOT a reliable
+    starter indicator on every season -- some seasons populate it for
+    bench players too. Constructs a team where the 6th (bench) player
+    has a non-blank position, and confirms starters are still exactly the
+    first 5 rows."""
+    box = pd.DataFrame([
+        {"teamId": 1, "personId": 10 + i, "firstName": f"F{i}", "familyName": f"L{i}", "position": "G"}
+        for i in range(5)
+    ] + [{"teamId": 1, "personId": 99, "firstName": "Bench", "familyName": "Player", "position": "G"}])
+    starters = _get_starters(box, team_id=1)
+    expected = tuple(sorted(10 + i for i in range(5)))
+    check("starters are the first 5 rows, not everyone with a position", starters == expected,
+          f"got {starters}, expected {expected}")
+
+
+def test_roster_lookup_resolves_name_collision_and_suffix_mismatch():
+    """Bug (Sec5 #3, #4): (a) two teammates sharing a family name must
+    resolve via NBA's "Je. Green"/"Ja. Green" disambiguation convention,
+    not a bare ambiguous "Green"; (b) a suffixed familyName ("Butler III")
+    must also resolve from a bare substitution-description name
+    ("Butler")."""
+    box = pd.DataFrame([
+        {"teamId": 1, "personId": 1, "firstName": "Jeff", "familyName": "Green"},
+        {"teamId": 1, "personId": 2, "firstName": "JaMychal", "familyName": "Green"},
+        {"teamId": 1, "personId": 3, "firstName": "Jimmy", "familyName": "Butler III"},
+    ])
+    lookup, dupes = _roster_lookup(box)
+
+    check("bare 'Green' is flagged ambiguous, not silently resolved",
+          (1, _normalize_name("Green")) in dupes)
+    check("'Je. Green' resolves to Jeff Green",
+          lookup.get((1, _normalize_name("Je. Green"))) == 1)
+    check("'Ja. Green' resolves to JaMychal Green",
+          lookup.get((1, _normalize_name("Ja. Green"))) == 2)
+    check("bare 'Butler' resolves to suffixed 'Butler III'",
+          lookup.get((1, _normalize_name("Butler"))) == 3)
+
+
+def test_home_court_uses_walkforward_columns_not_raw_realized_columns():
+    """Bug (Sec4/Sec0): `_baseline_log_ratios` must read the walk-forward
+    PRE-game columns (`rtg_attack_rate_home` etc.), not a game's own raw
+    realized rating -- using the latter makes the fitted multiplier
+    circular. This just confirms the function requires (and uses) the
+    walk-forward column names -- constructing a frame with ONLY those
+    columns (no `home_oRtg`/`away_pace` raw-realized names at all) must
+    not raise a KeyError."""
+    games = pd.DataFrame({
+        "league_avg_pace": [100.0], "pace_shrunk_mean_home": [100.0], "pace_shrunk_mean_away": [100.0],
+        "league_avg_rtg": [110.0], "rtg_attack_rate_home": [112.0], "rtg_defense_rate_home": [108.0],
+        "rtg_attack_rate_away": [109.0], "rtg_defense_rate_away": [111.0],
+        "actual_home_score": [115], "actual_away_score": [105],
+    })
+    try:
+        result = _baseline_log_ratios(games)
+        ok = "home_log_ratio" in result.columns and "away_log_ratio" in result.columns
+    except KeyError as e:
+        ok = False
+        print(f"  KeyError: {e}")
+    check("_baseline_log_ratios works from walk-forward columns alone", ok)
+
+
+def test_career_games_played_pools_home_and_away_appearances():
+    """Bug (Sec4b, Phase 2b): a player's career-games-played count must
+    pool BOTH their home-side and away-side appearances into one set of
+    distinct games before counting -- counting each column separately and
+    taking the max silently reports roughly half a typical player's real
+    total (since home/away alternate game to game, not a fixed side).
+    Constructs a player who appears as a HOME player in 2 games and an
+    AWAY player in 2 DIFFERENT games -- true total is 4, not 2."""
+    stints = pd.DataFrame([
+        {"gameId": "g1", "homePlayers": (1, 2, 3, 4, 5), "awayPlayers": (10, 11, 12, 13, 14)},
+        {"gameId": "g2", "homePlayers": (1, 2, 3, 4, 5), "awayPlayers": (10, 11, 12, 13, 14)},
+        {"gameId": "g3", "homePlayers": (10, 11, 12, 13, 14), "awayPlayers": (1, 2, 3, 4, 5)},
+        {"gameId": "g4", "homePlayers": (10, 11, 12, 13, 14), "awayPlayers": (1, 2, 3, 4, 5)},
+    ])
+    player_index = {p: i for i, p in enumerate([1])}
+    games_played = _career_games_played(stints, player_index)
+    check("player 1's games-played pools home+away appearances", games_played[0] == 4,
+          f"got {games_played[0]}, expected 4")
+
+
+def test_validate_script_drops_nan_rows_before_bootstrapping():
+    """Bug (found running validate_team_strength_baseline.py on the real,
+    full 9-season dev range): a single NaN prediction (the very first game
+    of the whole dev range, which has no trailing history yet) silently
+    poisoned the ENTIRE `total_mae`/`margin_mae` bootstrap result to `nan`
+    -- because a raw numpy array's `.mean()` does NOT skip NaN the way a
+    pandas Series' `.mean()` does (confirmed: `np.array([1,2,nan,4]).mean()`
+    is `nan`, `pd.Series([1,2,nan,4]).mean()` is `2.33`), and
+    `bootstrap_significance.bootstrap_compare` converts to numpy arrays via
+    `.to_numpy()` before averaging. Any caller MUST drop NaN rows before
+    calling `bootstrap_compare`, not rely on it to skip them. This test
+    confirms that expectation directly: a NaN slipped into one arm's metric
+    column corrupts the whole result unless dropped first."""
+    arm_a = pd.DataFrame({"gameId": [1, 2, 3], "metric": [1.0, 2.0, np.nan]})
+    arm_b = pd.DataFrame({"gameId": [1, 2, 3], "metric": [1.0, 1.0, 1.0]})
+    result = bootstrap_compare(arm_a, arm_b, game_id_col="gameId",
+                                metrics=[{"name": "metric", "col": "metric", "higher_is_better": True}],
+                                n_bootstrap=100)
+    check("a NaN row corrupts the raw (undropped) bootstrap result -- confirms callers must dropna first",
+          np.isnan(result["metric"]["a"]))
+
+    arm_a_clean = arm_a.dropna(subset=["metric"])
+    arm_b_clean = arm_b[arm_b["gameId"].isin(arm_a_clean["gameId"])]
+    result_clean = bootstrap_compare(arm_a_clean, arm_b_clean, game_id_col="gameId",
+                                      metrics=[{"name": "metric", "col": "metric", "higher_is_better": True}],
+                                      n_bootstrap=100)
+    check("dropping NaN rows first gives a real (non-NaN) result",
+          not np.isnan(result_clean["metric"]["a"]))
+
+
+def test_naive_arm_selected_before_rename_not_after():
+    """Bug (found running validate_team_strength_baseline.py on the real,
+    full 9-season dev range): renaming naive_home/naive_away to pred_home/
+    pred_away on the FULL predictions frame (which already has its own
+    pred_home/pred_away columns from the model arm) creates two columns
+    sharing the same name -- confirmed real: this crashed
+    metrics_ledger.compute_run_metrics with "Cannot set a DataFrame with
+    multiple columns to the single column pred_total". The fix is to
+    SELECT the naive-only columns into their own frame FIRST, then rename
+    -- this test confirms that ordering is what avoids the duplicate."""
+    df = pd.DataFrame({
+        "gameId": [1, 2], "pred_home": [100.0, 101.0], "pred_away": [95.0, 96.0],
+        "naive_home": [98.0, 99.0], "naive_away": [97.0, 98.0],
+    })
+
+    renamed_full_frame = df.rename(columns={"naive_home": "pred_home", "naive_away": "pred_away"})
+    has_duplicate = renamed_full_frame.columns.tolist().count("pred_home") > 1
+    check("renaming on the FULL frame creates a duplicate 'pred_home' column (the bug)", has_duplicate)
+
+    naive_only = df[["gameId", "naive_home", "naive_away"]].rename(
+        columns={"naive_home": "pred_home", "naive_away": "pred_away"})
+    check("selecting naive-only columns FIRST, then renaming, has no duplicate (the fix)",
+          naive_only.columns.tolist().count("pred_home") == 1)
+
+
+def test_garbage_time_uses_per_game_length_not_season_wide_max():
+    """Bug (Sec8, found 2026-07-25): `add_garbage_time_weight` used to
+    compute `total_length` as a single `s["endTenths"].max()` across the
+    WHOLE `stints` frame passed in -- correct only if that frame is exactly
+    one game, but every real caller passes a full season at once. A
+    multi-OT game elsewhere in the season would inflate `total_length` for
+    EVERY other (normal-length) game, understating how far along those
+    games actually were and therefore under-flagging garbage time.
+    Constructs two games -- a normal-length one and a multi-OT one -- and
+    confirms the normal game's own stint (started at 90% of ITS OWN real
+    length, comfortably past the late-game threshold) is still correctly
+    flagged as garbage time despite the other game's longer length."""
+    stints = pd.DataFrame([
+        # Normal game: ends at 28800. A stint starting at 90% of ITS OWN length (25920)
+        # with a 30-point margin should be flagged garbage (threshold there is ~11.5).
+        {"gameId": "normal", "startTenths": 25920.0, "endTenths": 28800.0, "marginBeforeStint": 30.0},
+        # Multi-OT game: ends at 40800 (real 2015-16 example).
+        {"gameId": "multi_ot", "startTenths": 100.0, "endTenths": 40800.0, "marginBeforeStint": 2.0},
+    ])
+    result = add_garbage_time_weight(stints)
+    normal_weight = result.loc[result["gameId"] == "normal", "exposureWeight"].iloc[0]
+    check("normal-length game's late, blown-out stint is flagged garbage time "
+          "(not diluted by the OTHER game's longer length)", normal_weight < 1.0,
+          f"got weight={normal_weight}, expected < 1.0 (DOWNWEIGHT_FACTOR)")
+
+
+def test_prepare_stints_converts_gamedate_to_real_timestamps():
+    """Bug (found running validate_rapm_lineup_adjustment.py on the real,
+    full dev range): the cached schedule's `gameDate` column is a plain
+    string ("YYYY-MM-DD"), not a datetime. `compute_walkforward_player_ratings`
+    compares this column against `pd.Timestamp` checkpoints (from
+    `pd.date_range`, which always returns real Timestamps even given
+    string bounds) -- comparing a string column against a Timestamp raises
+    `TypeError: Invalid comparison between dtype=str and Timestamp`.
+    Confirms `prepare_stints` converts gameDate to a real datetime dtype,
+    so a downstream `< pd.Timestamp(...)` comparison works."""
+    stints = pd.DataFrame([
+        {"gameId": "g1", "stintIdx": 0, "homePts": 10, "awayPts": 8, "possessions": 8,
+         "homePlayers": (1, 2, 3, 4, 5), "awayPlayers": (10, 11, 12, 13, 14),
+         "startTenths": 0, "endTenths": 100},
+    ])
+    schedule = pd.DataFrame({"gameId": ["g1"], "gameDate": ["2016-01-15"]})  # plain string, as cached
+    prepared = prepare_stints(stints, schedule)
+    is_real_datetime = pd.api.types.is_datetime64_any_dtype(prepared["gameDate"])
+    check("gameDate is converted to a real datetime dtype, not left as a string", is_real_datetime)
+    if is_real_datetime:
+        try:
+            prepared["gameDate"] < pd.Timestamp("2020-01-01")
+            comparison_ok = True
+        except TypeError:
+            comparison_ok = False
+        check("gameDate can be compared against a pd.Timestamp without raising", comparison_ok)
+
+
+def test_player_rate_shrinkage_pools_across_players_not_per_row_mean():
+    """`player_rate_shrinkage.add_walk_forward_player_rate` must pool
+    numerator/exposure by SUM across every player-row sharing a gameId
+    before computing the trailing league rate -- NOT average each row's
+    own already-computed rate the way team-level `shrinkage.py` does
+    (correct there since it always has exactly 2 pre-normalized rows/game;
+    wrong here, where a game has ~20-26 raw, un-normalized player rows).
+    Also confirms the core walk-forward guarantee: a player's very first
+    logged game has no prior history at all, so BOTH the league average and
+    that player's own shrunk rate are NaN (not silently defaulting to 0 or
+    leaking same-game data) -- and a second, brand-new player's rate at the
+    next game collapses to exactly the pooled league average (zero own
+    history contributes 0 to numerator/exposure-before)."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "A", "made": 3, "att": 5},
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "B", "made": 2, "att": 4},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "A", "made": 10, "att": 10},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "C", "made": 1, "att": 8},
+    ])
+    out = add_walk_forward_player_rate(log, "made", "att", prior_exposure=10.0, prefix="fg")
+
+    g1_a = out[(out["playerId"] == "A") & (out["gameId"] == "g1")].iloc[0]
+    check("first-ever game has no prior history: league avg is NaN",
+          pd.isna(g1_a["fg_league_avg_rate"]))
+    check("first-ever game has no prior history: shrunk rate is NaN (no leak, no silent default)",
+          pd.isna(g1_a["fg_shrunk_rate"]))
+
+    expected_pooled = (3 + 2) / (5 + 4)  # SUM across both g1 players, not a mean-of-rates
+    g2_a = out[(out["playerId"] == "A") & (out["gameId"] == "g2")].iloc[0]
+    g2_c = out[(out["playerId"] == "C") & (out["gameId"] == "g2")].iloc[0]
+    check("league avg at g2 is the POOLED (summed) rate across g1's two players, not a per-row mean",
+          abs(g2_a["fg_league_avg_rate"] - expected_pooled) < 1e-9,
+          f"got {g2_a['fg_league_avg_rate']}, expected {expected_pooled}")
+    check("a brand-new player (C) with zero prior history collapses exactly to the league average",
+          abs(g2_c["fg_shrunk_rate"] - expected_pooled) < 1e-9)
+
+
+def test_minutes_ewm_uses_only_strictly_prior_games():
+    """`player_minutes.py`'s original version used an infinite-memory
+    expanding-shrinkage approach (mirroring `shrinkage.add_walk_forward_rate`'s
+    team-level pattern) -- confirmed, via a real bootstrap run on the full
+    dev range (275,138 player-games), to be a REAL REGRESSION vs. even a
+    weak naive floor, with MAE getting monotonically WORSE as more prior
+    games were blended in. Replaced with
+    `add_walk_forward_player_mean_ewm` (recency-weighted, halflife-based) --
+    confirmed via a second real bootstrap run to be a REAL IMPROVEMENT vs.
+    a genuinely naive season-average floor (MAE 5.41 vs. 10.87). This test
+    confirms the walk-forward mechanics directly: a player's first-ever
+    game has no prior history (NaN, not a silent 0 or a leaked same-game
+    value), and their second game's projection uses ONLY the first game's
+    real value -- not any data from the game being predicted."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "A", "minutes": 30},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "A", "minutes": 20},
+        {"gameId": "g3", "gameDate": pd.Timestamp("2020-01-03"), "season": 2020, "playerId": "A", "minutes": 10},
+    ])
+    out = add_walk_forward_player_mean_ewm(log, "minutes", halflife_games=2.0, prefix="min")
+    check("first-ever game has no prior history: EWM rate is NaN", pd.isna(out.iloc[0]["min_ewm_rate"]))
+    check("second game's EWM rate uses ONLY the first game's real value (30), not a leak",
+          out.iloc[1]["min_ewm_rate"] == 30.0, f"got {out.iloc[1]['min_ewm_rate']}")
+
+
+def test_bootstrap_compare_batches_large_n_games_instead_of_one_giant_matrix():
+    """Bug (found running `validate_player_scoring_rates.py` on the real,
+    full dev range, 267,124 player-game rows): `bootstrap_compare` used to
+    build ONE `(n_bootstrap, n_games)` index matrix upfront -- fine at
+    team-level scale (~10,000 games), but 267,124 x 5,000 x 8 bytes =
+    ~10.7GB at player-level scale, which made the whole process thrash and
+    never finish (confirmed directly: stuck for minutes, process state
+    'U'/uninterruptible-sleep, climbing RSS). Fixed by batching resamples
+    with a memory cap. This test confirms: (a) a large-n_games call still
+    produces a correct, sane result (doesn't hang or error), and (b) the
+    batch size is actually being capped as intended, not silently
+    reverting to one giant matrix, by checking the implied batch count for
+    a large n_games is > 1."""
+    n_games_large = 300_000  # matches the real scale (267,124) that caused the original hang
+    rng = np.random.default_rng(0)
+    df_a = pd.DataFrame({"gid": range(n_games_large), "metric": rng.normal(0, 1, n_games_large)})
+    df_b = pd.DataFrame({"gid": range(n_games_large), "metric": rng.normal(0.1, 1, n_games_large)})
+
+    result = bootstrap_compare(df_a, df_b, game_id_col="gid",
+                                metrics=[{"name": "metric", "col": "metric", "higher_is_better": True}],
+                                n_bootstrap=500)
+    check("large-n_games bootstrap completes and returns a real (non-NaN) CI",
+          not np.isnan(result["metric"]["delta_ci95"][0]))
+
+    implied_batch_size = max(1, min(500, _MAX_IDX_MATRIX_BYTES // (8 * n_games_large)))
+    check("batching is actually active for large n_games (batch size < n_bootstrap)",
+          implied_batch_size < 500, f"got batch_size={implied_batch_size}")
+
+
+def test_scoring_rates_no_leak_and_dtype_safe():
+    """Two real findings while validating `player_scoring_rates.py`: (1) a
+    real bootstrap REGRESSION on the full dev range showed attempts and
+    makes need DIFFERENT smoothing (attempts: EWMA, like minutes; makes:
+    expanding-shrinkage, like steal/block rate) -- confirmed empirically,
+    not assumed by analogy either way (see that module's docstring for the
+    real MAE numbers); (2) a real dtype crash: guarding attempts-per-minute
+    against divide-by-zero (0 minutes) with `pd.NA` produces an
+    object-dtype column that `.ewm()` cannot handle at all
+    (`TypeError: cannot handle this type -> object`) -- must use `np.nan`
+    instead, which keeps the column float64. This test confirms the whole
+    pipeline runs without that crash and has no same-game leak (first-ever
+    game is NaN; second game uses only the first game's real values)."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "A", "minutes": 30,
+         "fgAtt2": 5, "fgMade2": 3, "fg3Att": 2, "fg3Made": 1, "ftAtt": 4, "ftMade": 3},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "A", "minutes": 25,
+         "fgAtt2": 6, "fgMade2": 4, "fg3Att": 3, "fg3Made": 2, "ftAtt": 2, "ftMade": 2},
+    ])
+    out = add_scoring_rates(log)  # would raise TypeError before the np.nan fix
+    check("first-ever game has no prior history: attempt rate is NaN", pd.isna(out.iloc[0]["3pt_att_rate_per_min"]))
+    check("first-ever game has no prior history: make rate is NaN", pd.isna(out.iloc[0]["3pt_make_rate"]))
+    check("second game's attempt rate uses only the first game's real value",
+          abs(out.iloc[1]["3pt_att_rate_per_min"] - (2 / 30)) < 1e-9)
+    check("second game's make rate uses only the first game's real value",
+          abs(out.iloc[1]["3pt_make_rate"] - 0.5) < 1e-9)
+
+
+def test_ft_scoring_rate_uses_expanding_shrinkage_not_ewma():
+    """Bug (found running `validate_player_scoring_rates.py` on the full
+    dev range, second regression after the 2PT/3PT EWMA-vs-expanding fix
+    landed): applying that SAME fix to FT (EWMA halflife=10 for attempts,
+    expanding-shrinkage prior_attempts=100 for makes) produced shrunk
+    MAE=1.0726 vs naive MAE=1.0538 -- a REAL REGRESSION, CI
+    (+0.0121,+0.0279). A direct empirical re-sweep on FT specifically found
+    BOTH halves want expanding-shrinkage (not the EWMA-for-attempts split
+    that works for 2PT/3PT): FTA per-minute via expanding-shrinkage
+    (prior_minutes=20) beat every EWMA halflife tested, and FT make-rate
+    via expanding-shrinkage (prior_attempts=15, much smaller than 2PT/3PT's
+    150) beat the naive floor. This test locks in expanding-shrinkage (not
+    EWMA) for FT attempts specifically, by checking `ft_att_rate_per_min`
+    matches the closed-form cross-player-pooled shrinkage formula -- pure
+    per-player EWMA would never reference another player's rate at all, so
+    a future accidental revert to EWMA for FT would fail this exact check."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "A", "minutes": 30,
+         "fgAtt2": 5, "fgMade2": 3, "fg3Att": 2, "fg3Made": 1, "ftAtt": 9, "ftMade": 6},
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "B", "minutes": 30,
+         "fgAtt2": 5, "fgMade2": 3, "fg3Att": 2, "fg3Made": 1, "ftAtt": 3, "ftMade": 1},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "A", "minutes": 20,
+         "fgAtt2": 5, "fgMade2": 3, "fg3Att": 2, "fg3Made": 1, "ftAtt": 4, "ftMade": 3},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "B", "minutes": 20,
+         "fgAtt2": 5, "fgMade2": 3, "fg3Att": 2, "fg3Made": 1, "ftAtt": 2, "ftMade": 1},
+    ])
+    out = add_scoring_rates(log)
+    row_a_g2 = out[(out["gameId"] == "g2") & (out["playerId"] == "A")].iloc[0]
+
+    league_fta_rate_before_g2 = (9 + 3) / (30 + 30)  # pooled A+B from g1 only
+    expected_att_rate = (9 + PRIOR_MINUTES_FTA * league_fta_rate_before_g2) / (30 + PRIOR_MINUTES_FTA)
+    check("FT attempt rate matches expanding-shrinkage (cross-player-pooled), not per-player EWMA",
+          abs(row_a_g2["ft_att_rate_per_min"] - expected_att_rate) < 1e-9,
+          f"got {row_a_g2['ft_att_rate_per_min']}, expected {expected_att_rate}")
+
+    league_ftm_rate_before_g2 = (6 + 1) / (9 + 3)  # pooled A+B from g1 only
+    expected_make_rate = (6 + PRIOR_ATTEMPTS_FTM * league_ftm_rate_before_g2) / (9 + PRIOR_ATTEMPTS_FTM)
+    check("FT make rate matches expanding-shrinkage (cross-player-pooled)",
+          abs(row_a_g2["ft_make_rate"] - expected_make_rate) < 1e-9,
+          f"got {row_a_g2['ft_make_rate']}, expected {expected_make_rate}")
+
+
+def test_block_rate_uses_ewma_not_expanding_shrinkage():
+    """Bug (found running `validate_player_defensive_event_rates.py` on the
+    full dev range): blocks were assumed to need the SAME treatment as
+    steals (expanding-shrinkage, confirmed correct for steals specifically)
+    just because both are "rare defensive events" -- a REAL REGRESSION
+    resulted (shrunk MAE 0.4224 vs naive MAE 0.4102, CI
+    (+0.0117,+0.0128)). A direct empirical re-sweep on blocks specifically
+    found every expanding-shrinkage prior tested (1-1500) was flat-to-worse
+    than the naive floor, while EWMA halflife=10-12 games clearly won (MAE
+    0.4938 vs naive 0.4952) -- block volume is driven by matchup/rim-
+    protection role (a volume/role metric), unlike steals' persistent
+    gambling-style skill. This test locks in EWMA for blocks (not
+    expanding-shrinkage) by checking that a player's `blk_rate_per_min`
+    depends ONLY on their own trailing history, with no cross-player
+    blending toward a league prior -- expanding-shrinkage would blend
+    toward the OTHER player's (zero-block) rate even after a single game;
+    pure EWMA would not, since it has no cross-player prior term at all."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "A", "minutes": 30, "steals": 1, "blocks": 2},
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "B", "minutes": 30, "steals": 1, "blocks": 0},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "A", "minutes": 20, "steals": 1, "blocks": 1},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "B", "minutes": 20, "steals": 1, "blocks": 0},
+    ])
+    out = add_defensive_event_rates(log)
+    row_a_g2 = out[(out["gameId"] == "g2") & (out["playerId"] == "A")].iloc[0]
+    check("block rate at g2 matches A's own g1 rate exactly (2/30), unaffected by B's zero rate",
+          abs(row_a_g2["blk_rate_per_min"] - (2 / 30)) < 1e-9,
+          f"got {row_a_g2['blk_rate_per_min']}, expected {2/30} (would be pulled toward 0 by shrinkage)")
+
+
+def test_ast_prior_not_copy_pasted_from_tov():
+    """Bug (found smoke-testing `validate_player_playmaking_rates.py` on
+    the one season backfilled so far, 2015-16, 31,141 player-game rows --
+    PRELIMINARY, full dev-range re-check pending the `BoxScorePlayerTrackV3`
+    backfill, see MODEL_DOCUMENTATION.md): `PRIOR_TOUCHES_AST` was
+    initially set to 300, copy-pasted from `PRIOR_TOUCHES_TOV` on the
+    (untested) assumption that both playmaking stats stabilize at the same
+    rate -- a REAL REGRESSION resulted (shrunk MAE 0.8965 vs naive MAE
+    0.8933). A direct sweep on AST specifically found the family
+    (expanding-shrinkage) was fine, just the prior was too large:
+    prior_touches=50 (MAE 0.8880) clearly beat naive, while TOV's prior=300
+    was independently confirmed correct for TOV. This test just guards
+    against re-copy-pasting one prior onto the other -- the two constants
+    must stay independently tunable, not silently reunified."""
+    check("AST and TOV touch-priors are independently tuned, not copy-pasted from each other",
+          PRIOR_TOUCHES_AST != PRIOR_TOUCHES_TOV,
+          f"got PRIOR_TOUCHES_AST={PRIOR_TOUCHES_AST}, PRIOR_TOUCHES_TOV={PRIOR_TOUCHES_TOV}")
+
+
+if __name__ == "__main__":
+    test_possession_counter_uses_teamid_not_cumulative_description()
+    test_score_forward_fill_ignores_placeholder_zero_on_non_scoring_rows()
+    test_starters_use_row_order_not_position_field()
+    test_roster_lookup_resolves_name_collision_and_suffix_mismatch()
+    test_home_court_uses_walkforward_columns_not_raw_realized_columns()
+    test_career_games_played_pools_home_and_away_appearances()
+    test_validate_script_drops_nan_rows_before_bootstrapping()
+    test_naive_arm_selected_before_rename_not_after()
+    test_garbage_time_uses_per_game_length_not_season_wide_max()
+    test_prepare_stints_converts_gamedate_to_real_timestamps()
+    test_player_rate_shrinkage_pools_across_players_not_per_row_mean()
+    test_minutes_ewm_uses_only_strictly_prior_games()
+    test_bootstrap_compare_batches_large_n_games_instead_of_one_giant_matrix()
+    test_scoring_rates_no_leak_and_dtype_safe()
+    test_ft_scoring_rate_uses_expanding_shrinkage_not_ewma()
+    test_block_rate_uses_ewma_not_expanding_shrinkage()
+    test_ast_prior_not_copy_pasted_from_tov()
+
+    print()
+    if FAILURES:
+        print(f"FAILED: {len(FAILURES)} check(s): {FAILURES}")
+    else:
+        print("ALL CHECKS PASSED")

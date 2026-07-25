@@ -1,0 +1,11 @@
+nba_api==1.11.4
+pandas==3.0.5
+numpy==2.5.1
+scipy==1.18.0
+statsmodels==0.14.6
+pyarrow==25.0.0
+fastparquet==2026.5.0
+requests==2.34.2
+beautifulsoup4==4.15.0
+lxml==6.1.1
+scikit-learn==1.9.0
