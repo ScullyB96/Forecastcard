@@ -6387,7 +6387,7 @@ is a real discipline gap worth closing on principle (and worth being suspicious 
 similarly-shaped function going forward), but it changes nothing about §38's frozen conclusions.
 Full regression suite (7 checks) re-run and passing after the fix.
 
-## 41. Building the live single-game predictor (in progress, 2026-07-25)
+## 41. Building the live single-game predictor (2026-07-25)
 
 The project has never had a live daily prediction entry point -- every existing script is either
 an ingest fetcher, a model component, or a `validate_*.py`/`check_*.py` BACKTEST script scoring
@@ -6410,11 +6410,64 @@ tonight's-matchup pairing, then goalie overlay (real starter live, recent-workho
 §39's RotoWire injury exclusion for prediction), then rest/B2B, then the latest global reg-ratio/
 tie-mass/OT-logistic constants above.
 
-**Status**: architecture fully traced and confirmed buildable; implementation in progress. Next:
-write the "combine two teams' latest state for a hypothetical game" function, reusing every
-existing scoring primitive, then validate it by predicting a real PAST game using only data
-through the day before and confirming it exactly matches what `run_treated()` already produced
-for that same game -- the cleanest possible correctness check, since for a real historical game
-the walk-forward EWMA "as of yesterday" is bit-identical to that game's own row value in the
-existing backtest output.
+**Status: built (`src/models/predict_game.py`) and validated against real historical games --
+two more real bugs found and fixed in the process, both confirmed via the same "predict a real
+past game, compare to `run_treated()`'s own output for that exact gameId" method.**
+
+### 41.1 Bug found: same-day walk-forward ties resolved arbitrarily
+
+The reg-ratio/tie-mass-calibration series update PER GAME, not per calendar day -- on a date
+with multiple games, each game gets a slightly different value depending on its exact
+`(gameDate, gameId)` sort position. The first implementation pre-computed a single "latest"
+scalar once per process via a gameDate-only sort's stable tie-break, which silently picked an
+ARBITRARY one of a multi-game day's own games. Confirmed real: this put `ot_calibration_ratio`
+off by 1.8% relative to `run_treated()`'s own value for a real game on a 4-game day (2026-04-06).
+**Fixed**: `_global_constants` now returns the full per-row series; `predict_game` filters to
+strictly BEFORE its own specific `game_date` and takes the last row from THAT filtered series --
+correct regardless of how many other games share the target date, since none of them have
+happened yet from a live-prediction standpoint either. Regression test added
+(`test_latest_before_excludes_same_day_games_entirely`).
+
+### 41.2 Bug found: goalie rating was one walk-forward step stale
+
+A goalie's own historical appearance row stores the value ENTERING that appearance, not the
+value after incorporating its own result -- returning "the last prior appearance's own stored
+value" is off by exactly one walk-forward step. Confirmed real and substantial on a single-game
+day (2026-03-23, NYR vs OTT, no same-day-ordering ambiguity possible): goalie 8473503.0's real
+2026-03-19 appearance had its own stored `goalie_relative` at -0.189206, but his ACTUAL next
+appearance (2026-03-23) shows -0.215250 -- a real, non-trivial difference from that single
+intervening game's own result. This was the dominant source of a much larger discrepancy
+(~0.146 in `lambda_home`) than 41.1's bug produced. **Fixed the safe way** -- not by hand-deriving
+the one-step shrinkage recurrence (real risk of a subtly wrong re-implementation), but by
+appending ONE placeholder appearance for the predicted starter at the target date to his real,
+strictly-prior appearance history and re-running the actual `add_walk_forward_goalie_strength`
+function, reading off the new row -- the same "append + reuse the real function" pattern already
+established elsewhere in this project. A second bug surfaced fixing this: the placeholder's
+`gameDate` was a `pd.Timestamp` while every real row is a plain `"YYYY-MM-DD"` string, creating a
+mixed-type column that silently broke the function's own date sort (NaN instead of a raised
+error) -- fixed by keeping the placeholder's `gameDate` a matching string. Two regression tests
+added (`test_goalie_relative_as_of_advances_one_full_step_not_the_prior_rows_own_value`,
+`test_goalie_relative_placeholder_gamedate_stays_string_typed`).
+
+### 41.3 Validation results, honestly reported
+
+| game | condition | lambda_home | lambda_away | home_win_prob | vs. `run_treated()` reference |
+|---|---|---|---|---|---|
+| BUF vs TBL, 2026-04-06 (4-game day, heuristic goalie == real starter) | after both fixes | 2.8571 | 3.3898 | 0.4160 | reference: 2.8566 / 3.3845 / 0.4167 -- residual ~0.0005-0.005 |
+| NYR vs OTT, 2026-03-23 (single-game day, REAL starters substituted for the heuristic) | after both fixes | 2.9823 | 3.1489 | 0.4754 | reference: 2.9717 / 3.1782 / 0.4690 -- residual ~0.01-0.03 |
+
+Both residuals shrank dramatically from pre-fix (the second case was off by 0.146/0.070/0.045
+before 41.2's fix). **A small residual remains, honestly not fully traced**: even on the clean
+single-game day, `ot_calibration_ratio` differs by ~0.4% (1.5331 mine vs 1.5393 reference) with
+no same-day-ordering explanation available. Given the magnitude is now small and two substantial,
+real bugs account for the vast majority of the original discrepancy, this residual is logged as
+a known, open item rather than chased to bit-for-bit precision -- worth a closer look before
+treating this predictor's output as precise to better than ~1-2%, but not blocking the Sep 19-20
+dress rehearsal, whose purpose (per §39.3) is exercising the machinery, not certifying
+precision to the last digit.
+
+**What's still missing before this is a complete live pipeline**: `src/pipeline/generate_predictions.py`
+(the thin orchestration layer -- resolve tonight's real schedule, call `predict_game` per game,
+log output) doesn't exist yet; `predict_game.py` is the model-logic layer, callable directly
+(as this section's validation did) but not yet wired into a daily-run entry point.
 
