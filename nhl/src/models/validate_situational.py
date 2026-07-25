@@ -8,6 +8,7 @@ comparison against xg_based_poisson.
 import pandas as pd
 
 from src.models.baseline_naive_poisson import home_win_prob_regulation, score_distribution
+from src.models.final_holdout_check import DEV_MAX_SEASON
 from src.models.metrics_ledger import append_run
 from src.models.team_strength_situational import (
     add_walk_forward_situational_strength, build_team_game_situational_log, predict_situational_lambda,
@@ -34,7 +35,7 @@ def run_validation(min_season: int = 20102011) -> pd.DataFrame:
     log["league_avg_pp_toi_min"] = log["pp_toi_min"].shift(1).expanding().mean().bfill()
     log["league_avg_other_toi_min"] = log["other_toi_min"].shift(1).expanding().mean().bfill()
 
-    home_ice_multiplier = fit_home_ice_multiplier(log)
+    home_ice_multiplier = fit_home_ice_multiplier(log, max_season_exclusive=DEV_MAX_SEASON)
 
     games = log[log["is_home"]].copy()
     away_cols = ["gameId", "ev_attack_rate_per60", "ev_defense_rate_per60",

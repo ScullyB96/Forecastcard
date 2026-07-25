@@ -23,9 +23,6 @@ POLICY, from this point forward:
 
 import pandas as pd
 
-from src.models.metrics_ledger import append_run, compute_run_metrics
-from src.models.validate_goalie import run_validation
-
 DEV_MAX_SEASON = 20242025  # exclusive -- dev set is seasons < this; holdout is seasons >= this
 
 
@@ -36,6 +33,14 @@ def split_dev_holdout(results: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame
 
 
 if __name__ == "__main__":
+    # Local import (not module-level): this file is imported by many other modules purely for
+    # DEV_MAX_SEASON/split_dev_holdout; validate_goalie.run_validation is only needed for this
+    # script's own __main__ run, and a module-level import here creates a circular import with
+    # validate_goalie -> validate_situational_toi -> final_holdout_check (2026-07-25, found while
+    # fixing the home_ice_multiplier walk-forward-discipline gap).
+    from src.models.metrics_ledger import append_run, compute_run_metrics
+    from src.models.validate_goalie import run_validation
+
     r = run_validation()
     dev, holdout = split_dev_holdout(r)
     print(f"development set: {len(dev)} games (seasons < {DEV_MAX_SEASON})")

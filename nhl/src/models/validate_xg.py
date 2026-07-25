@@ -9,6 +9,7 @@ test, per team_strength_xg.py's stated scope.
 import pandas as pd
 
 from src.models.baseline_naive_poisson import home_win_prob_regulation, predict_game_lambdas, score_distribution
+from src.models.final_holdout_check import DEV_MAX_SEASON
 from src.models.metrics_ledger import append_run
 from src.models.team_strength_xg import add_walk_forward_xg_strength, build_team_game_xg_log
 from src.models.validate_baseline import fit_home_ice_multiplier
@@ -25,7 +26,7 @@ def run_validation(min_season: int = 20102011) -> pd.DataFrame:
 
     # Home ice fit on real goals, identical methodology to the baseline run
     # (see module docstring) -- isolates xG-vs-goals as the only variable.
-    home_ice_multiplier = fit_home_ice_multiplier(log)
+    home_ice_multiplier = fit_home_ice_multiplier(log, max_season_exclusive=DEV_MAX_SEASON)
 
     games = log[log["is_home"]].copy()
     away_side = log[~log["is_home"]][["gameId", "xg_attack_rate", "xg_defense_rate", "games_played_before"]]

@@ -6345,3 +6345,76 @@ the page observable. None of this blocks §37's rule from running day one: the r
 heuristic (already validated, §37.2) plus 39.1's real injury exclusion is a complete, working
 input; 39.2/39.3 are refinements to layer in as they become verifiable, not dependencies.
 
+## 40. A second walk-forward-discipline gap found and fixed: `home_ice_multiplier` (2026-07-25)
+
+Found while tracing the exact fitting boundaries needed to build a live single-game predictor
+(§41) -- confirming every constant's dev-only scope forced a careful re-check of the ENTIRE
+`_build_dev_base()` chain, not just the pieces §35 already fixed.
+
+**`fit_home_ice_multiplier`** (`validate_baseline.py`) took no season boundary argument at all --
+every caller passed it the unrestricted `log`, so `home_ice_multiplier` has been fit on
+dev+holdout COMBINED every single time it has ever been computed, including inside
+`_build_dev_base()`'s own production chain (`validate_situational_toi.run_validation` ->
+`validate_goalie.run_validation`). This is the exact same class of bug §35 fixed for
+`away_b2b_adj`/`ot_split`/the OT logistic `(a,b)` -- just in a different constant that fix never
+reached, because `run_situational_toi`/`validate_goalie.run_validation` only ever exposed a
+`min_season` FLOOR, never a `max_season` CEILING, so there was no way to even ASK this function
+to stop at the dev/holdout boundary.
+
+**Confirmed real, not just theoretical**: dev-only fit gives **1.047478**; the actual
+(contaminated) dev+holdout fit gives **1.046158** -- a real but small difference (-0.00132,
+~0.13% relative). **Fixed**: `max_season_exclusive` is now a REQUIRED argument (no silent default
+that could reintroduce this, matching §35.2's own precedent once a bug is confirmed real, not an
+opt-in flag) -- all 5 call sites updated (`validate_baseline.py`, `validate_xg.py`,
+`validate_situational_toi.py` -- the production-load-bearing one -- `validate_situational.py`,
+`validate_bias_decomposition.py`), all passing `DEV_MAX_SEASON` explicitly. Regression test added
+(`test_home_ice_multiplier_requires_dev_only_boundary`) confirming the argument is mandatory
+(missing it raises `TypeError`) and that dev-only fitting genuinely differs from unrestricted
+fitting on real data.
+
+**Fixing this surfaced a second, pre-existing issue**: `final_holdout_check.py` imported
+`validate_goalie.run_validation` at module level for its own `__main__`-only usage, creating a
+circular import once `validate_situational_toi.py` needed `DEV_MAX_SEASON` from
+`final_holdout_check.py` (`final_holdout_check -> validate_goalie -> validate_situational_toi ->
+final_holdout_check`). Fixed by moving that import local to `__main__` -- it was never needed at
+module level in the first place, since every OTHER caller of this file only ever needs
+`DEV_MAX_SEASON`/`split_dev_holdout`.
+
+**Verified this does NOT change the frozen headline number**: re-ran the market benchmark with
+the fix in place -- gap **0.00248, 95% CI [0.00143, 0.00354]** -- indistinguishable from the
+pre-fix frozen figure (0.00247, CI [0.00141, 0.00352]). Confirmed empirically, not assumed: this
+is a real discipline gap worth closing on principle (and worth being suspicious of every OTHER
+similarly-shaped function going forward), but it changes nothing about §38's frozen conclusions.
+Full regression suite (7 checks) re-run and passing after the fix.
+
+## 41. Building the live single-game predictor (in progress, 2026-07-25)
+
+The project has never had a live daily prediction entry point -- every existing script is either
+an ingest fetcher, a model component, or a `validate_*.py`/`check_*.py` BACKTEST script scoring
+already-completed games. `src/pipeline/` is empty except `__init__.py`. This section tracks
+building the first one.
+
+**Design, confirmed feasible by tracing the exact mechanics**: every global walk-forward constant
+in the production chain (`away_b2b_adj`, the OT logistic `(a,b)`, `ot_split`, the reg-ratio EWMA,
+the tie-mass calibration ratio, and now `home_ice_multiplier` per §40) is either a dev-fit-frozen
+constant or a single pooled EWMA/expanding-mean value -- "today's" value is simply the latest
+point in an already-existing series. `fit_deltas_per_game`'s tie-mass machinery only needs the
+PROJECTED joint distribution (computable for any hypothetical lambda pair), not a real outcome --
+so the full tie-mass transfer genuinely can run on an unplayed game.
+
+**The real complexity**: predicting a new matchup needs each team's own EV/PP/PK/other
+attack-and-defense per60 rates BEFORE they're combined against a specific opponent (from the
+per-team-game situational log inside `validate_situational_toi.py`, one layer below anything
+`run_treated()` exposes), combined via the existing `predict_situational_lambda` for the SPECIFIC
+tonight's-matchup pairing, then goalie overlay (real starter live, recent-workhorse heuristic +
+§39's RotoWire injury exclusion for prediction), then rest/B2B, then the latest global reg-ratio/
+tie-mass/OT-logistic constants above.
+
+**Status**: architecture fully traced and confirmed buildable; implementation in progress. Next:
+write the "combine two teams' latest state for a hypothetical game" function, reusing every
+existing scoring primitive, then validate it by predicting a real PAST game using only data
+through the day before and confirming it exactly matches what `run_treated()` already produced
+for that same game -- the cleanest possible correctness check, since for a real historical game
+the walk-forward EWMA "as of yesterday" is bit-identical to that game's own row value in the
+existing backtest output.
+

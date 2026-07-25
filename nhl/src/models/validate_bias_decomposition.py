@@ -16,6 +16,7 @@ re-derivation that could itself introduce a discrepancy.
 
 import pandas as pd
 
+from src.models.final_holdout_check import DEV_MAX_SEASON
 from src.models.shrinkage import add_walk_forward_mean
 from src.models.team_strength_situational import (
     _combine, add_walk_forward_situational_strength, build_team_game_situational_log,
@@ -47,7 +48,7 @@ def run_decomposition(min_season: int = 20102011, use_sh_term: bool = False) -> 
     log["pp_toi_shrunk_mean"] = log["pp_toi_shrunk_mean"].bfill()
     log["pk_toi_shrunk_mean"] = log["pk_toi_shrunk_mean"].bfill()
 
-    home_ice_multiplier = fit_home_ice_multiplier(log)
+    home_ice_multiplier = fit_home_ice_multiplier(log, max_season_exclusive=DEV_MAX_SEASON)
 
     games = log[log["is_home"]].copy()
     away_cols = ["gameId", "ev_attack_rate_per60", "ev_defense_rate_per60",

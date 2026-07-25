@@ -26,8 +26,10 @@ matching this project's own `validate_*.py`/`check_*.py` convention.
 import numpy as np
 import pandas as pd
 
+from src.models.baseline_naive_poisson import build_team_game_log
 from src.models.check_holdout_ot_logistic import run_full_range_with_dev_fit_constants
 from src.models.final_holdout_check import DEV_MAX_SEASON
+from src.models.validate_baseline import fit_home_ice_multiplier
 from src.models.validate_tie_mass_ratio import _bootstrap, run_baseline, run_treated
 
 FAILURES = []
@@ -160,6 +162,37 @@ def test_gbm_holdout_veto_sign():
           f"CI=[{lo_better:.5f},{hi_better:.5f}]")
 
 
+def test_home_ice_multiplier_requires_dev_only_boundary():
+    """Regression test for the walk-forward-discipline gap found 2026-07-25
+    (while building the live single-game predictor): `fit_home_ice_multiplier`
+    used to take no season boundary at all, so it was fit on dev+holdout
+    combined every time it ran, including inside `_build_dev_base()`'s own
+    production chain -- the same class of bug Sec35 fixed for
+    `away_b2b_adj`/`ot_split`/the OT logistic, just missed here since this
+    function lived one layer further down the call chain. `max_season_
+    exclusive` is now a REQUIRED argument (confirmed: calling without it
+    raises `TypeError`, so a future refactor can't silently drop the
+    boundary again) and dev-only fitting must differ (however slightly)
+    from unrestricted fitting on this project's real data."""
+    schedule = pd.read_parquet("data/raw/nhl_schedule_2008_2026.parquet")
+    schedule = schedule[(schedule["gameType"] == 2) & (schedule["gameState"] == "OFF")]
+    log = build_team_game_log(schedule)
+
+    try:
+        fit_home_ice_multiplier(log)
+        missing_arg_raises = False
+    except TypeError:
+        missing_arg_raises = True
+    check("fit_home_ice_multiplier requires max_season_exclusive (can't silently omit the boundary)",
+          missing_arg_raises)
+
+    dev_only_mult = fit_home_ice_multiplier(log[log["season"] < DEV_MAX_SEASON], max_season_exclusive=DEV_MAX_SEASON)
+    unrestricted_mult = fit_home_ice_multiplier(log, max_season_exclusive=log["season"].max() + 1)
+    check("dev-only fit differs from unrestricted (dev+holdout) fit on real data",
+          dev_only_mult != unrestricted_mult,
+          f"dev_only={dev_only_mult}, unrestricted={unrestricted_mult}")
+
+
 def test_no_dangling_for_else_remains():
     """Structural check for the dangling for/else bug found in
     validate_ev_toi_halflife.py's __main__ (fixed 2026-07-24): a
@@ -183,6 +216,8 @@ if __name__ == "__main__":
     test_gbm_holdout_veto_sign()
     print("\n=== test_no_dangling_for_else_remains ===")
     test_no_dangling_for_else_remains()
+    print("\n=== test_home_ice_multiplier_requires_dev_only_boundary ===")
+    test_home_ice_multiplier_requires_dev_only_boundary()
 
     print(f"\n{'='*60}")
     if FAILURES:
