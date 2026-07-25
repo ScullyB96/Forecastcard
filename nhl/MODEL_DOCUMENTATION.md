@@ -6279,3 +6279,69 @@ dev/holdout split exactly as before, with 2026-27's live data available as a gen
 previously-peeked-at confirmatory check once that work is ready — a luxury this project has not
 had for any adoption decision since early in its history.
 
+## 39. Task #44: RotoWire lineup/injury scraper + live odds capture (2026-07-25)
+
+Built and confirmed live where verifiable; one piece honestly deferred where it couldn't be.
+
+### 39.1 Injury/lineup-availability scraper — CONFIRMED WORKING, real live data
+
+`src/ingest/fetch_rotowire_injuries.py`. Found via browser network inspection (same technique as
+the MLB/NBA siblings' own RotoWire investigations): the injury-report page makes a clean,
+unauthenticated client-side fetch to `GET https://www.rotowire.com/hockey/tables/injury-report.php
+?team=ALL&pos=ALL`. Confirmed live 2026-07-25 (off-season — the only populated rows were real
+Sep 19-20 2026 preseason games): 104 real rows, fields `ID`/`URL`/`firstname`/`lastname`/`player`/
+`team`/`position`/`injury`/`status`/`rDate`/`date` — `rDate` is subscriber-gated and unusable,
+everything else is plain public data. `status` values actually observed: `Out` (76), `IR` (14),
+`IR-LT` (14) — no `Questionable`/`Day-To-Day`-type gradient appeared in this sample; the fetcher
+warns if a future response contains a status value outside the known set, rather than silently
+mis-handling it. `likely_out_player_names` gives the binary Out/IR/IR-LT exclusion set §37's
+recent-workhorse heuristic needs (a goalie flagged here should be excluded before falling back to
+"most recent starter", exactly matching the NBA sibling's own `resolve_active_lineup` pattern).
+Every real fetch archives a timestamped JSON snapshot to `data/raw/rotowire_injury_snapshots/` —
+RotoWire itself keeps no historical injury archive, so this project's own accumulated snapshots
+will be the only historical record available for task #45's eventual live re-measurement.
+
+### 39.2 Live odds capture — endpoint confirmed, schema NOT yet verified (honest limitation)
+
+`src/ingest/fetch_rotowire_odds.py`. Same site family, same technique: the NHL odds page makes a
+client-side fetch to `GET https://www.rotowire.com/betting/nhl/tables/nhl-games.php?date=YYYY-MM-DD`
+— confirmed real and genuinely date-parametrized (a real "today" URL and a real past-date URL both
+resolved distinctly, not a generic redirect). **But every date tried — 2026-07-25 (real live
+"today") and 2026-04-06 (a real past game date) — returned an empty `[]`.** This could mean either
+"the board is genuinely empty this far before a game" or "this endpoint only ever serves the
+imminent slate, never history" — the two can't be told apart from outside the off-season.
+Consequently `parse_games_response`'s field names (`home_ml`/`away_ml`/`total`/etc.) are a
+best-effort placeholder inferred from this project's own SBRO-odds convention, **not confirmed
+against a real populated response** — unlike every other fetcher in this codebase, which only ever
+documents fields actually observed. The fetch/archive mechanism itself is real and works (confirmed
+by running it), and every call snapshots its raw response to `data/raw/rotowire_odds_snapshots/`
+regardless of shape, so a real populated response captured once the season nears is never lost
+even before the parser is corrected. **Action required, flagged explicitly, not silently
+deferred**: re-run this once RotoWire's board actually populates (plausibly early-to-mid September,
+once preseason lines post) and fix `parse_games_response` to match whatever real fields come back.
+
+### 39.3 Starting-goalie CONFIRMATION specifically — not found, genuinely blocked by the off-season
+
+The NHL lineups page (`hockey/nhl-lineups.php`) — which would show each game's confirmed/projected
+starting goalie directly, the single most valuable signal for §37's degradation budget — reported
+"no games on the NHL schedule today" for every date tried (including an explicit `?date=` query
+param, which this specific page did not appear to honor) and made NO underlying data-table request
+at all while empty, unlike the injury and odds pages. This means its real JSON/data structure
+genuinely cannot be observed from outside a day with real scheduled games — not a shortcut taken,
+a real constraint of investigating this in July for a season that starts in October. **Deferred,
+not guessed**: re-investigate this specific page once real preseason or regular-season games are
+scheduled close enough that RotoWire populates it (the same Sep 19-20 window the injury report
+already shows real games for is the first plausible test date). Until then, §37's recent-workhorse
+heuristic plus 39.1's injury exclusion is the best available live signal — exactly the "realistic"
+comparator §37.2 already validated as capturing nearly all of the real-starter information value.
+
+### 39.4 Task #44 status, precisely
+
+**Real, working, done**: injury/availability data (39.1), the live odds fetch-and-archive mechanism
+(39.2's plumbing). **Confirmed real but not yet trustworthy for its parsed fields**: live odds
+schema (39.2's `parse_games_response`) — fix once real data exists. **Not yet built, honestly
+blocked**: starting-goalie confirmation parsing (39.3) — re-attempt once real scheduled games make
+the page observable. None of this blocks §37's rule from running day one: the recent-workhorse
+heuristic (already validated, §37.2) plus 39.1's real injury exclusion is a complete, working
+input; 39.2/39.3 are refinements to layer in as they become verifiable, not dependencies.
+
