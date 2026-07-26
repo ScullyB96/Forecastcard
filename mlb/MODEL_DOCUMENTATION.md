@@ -3129,6 +3129,131 @@ physics/dimensions prior (as suggested) is a legitimate future idea but a
 different, separate, and more speculative build than this bug fix — not
 combined with it here.
 
+## 11.28 The offseason fitted-constants refresh ritual, concretely scoped
+(2026-07-25, per external review item #2) — a full inventory, not a vague
+placeholder
+
+The review correctly flagged that every fitted regression in this project
+was fit once against a specific season-pair window and then frozen, with
+no scheduled cadence for revisiting any of them once a new season
+completes. Rather than write a generic "have a ritual" note, did a full
+inventory of every fitted constant in `src/models/` (~40 files checked)
+first, so the ritual has a real, complete checklist to execute against
+instead of relying on memory each offseason.
+
+**Tier 1 — mandatory every offseason, once the completed season's own
+data is available** (these are genuine same-methodology REFITS: rerun the
+identical leakage-free regression with one more season-pair added, ship
+only if it still clears its ORIGINAL validation bar, log the before/after
+to the ledger regardless of outcome):
+
+| Constant(s) | File | Refit adds | Re-clear this bar |
+|---|---|---|---|
+| `HR_SHARE_INTERCEPT/COEF_EXISTING/COEF_BARREL`, `HR_SHARE_PULLEDAIR_*` | `expected_stats.py` | 2025→2026 pair | Incremental R² positive, real-data multiplier range stays sane (no new blowup class) |
+| `HR_SHARE_PITCHER_INTERCEPT/COEF_EXISTING/COEF_GB/COEF_FB` | `expected_stats.py` | 2025→2026 pair (4th season-pair) | R² gain holds; full-stack SU/Brier re-check (this one has a confirmed +1.53pp SU full-stack win riding on it — the highest-stakes refit here) |
+| `DOUBLE_SHARE_PITCHER_*`, `DOUBLE_PLAY_SHARE_PITCHER_*` | `expected_stats.py` | 2025→2026 pair | R² gain holds; flag if the GB-coefficient sign instability (already seen in 1 of 3 original pairs) recurs |
+| `GROUNDBALL_SINGLE_INTERCEPT/COEF_REAL/COEF_SPEED` | `expected_stats.py` | one more batter-season cohort | Multivariate R² improvement over real-history-alone holds |
+| `PITCHER_STUFF_K_INTERCEPT/COEF_EXISTING/COEF_VELO/COEF_SPIN` | `expected_stats.py` | 2025→2026 pair (3rd) | R² improvement holds; real-data limit test (multiplier range) re-checked |
+| `SHOCK_SIGMA` | `validate_game_simulator.py` | 2026 as a 3rd validation season | std(z) still ≈1.0 on 2026; re-run the K=30/100/300 trial-count-robustness check before trusting any drift |
+| `HOOK_FRAILTY_SIGMA1`, `HOOK_FRAILTY_DECAY` | `hook_frailty.py` | 2025-2026 as fit data, refit grid search | Beats no-frailty and constant-sigma at every k on a NEW held-out season; re-check the still-unresolved P(still in at inning 7 \| clean start) tail |
+| `tier_by_margin`/`closer_by_situation` policy tables | `bullpen_usage_policy.py` (`TIER_POLICY_FIT_SEASONS`/`HOOK_TABLE_FIT_SEASONS = {2023,2024}`) | roll the fit window forward or add 2025 | Reproduces real usage patterns on newly-held-out data (same bar as task #144 step 1) |
+| `BATTER_PROP_CALIBRATION` (`p_2plus_hits`, `p_1plus_bb`, `p_1plus_rbi`) + a fresh 5-split check on `p_1plus_hit`/`p_1plus_hr` | `props.py` | fresh 150-game sample including 2026 | Full 5-split re-run (not just eyeballing point estimates — see sec 11.26's own lesson about this) |
+| `K_EFFECT_SLOPE`/`BB_EFFECT_SLOPE` (catcher) | `catcher_framing.py` | 2025→2026 YoY pair (4th) | YoY stability check still in the 0.3-0.5 range already established |
+| `K_EFFECT_SLOPE`/`BB_EFFECT_SLOPE` (umpire) | `umpire_factor.py` | 2025→2026 YoY pair (4th) | Same |
+| `GB_BABIP_*`, `XBH_AIR_*` (defense/OAA) | `defense_factor.py` | one more team-season pair | Correlation/R² sign and rough magnitude hold (these were already weak, R²=0.08/0.01 — a sign flip would be a real reason to drop them) |
+| Re-derived `STABILIZATION_PA_BATTER/_PITCHER` entries and `AGE_ADJ_SIGN_OVERRIDE` | `true_talent.py` | one more season of data | Correlation-vs-K sweep peak location unchanged; sign-override winner unchanged per category |
+
+**Tier 2 — explicitly EXCLUDED from the annual refit** (literature/external
+constants that should NOT be re-fit against this project's own, noisier
+data): `MARCEL_WEIGHTS`, `AGE_PEAK`/`AGE_ADJ_RATE_BELOW_PEAK`/
+`AGE_ADJ_RATE_ABOVE_PEAK` (Tango's published formula), 
+`PLATOON_STABILIZATION_PA` (*The Book*'s published value), most of
+`LINEAR_WEIGHTS` (published run values). Re-fitting these on our own data
+would replace a stable, well-established external estimate with a noisier
+in-house one for no real gain — don't.
+
+**Tier 3 — one-time "actually fit this for the first time," not a
+recurring refresh** (the inventory surfaced these as constants that were
+never properly validated at all, just reasoned defaults — different action
+item than a refit): `bullpen.py`'s `K_STARTS = 8` (explicitly flagged in
+its own comment as "not yet empirically re-validated"), and
+`weather_forecast.py`'s `WIND_MATCH_BOOST = 2.0` (explicitly documented as
+never checked against a real forecast-quality backtest). Both are
+long-standing, pre-existing gaps this inventory surfaced as a side effect,
+not new problems — worth a session, but not urgent enough to jump the
+queue ahead of task #154.
+
+**Tier 4 — reverted/dead constants, periodic-not-annual reconsideration**:
+`PITCH_WALK_*`, `CONTACT_QUALITY_BATSPEED_*`, `JETLAG_HIT_MULTIPLIER`, the
+sprint-speed-conditioned-transitions mechanism. All real, statistically
+fit signals that failed their full-stack A/B and are dead code today. Only
+worth re-testing if the sample size grows enough to plausibly change the
+full-stack verdict (order-of-magnitude more games, not one more season) —
+don't burn an offseason session re-running these on a marginal sample
+increase.
+
+**Ritual, concretely**: once a season completes, work Tier 1 top-to-bottom,
+each refit reusing that constant's ORIGINAL fitting script/methodology
+(cited in the table above) with the new season-pair appended. Ship a
+refit only if it clears the SAME bar the original did — a weaker bar
+"just to keep the constant updated" defeats the purpose. Log every
+refit attempt to the metrics ledger (kept or not), the same
+append-only discipline this project already uses for every other
+validation run. One scheduled session per offseason — this list makes
+that session boundedly scoped rather than open-ended.
+
+## 11.29 The October bat-speed/pulled-air resolution — protocol built and
+smoke-tested now, execution deferred (2026-07-25, per external review item
+#3)
+
+Bat speed and pulled-air rate are this project's two longest-standing
+"plausible-but-unconfirmed" signals (§11.7: real component-level R² gains,
+but full-stack SU/Brier CIs that keep including zero — §11.7's own estimate
+is that "multiple thousands" more games than the ~7,237 available would be
+needed to resolve this). By the end of the 2026 season, ~2,400 more real
+games become available. Rather than just re-noting the open question a
+third time, built the exact script that will run then.
+
+**`src/models/resolve_bat_speed_pulled_air.py`** (task #156): reuses
+`run_validation` with two new permanent flags, `disable_bat_speed`/
+`disable_pulled_air` (both `False` = byte-for-byte no-op, i.e. the TRUE
+current production baseline). Runs 3 arms in one script execution —
+baseline, bat-speed-off, pulled-air-off — specifically to avoid the exact
+stale/mismatched-baseline bug §11.9 caught (there, two scratch test arms
+were compared against a baseline parquet generated before an unrelated
+signal had been wired in). Uses `ab_significance.bootstrap_compare` for
+paired bootstrap CIs, same tool as every other keep/revert decision this
+project makes.
+
+**Pre-registered decision rule** (written into the script's own docstring,
+so the eventual call can't be shaded after the fact): both Brier CIs
+exclude zero in the beneficial direction → confirm both as real, proven
+wins. Both still include zero even at ~9,600-9,700 games → this is treated
+as license to actually REMOVE the dead-weight plumbing (delete
+`CONTACT_QUALITY_BATSPEED_*`/bat-speed code from `expected_stats.py` and
+its callers, same for `HR_SHARE_PULLEDAIR_*`/pulled-air) rather than
+re-documenting the same ambiguous status a fourth time — matching this
+project's stated "keep only on genuine net-positive" discipline. Mixed
+result → decide each signal independently.
+
+**Verified working, not yet run for real**: smoke-tested end-to-end on a
+tiny sample (n=60, 10 trials, 2025 only) — confirmed no crashes, confirmed
+the bootstrap comparison and ledger logging work. The bat-speed arm showed
+an exact-zero delta at this tiny scale, which looked suspicious enough to
+verify directly rather than wave off: called `contact_quality_multiplier`
+directly for a real batter with real bat-speed data, with and without it
+(`0.679` vs `0.767`, a real ~11% difference) — confirms the flag genuinely
+changes the batter profile; the zero-delta smoke-test result was pure
+small-sample coincidence at n=60/K=10, consistent with everything already
+known about this signal's tiny true effect size, not a mechanism bug. Reset
+to the real protocol values (`N_TRIALS=50`, `N_GAMES=25000` i.e. "every
+game available") before committing — the smoke test's own temporary output
+parquets were deleted, not left to be mistaken for a real read later.
+
+**Do not run this before October, and do not iterate against it once run**
+— same discipline as the 2026 H1 holdout (§0.3): one read, logged, acted
+on per the rule above, not re-run if the first answer is unwelcome.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):

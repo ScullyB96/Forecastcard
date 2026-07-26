@@ -313,7 +313,8 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
                     widen_w: float = 1.0, seed: int = 42, output_path=None,
                     write_ledger: bool = True, notes: str = "validate_game_simulator.py oracle backtest",
                     verbose: bool = True, shock_sigma: float = 0.0, crn_pairing: bool = False,
-                    trial_capture: dict | None = None) -> pd.DataFrame:
+                    trial_capture: dict | None = None,
+                    disable_bat_speed: bool = False, disable_pulled_air: bool = False) -> pd.DataFrame:
     """Run the real-games oracle backtest against `shared` (from
     build_shared_tables). widen_w=1.0, shock_sigma=0.0, crn_pairing=False
     (all defaults) + seed=42 reproduces this file's own historical default
@@ -327,7 +328,18 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
     CRN-paired arms (every decision besides the shock itself stays
     synchronized) instead of unpaired independent Monte Carlo runs -- see
     crn.py. False (the default) matches every existing caller's behavior
-    exactly (no CRN keys passed, sequential rng stream throughout)."""
+    exactly (no CRN keys passed, sequential rng stream throughout).
+
+    disable_bat_speed/disable_pulled_air: permanent, checked-in versions of
+    the scratch test arms sec 11.9 built ad-hoc to isolate these two
+    "plausible-but-unconfirmed" signals -- forces pregame_bat_speed/
+    pregame_pulled_air_rate to None in every batter_profile() call
+    regardless of what the snapshot resolves, exactly as if that signal had
+    never been built (contact_quality_multiplier/hr_share_multiplier both
+    already treat None as "fall back to the pre-signal formula", so this
+    needs no other plumbing). Both False (the default) is a byte-for-byte
+    no-op -- see resolve_bat_speed_pulled_air.py (task #156) for the
+    pre-registered protocol these exist for."""
     pa = shared["pa"]
     park_factors_wide = shared["park_factors_wide"]
     hfa_factors_by_season = shared["hfa_factors_by_season"]
@@ -418,6 +430,10 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
             sprint_speed = speed_snap.loc[pid] if pid in speed_snap.index else None
             gb_rate = gbsnap.loc[pid, "pregame_gb_rate"] if pid in gbsnap.index else None
             bat_speed = bat_speed_snap.loc[pid] if pid in bat_speed_snap.index else None
+            if disable_bat_speed:
+                bat_speed = None
+            if disable_pulled_air:
+                pulled_air = None
             return build_profile(row, prow, hand, pull_tercile=tercile, pregame_xbacon=xbacon,
                                   pregame_barrel_rate=barrel, pregame_bacon_gb=bacon_gb,
                                   pregame_sprint_speed=sprint_speed, pregame_gb_rate=gb_rate,
