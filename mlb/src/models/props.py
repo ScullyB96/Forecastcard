@@ -17,13 +17,28 @@ just run once per game at higher trial count and with full event-level
 tracking turned on (see game_simulator.py's `events` parameter) instead of
 only the final score.
 
-First-version scope, clearly flagged: RBI is approximated as runs scored on
-that specific PA (our transition table's own runs_scored output) -- close to
-but not identical to official MLB RBI rules in every edge case (e.g. a
-run-scoring double play charges no RBI in real scoring), a reasonable
-simplification given this project's PA-level, not out-by-out, event
-granularity. Stolen bases, defensive plays, and pitcher win/loss are out of
-scope -- this only covers what the underlying simulation actually models.
+RBI is approximated as runs scored on that specific PA (our transition
+table's own runs_scored output) -- close to but not identical to official
+MLB RBI rules in every edge case, a reasonable simplification given this
+project's PA-level, not out-by-out, event granularity. Task #154 (2026-07-25
+prop-rules audit) tightened this: `RBI_EXCLUDED_OUTCOMES` below now excludes
+`double_play` (Official Rule 9.04(b)(1) -- no RBI on a grounded-into force
+double play, unambiguous, no scorer's-judgment involved) and `field_error`
+(Rule 9.04(b)(2) -- no RBI when the run's scoring is a direct result of the
+same misplay, UNLESS the scorer judges the run would have scored regardless;
+our data has no way to make that specific judgment call, so this defaults to
+DENY -- a conservative approximation that may occasionally under-credit a
+real RBI, never over-credit one). Quantified on real 2025 data before
+fixing: double_play removed 68 of 21,594 season-total RBI-equivalent runs
+(0.31%), field_error another 164 (1.07% combined) -- individually small
+league-wide, but a real, systematic overstatement for any specific batter's
+own RBI prop. `fielders_choice` and `sac_bunt`/`sac_fly` are deliberately
+NOT excluded -- real official scoring generally DOES credit RBI on those
+(a fielder's choice run is credited unless it was itself a double-play
+situation, already carved out separately), so excluding them would make the
+approximation worse, not better. Stolen bases, defensive plays, and pitcher
+win/loss remain out of scope -- this only covers what the underlying
+simulation actually models.
 """
 
 import numpy as np
@@ -85,6 +100,14 @@ from src.utils.paths import DATA_PROCESSED, DATA_RAW
 HIT_OUTCOMES = {"single", "double", "triple", "home_run"}
 TOTAL_BASES = {"single": 1, "double": 2, "triple": 3, "home_run": 4}
 N_TRIALS = 1000
+
+# Task #154 (2026-07-25 prop-rules audit) -- see module docstring for the
+# exact rules and real-data quantification (0.31%/1.07% of season-total
+# RBI-equivalent runs). Used both here (the live prop) and in
+# validate_prop_calibration.py's "real" ground-truth RBI label, so any
+# future calibration re-check stays apples-to-apples against the SAME
+# definition of RBI, not a stale one on one side.
+RBI_EXCLUDED_OUTCOMES = {"double_play", "field_error"}
 
 HOOK_TABLE_FIT_SEASONS = {2023, 2024}  # matches task #145's own fit period exactly.
 
@@ -649,14 +672,22 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
 #
 # RE-CHECKED 2026-07-25 on a fresh 150-game/2024-2025 sample (row-level 5-split test,
 # not bucketed): p_1plus_hit 2/5 (still unstable, stays uncorrected), p_1plus_hr 1/5
-# (still unstable, third confirmation), p_1plus_rbi **5/5 -- a genuine reversal**,
-# fit on the FULL n=2700 sample and added below (raw Brier 0.21267 -> corrected
-# 0.21202, real if modest). See MODEL_DOCUMENTATION.md sec 8.3/8.5 for the full
-# reliability-curve numbers behind this decision.
+# (still unstable, third confirmation), p_1plus_rbi **5/5 -- passed, briefly deployed
+# below with (0.1196, 0.5977)**.
+#
+# REVERTED, same day, after task #154's RBI_EXCLUDED_OUTCOMES fix (see module
+# docstring): that "5/5, needs a 0.60 slope correction" result was fit against the
+# OLD, rule-violating RBI ground truth (which over-credited runs on double_play/
+# field_error outcomes). Once the ground truth itself was corrected, re-ran the SAME
+# 150-game sample + 5-split check: slope moved to ~1.10 (near-perfect, was 0.60) and
+# stability dropped to 1/5 (unstable -- a correction is no longer even fittable, let
+# alone needed). The original miscalibration was a symptom of the RBI-attribution
+# bug, not a real modeling flaw -- fixing the root cause fixed the calibration too.
+# p_1plus_rbi now joins p_1plus_hit/p_1plus_hr as correctly uncorrected. See
+# MODEL_DOCUMENTATION.md sec 8.3 for the full before/after numbers.
 BATTER_PROP_CALIBRATION = {
     "p_2plus_hits": (0.1106, 0.4892),  # 5/5 splits
     "p_1plus_bb": (0.0804, 0.6442),  # 4/5 splits
-    "p_1plus_rbi": (0.1196, 0.5977),  # 5/5 splits (2026-07-25 re-check)
 }
 
 
@@ -675,10 +706,16 @@ def _batter_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
     events_df["is_bb"] = events_df["outcome"].isin({"walk", "intent_walk"})
     events_df["is_k"] = events_df["outcome"] == "strikeout"
     events_df["bases"] = events_df["outcome"].map(TOTAL_BASES).fillna(0)
+    # Task #154: a run scored on a PA whose outcome is in RBI_EXCLUDED_OUTCOMES
+    # (double_play, field_error) doesn't count toward this batter's RBI prop --
+    # see module docstring for the exact rules and real-data quantification.
+    # The TOTAL runs-scored simulation itself is untouched; only the RBI
+    # attribution changes.
+    events_df["rbi_eligible_runs"] = events_df["runs"].where(~events_df["outcome"].isin(RBI_EXCLUDED_OUTCOMES), 0)
 
     per_trial = events_df.groupby(["batter_id", "trial"]).agg(
         hits=("is_hit", "sum"), hr=("is_hr", "sum"), bb=("is_bb", "sum"),
-        k=("is_k", "sum"), rbi=("runs", "sum"), bases=("bases", "sum"), pa=("outcome", "size"),
+        k=("is_k", "sum"), rbi=("rbi_eligible_runs", "sum"), bases=("bases", "sum"), pa=("outcome", "size"),
     ).reset_index()
 
     def summarize(g):
@@ -700,8 +737,20 @@ def _batter_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
 
 
 def _pitcher_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
-    """Per pitcher_id: mean/median strikeouts thrown, walks, hits, earned
-    runs allowed, and outs recorded (an innings-pitched proxy) across trials."""
+    """Per pitcher_id: mean/median strikeouts thrown, walks, hits, TOTAL runs
+    allowed, and outs recorded (an innings-pitched proxy) across trials.
+
+    Task #154 audit note: `mean_runs_allowed` was previously mis-described
+    here as "earned runs allowed" -- the underlying column was always
+    correctly total runs (earned + unearned), just wrongly labeled in this
+    docstring. Fixed the wording, not the computation. True earned-run
+    tracking (excluding runs that scored only because of a defensive error,
+    with the correct "would have ended the inning under average defense"
+    counterfactual official scoring actually applies) would need reasoning
+    about an error's downstream effect on the REST of the inning across
+    multiple PAs, not just this one -- out of scope for this project's
+    PA-level, not out-by-out, granularity. `mean_runs_allowed` should be
+    read as runs allowed, full stop, not an ERA-consistent figure."""
     events_df = events_df.copy()
     events_df["is_k"] = events_df["outcome"] == "strikeout"
     events_df["is_bb"] = events_df["outcome"].isin({"walk", "intent_walk"})

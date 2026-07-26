@@ -829,14 +829,17 @@ blowout substitution).
 - **Outputs**:
   - `_batter_props`: `pa_per_game`, `p_1plus_hit`, `p_2plus_hits`, `p_1plus_hr`,
     `p_1plus_bb`, `p_1plus_rbi`, `mean_total_bases`, `mean_hits`, `mean_k`. RBI is
-    approximated as runs scored on that specific PA (not exact MLB RBI rules — an explicit
-    first-version scope limitation). Three of five props (`p_2plus_hits`, `p_1plus_bb`,
-    `p_1plus_rbi`) pass through `_apply_batter_prop_calibration`, a post-hoc linear
-    recalibration `a + b*predicted` (clipped `[0.001, 0.999]`), fit because Monte Carlo
-    trial variance overstates night-to-night differentiation given the low per-game PA
-    count (~4/batter vs. a pitcher's ~20-25 batters faced). `p_1plus_hit` and `p_1plus_hr`
-    are deliberately left uncorrected — each failed the 4-5/5-split stability bar as of
-    the most recent check (see below).
+    approximated as runs scored on that specific PA, EXCLUDING runs on
+    `RBI_EXCLUDED_OUTCOMES = {double_play, field_error}` (task #154, see below) — still
+    not exact MLB RBI rules in every edge case (fielder's-choice RBI eligibility is
+    genuinely scorer's-judgment-dependent and left as-is, correctly), but materially
+    tighter than before. Two of five props (`p_2plus_hits`, `p_1plus_bb`) pass through
+    `_apply_batter_prop_calibration`, a post-hoc linear recalibration `a + b*predicted`
+    (clipped `[0.001, 0.999]`), fit because Monte Carlo trial variance overstates
+    night-to-night differentiation given the low per-game PA count (~4/batter vs. a
+    pitcher's ~20-25 batters faced). `p_1plus_hit`, `p_1plus_hr`, and (as of task #154)
+    `p_1plus_rbi` are deliberately left uncorrected — each failed the 4-5/5-split
+    stability bar as of the most recent check (see below).
 
     **Raw `p_1plus_hr` calibration, measured directly for the first time (2026-07-25,
     `validate_prop_calibration.py`, n=2700 batter-games, 150 real 2024-2025 games, 150
@@ -870,12 +873,63 @@ blowout substitution).
     identical saved sample (zero new compute): `p_1plus_hit` 2/5 splits favor a correction
     (unstable, stays uncorrected, consistent with task #138's own 3/5 post-shock finding on
     a bucketed version of the same test). `p_1plus_rbi` **5/5 splits favor the correction —
-    a genuine reversal** of task #138's 2/5 finding on this fresh sample. Fit on the full
-    n=2700 sample (`a=0.1196, b=0.5977`, raw Brier 0.21267 → corrected 0.21202) and
-    **deployed**: `BATTER_PROP_CALIBRATION` now includes `"p_1plus_rbi": (0.1196, 0.5977)`.
-    Four of five batter props now have a documented calibration status; only `p_1plus_hr`
-    remains an active, three-times-confirmed uncorrected case.
-  - `_pitcher_props`: `mean_k`, `mean_bb`, `mean_hits_allowed`, `mean_runs_allowed`,
+    a reversal** of task #138's 2/5 finding on this fresh sample. Fit on the full n=2700
+    sample (`a=0.1196, b=0.5977`, raw Brier 0.21267 → corrected 0.21202) and briefly
+    **deployed**: `BATTER_PROP_CALIBRATION` gained `"p_1plus_rbi": (0.1196, 0.5977)`.
+
+    **Reverted the same day (task #154 prop-rules audit)**: that 5/5-stable, slope-0.60
+    result turned out to be fitting a correction for the RBI-attribution BUG below, not a
+    real modeling flaw. See the RBI rule fix immediately following — after correcting the
+    RBI ground truth, the calibration slope moved to ~1.10 (near-perfect) and stability
+    dropped to 1/5 (unstable, no correction fittable or needed). `p_1plus_rbi` now joins
+    `p_1plus_hit`/`p_1plus_hr` as correctly uncorrected — three of five batter props stay
+    raw, two (`p_2plus_hits`, `p_1plus_bb`) are corrected, and there's no longer an "active"
+    open calibration question on any of them.
+
+    **Task #154 (2026-07-25 prop-rules audit) — two real, verified fixes to the RBI
+    approximation, plus confirmation the pitcher-K prop survived the hook-frailty
+    attribution change:**
+
+    1. **`RBI_EXCLUDED_OUTCOMES = {double_play, field_error}`** (module-level constant,
+       shared by `props.py`'s live computation and `validate_prop_calibration.py`'s "real"
+       ground-truth label, so a future recalibration test never compares an improved
+       simulated metric against a stale ground truth). `double_play`: Official Rule
+       9.04(b)(1), no RBI on a grounded-into force double play — unambiguous, no scorer's
+       judgment involved. `field_error`: Rule 9.04(b)(2), no RBI when the run's scoring is a
+       direct result of the same misplay, unless the scorer judges the run would have
+       scored regardless — this project's PA-level granularity can't make that specific
+       judgment call, so this defaults to DENY (conservative: may occasionally under-credit
+       a real RBI, never over-credits one). `fielders_choice` and `sac_bunt`/`sac_fly` are
+       deliberately NOT excluded — real official scoring generally DOES credit RBI on those.
+       **Quantified on real 2025 data before fixing**: of 21,594 season-total RBI-equivalent
+       runs, `double_play` accounted for 68 (0.31%) and `field_error` another 164 (1.07%
+       combined) — individually small league-wide, but a real, systematic per-player
+       overstatement, and (see above) the actual root cause of `p_1plus_rbi`'s apparent
+       miscalibration all along.
+    2. **`_pitcher_props`'s own docstring previously mis-described `mean_runs_allowed` as
+       "earned runs allowed"** — the column itself was always correctly named and computed
+       as TOTAL runs (earned + unearned); only the docstring wording was wrong. Fixed the
+       wording, not the computation. True earned-run tracking would need reasoning about an
+       error's downstream effect across the REST of an inning's multiple PAs (the official
+       "what would have happened with average defense" counterfactual), not just the current
+       PA — out of scope for this project's granularity; `mean_runs_allowed` should be read
+       as runs allowed, full stop, not an ERA-consistent figure.
+    3. **Post-hook pitcher-K prop re-check** (the other half of task #154's scope): hook-
+       frailty has been live in `props.py` since sec 11.25, which changes which pitcher
+       accumulates simulated innings/Ks per trial (a correctly-fixed attribution, not a
+       bug — see sec 11.25's own `hook_result` fix). This session's `p_6plus_k` reads (both
+       the original HR-prop investigation and this task #154 re-run) were ALREADY generated
+       under that post-hook attribution: `actual = 0.0018 + 0.8666*predicted`, corr=0.9997,
+       Brier 0.0534 vs. naive 0.0876 — excellent, consistent with every prior `p_6plus_k`
+       reading this project has ever taken (a pitcher's ~20-25 batters faced is a much
+       larger single-game information budget than a batter's ~4 PA). **No regression from
+       the hook-frailty attribution change** — this closes task #154's second half.
+
+    Full before/after numbers and the exact rule citations: this section and the metrics
+    ledger. No fielders-choice change, no game-level simulation change — this was a
+    props-layer-only fix, total runs scored (and every other factor) are byte-identical.
+  - `_pitcher_props`: `mean_k`, `mean_bb`, `mean_hits_allowed`, `mean_runs_allowed` (TOTAL
+    runs allowed, earned + unearned — see task #154 docstring fix above, not ERA-consistent),
     `mean_batters_faced`, `p_6plus_k`.
   - `_inning_props`: P(1+ run) per team per inning.
   - `_game_props`: `home_win_prob`, `away_win_prob`, `mean_home_score`, `mean_away_score`,

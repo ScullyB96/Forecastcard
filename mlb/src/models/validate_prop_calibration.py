@@ -18,7 +18,7 @@ own convention -- only the BULLPEN remains genuinely predictive.
 import numpy as np
 import pandas as pd
 
-from src.models.props import HIT_OUTCOMES, build_pregame_context, generate_game_props
+from src.models.props import HIT_OUTCOMES, RBI_EXCLUDED_OUTCOMES, build_pregame_context, generate_game_props
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
 N_GAMES = 150
@@ -39,8 +39,14 @@ def _real_batter_outcomes(game_pa: pd.DataFrame) -> pd.DataFrame:
     tmp["is_hr"] = tmp["outcome"] == "home_run"
     tmp["is_bb"] = tmp["outcome"].isin({"walk", "intent_walk"})
     tmp["is_k"] = tmp["outcome"] == "strikeout"
+    # Task #154: matches props.py's RBI_EXCLUDED_OUTCOMES exactly, so the
+    # "real" ground-truth RBI label uses the SAME definition of RBI as the
+    # simulated prop being checked against it -- otherwise a recalibration
+    # fit would be comparing an improved simulated metric against a stale,
+    # still-approximate "ground truth".
+    tmp["rbi_eligible_runs"] = tmp["runs_scored"].where(~tmp["outcome"].isin(RBI_EXCLUDED_OUTCOMES), 0)
     real = tmp.groupby("batter").agg(hits=("is_hit", "sum"), hr=("is_hr", "sum"), bb=("is_bb", "sum"),
-                                       rbi=("runs_scored", "sum"), k=("is_k", "sum")).reset_index()
+                                       rbi=("rbi_eligible_runs", "sum"), k=("is_k", "sum")).reset_index()
     real["actual_1plus_hit"] = (real["hits"] >= 1).astype(int)
     real["actual_2plus_hits"] = (real["hits"] >= 2).astype(int)
     real["actual_1plus_hr"] = (real["hr"] >= 1).astype(int)
