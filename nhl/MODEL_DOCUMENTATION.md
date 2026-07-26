@@ -6569,3 +6569,22 @@ requirement) with its injury snapshot attached. Confirmed end-to-end against the
 4-game day: log verifies clean (`4 entries, hash chain intact`), predictions match every earlier
 validation. Full regression suite (22 checks across 4 test files) passing.
 
+### 42.3 Task #58: the day-zero runbook, written
+
+**`RUNBOOK.md`** (repo root, deliberately separate from this research log -- a quick-reference
+operational document, not the exhaustive evidentiary record). Covers: what runs when each day,
+what the schema-guard canaries look like when they fire and how to respond, §37.4's degradation
+budget made concrete (the actual threshold table, what "breached" triggers), §37.5-37.6's
+live-vs-market improvement channel (explicitly NOT the same as the degradation trigger, read
+once per season phase, never reacted to mid-season), the known residuals an operator should not
+panic about (the ~0.09 EV-bucket undershoot, single-week SU noise, the live predictor's own
+~0.3-1% validation residual), how to verify the immutable prediction log, and what documenting an
+emergency fix requires before touching the frozen configuration.
+
+**This closes out all five items from the original pre-October punch list**: the dress rehearsal
+is scheduled, season-boundary mechanics are verified, ingest canaries are built, the immutable
+prediction log exists, and this runbook is written. What's left before October is real: the
+Sep 19-20 rehearsal itself (can't happen before real games exist), the odds-parser fix and
+lineups-page investigation that rehearsal is meant to close, and the MoneyPuck refresh-latency
+measurement -- all correctly deferred, none of them silently forgotten.
+
