@@ -113,17 +113,65 @@ def build_rated_goalie_log(schedule: pd.DataFrame) -> tuple[pd.DataFrame, pd.Dat
     return raw, rated
 
 
+def _normalize_goalie_name(name: str) -> str:
+    return "".join(ch for ch in name.lower().strip() if ch.isalnum() or ch.isspace())
+
+
 def predict_starter(goalie_log: pd.DataFrame, team: str, as_of_date: pd.Timestamp,
-                     window_games: int = HEURISTIC_WINDOW_GAMES) -> str | None:
-    """Recent-workhorse heuristic (matches `validate_goalie_info_gap.py`
-    exactly): whichever goalie had the most starts among this team's own
-    trailing `window_games` real appearances strictly before `as_of_date`."""
+                     window_games: int = HEURISTIC_WINDOW_GAMES,
+                     injury_report: list[dict] | None = None, team_abbrev: str | None = None) -> str | None:
+    """Recent-workhorse heuristic (matches `validate_goalie_info_gap.py`'s
+    dev-only backtest version): whichever goalie had the most starts among
+    this team's own trailing `window_games` real appearances strictly
+    before `as_of_date` -- **now WITH real RotoWire injury exclusion for
+    live prediction** (Sec39.1/Sec42.2), which the dev-only backtest
+    version never needed (no historical injury archive exists to backtest
+    against) but a genuine live prediction should use, matching the
+    NHL/NBA/MLB siblings' shared "recent-workhorse heuristic + real-time
+    injury exclusion" design.
+
+    `injury_report`: raw rows from `fetch_rotowire_injuries.
+    fetch_current_injury_report()`; `team_abbrev` must be RotoWire's own
+    3-letter code for `team` (this project's own NHL API abbreviation --
+    confirmed matching directly in `fetch_rotowire_injuries.py`'s own
+    docstring sample, no crosswalk needed unless a future mismatch is
+    found). Matches by NORMALIZED NAME against `goalie_log`'s own
+    `goalieNameForShot` -- a name with no match is logged, not silently
+    ignored (same convention as `fetch_rotowire_injuries.likely_out_
+    player_names`'s own callers)."""
     team_hist = goalie_log[(goalie_log["team"] == team)
                             & (pd.to_datetime(goalie_log["gameDate"]) < as_of_date)].sort_values("gameDate")
-    recent = team_hist["goalieIdForShot"].tail(window_games).values
-    if len(recent) == 0:
+    recent = team_hist[["goalieIdForShot", "goalieNameForShot"]].tail(window_games)
+    if recent.empty:
         return None
-    vals, counts = np.unique(recent, return_counts=True)
+
+    excluded_ids = set()
+    if injury_report is not None and team_abbrev is not None:
+        from src.ingest.fetch_rotowire_injuries import likely_out_player_names
+        # Filter to goalies (position "G") BEFORE checking -- the raw injury report covers every
+        # position, and checking skater names against a goalie-only history would print a
+        # misleading "cannot exclude" warning for every injured skater, not just goalies.
+        goalie_injury_rows = [r for r in injury_report if r.get("position") == "G"]
+        out_names = {_normalize_goalie_name(n) for n in likely_out_player_names(goalie_injury_rows, team_abbrev)}
+        # BUG FOUND AND FIXED (2026-07-25, caught by the live orchestration test, not silently
+        # shipped): `.set_index(team_hist[...])` used the FULL, non-deduplicated `team_hist`
+        # column as the new index while `.drop_duplicates(...)` had already shrunk the frame
+        # itself -- a length mismatch (confirmed real: "Expected 29 rows, received array of
+        # length 1397" on every single game in the first live test run). Both operations must
+        # use the SAME already-deduplicated subset.
+        deduped = team_hist.drop_duplicates("goalieIdForShot")
+        id_by_name = deduped.set_index(deduped["goalieNameForShot"].map(_normalize_goalie_name))["goalieIdForShot"]
+        for norm_name in out_names:
+            if norm_name in id_by_name.index:
+                excluded_ids.add(id_by_name.loc[norm_name])
+            else:
+                print(f"predict_starter: RotoWire flagged '{norm_name}' ({team_abbrev}) as Out/IR but no "
+                      f"matching goalie found in this team's own recent appearance history -- cannot exclude", flush=True)
+
+    candidates = recent[~recent["goalieIdForShot"].isin(excluded_ids)]
+    if candidates.empty:
+        candidates = recent  # every recent starter is flagged out -- fall back rather than predict no starter at all
+    vals, counts = np.unique(candidates["goalieIdForShot"].values, return_counts=True)
     return vals[np.argmax(counts)]
 
 
@@ -281,12 +329,19 @@ def _latest_before(games_sorted: pd.DataFrame, as_of: pd.Timestamp, col: str) ->
     return float(prior[col].iloc[-1])
 
 
-def predict_game(home_team: str, away_team: str, game_date: str, state: dict = None) -> dict:
+def predict_game(home_team: str, away_team: str, game_date: str, state: dict = None,
+                  injury_report: list[dict] | None = None) -> dict:
     """Predicts a hypothetical matchup on `game_date` (YYYY-MM-DD, or any
     date -- including a REAL PAST date, for validation against
     `run_treated()`'s own already-computed output on that exact game).
     `state`: pass a pre-built `_global_constants(...)` dict to avoid
-    rebuilding it per call (expensive); None rebuilds it fresh."""
+    rebuilding it per call (expensive); None rebuilds it fresh.
+    `injury_report`: raw rows from `fetch_rotowire_injuries.
+    fetch_current_injury_report()` -- None (the default, and always the
+    case for a real past date, since no historical injury archive exists)
+    means the recent-workhorse heuristic runs with no injury exclusion at
+    all (Sec37.2's "realistic" comparator already validated this alone
+    recovers nearly all of the real-starter information value)."""
     as_of = pd.Timestamp(game_date)
     schedule = _load_schedule()
     if state is None:
@@ -322,8 +377,8 @@ def predict_game(home_team: str, away_team: str, game_date: str, state: dict = N
 
     goalie_log = state["goalie_log"]
     raw_goalie_appearances = state["raw_goalie_appearances"]
-    home_starter = predict_starter(goalie_log, home_team, as_of)
-    away_starter = predict_starter(goalie_log, away_team, as_of)
+    home_starter = predict_starter(goalie_log, home_team, as_of, injury_report=injury_report, team_abbrev=home_team)
+    away_starter = predict_starter(goalie_log, away_team, as_of, injury_report=injury_report, team_abbrev=away_team)
     home_goalie = goalie_relative_as_of(raw_goalie_appearances, home_starter, as_of, home_team)
     away_goalie = goalie_relative_as_of(raw_goalie_appearances, away_starter, as_of, away_team)
     lam_home = max(lam_home - away_goalie, GOALIE_ADJUSTMENT_FLOOR)

@@ -6529,3 +6529,43 @@ multi-day-discovery-gap into an immediate, loud failure instead.
 **Still not measured** (can't be, off-season): MoneyPuck's actual refresh-lag timing -- whether a
 7pm slate can rely on same-day data. Flagged for the Sep 19-20 dress rehearsal (§39.3).
 
+### 42.2 Task #57: immutable pre-game prediction log, built -- and real injury exclusion finally wired in
+
+`src/models/prediction_log.py` -- the credibility backbone §37 assumes exists: every live
+model-vs-market comparison, the degradation budget, and the season-phase segmentation all
+assume a prediction was recorded before puck drop, with a timestamp and an input snapshot, in a
+form that provably can't be revised after outcomes land. This is a DIFFERENT artifact from
+`metrics_ledger.parquet` (which tracks backtest runs).
+
+**"Provably can't be revised" is a real, checkable property, not a naming convention**: each
+entry is hash-chained (`this_hash = sha256(prev_hash + entry)`), so editing, deleting, or
+reordering ANY past entry breaks the chain from that point forward. `verify_log()` recomputes
+every hash and reports exactly where a chain first diverges. Confirmed via 5 regression tests
+that it actually detects each attack (edit, delete, reorder), not just that it appends cleanly.
+Explicit, honest scope: this proves a specific local file wasn't silently edited after the fact
+-- it's not a cryptographic timestamp service or protection against someone fabricating an
+entirely new file from scratch, and the doc says so rather than overstating the guarantee.
+
+**Building this surfaced a real, load-bearing gap**: `predict_game.py`'s goalie heuristic never
+actually used the RotoWire injury data built in §39 -- it was pure recent-workhorse with no
+injury awareness at all, even though the whole plan since §37 was "recent-workhorse heuristic +
+real-time injury exclusion." Fixed: `predict_starter` now accepts a real injury-report snapshot
+and excludes any goalie RotoWire flags Out/IR/IR-LT (filtered to `position=="G"` specifically --
+the raw report covers every position, and checking skater names against a goalie-only history
+would print a misleading "cannot exclude" warning for every injured skater).
+
+**Two more real bugs found by the live orchestration test itself** (not caught by any unit
+test in isolation -- every single game failed the first time this ran end-to-end):
+1. A length mismatch: `.set_index(team_hist[...])` used the FULL, non-deduplicated `team_hist`
+   column as the new index while `.drop_duplicates(...)` had already shrunk the frame -- both
+   operations must use the SAME already-deduplicated subset. Confirmed the fix by verifying the
+   exclusion mechanism actually changes the predicted starter when a real flagged goalie (Filip
+   Gustavsson, MIN, real live "Out" status) would otherwise have been picked.
+2. The noisy false-warning above (fixed by filtering to goalies before checking).
+
+`generate_predictions.py` now fetches the real injury report ONCE per run, passes it to every
+game's prediction, and logs each prediction immediately (before puck drop, per §37's own
+requirement) with its injury snapshot attached. Confirmed end-to-end against the real 2026-04-06
+4-game day: log verifies clean (`4 entries, hash chain intact`), predictions match every earlier
+validation. Full regression suite (22 checks across 4 test files) passing.
+

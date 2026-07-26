@@ -29,7 +29,9 @@ from datetime import date
 import pandas as pd
 
 from src.ingest.fetch_nhl_api import fetch_schedule_range
+from src.ingest.fetch_rotowire_injuries import fetch_current_injury_report
 from src.models.predict_game import _global_constants, _load_schedule, predict_game
+from src.models.prediction_log import append_prediction
 from src.pipeline.refresh_data import refresh_all
 from src.utils.paths import DATA_PROCESSED
 
@@ -54,11 +56,17 @@ def run(game_date: str) -> pd.DataFrame:
     schedule = _load_schedule()
     state = _global_constants(schedule)
 
+    # Fetched ONCE per run (not once per game) -- same real-time injury snapshot applies to
+    # every game priced in this call, and gets logged alongside each one (Sec42.2) so the exact
+    # input a live prediction was made from is reconstructable later.
+    injury_report = fetch_current_injury_report()
+
     print(f"\n{len(todays_games)} games on {game_date}:\n", flush=True)
     results = []
     for row in todays_games.itertuples(index=False):
         try:
-            pred = predict_game(row.homeTeamAbbrev, row.awayTeamAbbrev, game_date, state=state)
+            pred = predict_game(row.homeTeamAbbrev, row.awayTeamAbbrev, game_date, state=state,
+                                 injury_report=injury_report)
         except ValueError as e:
             print(f"  {row.awayTeamAbbrev} @ {row.homeTeamAbbrev}: skipped ({e})", flush=True)
             continue
@@ -71,11 +79,22 @@ def run(game_date: str) -> pd.DataFrame:
         print(line, flush=True)
         results.append({**pred, "gameId": row.gameId, "gameType": row.gameType})
 
+        # Logged immediately per game, before puck drop -- the immutable record Sec37's
+        # live-vs-market series and degradation budget both assume exists (Sec42.2).
+        append_prediction(
+            game_id=row.gameId, game_date=game_date, home_team=pred["home_team"], away_team=pred["away_team"],
+            lambda_home=pred["lambda_home"], lambda_away=pred["lambda_away"],
+            home_win_prob_full=pred["home_win_prob_full"],
+            home_starter_goalie_id=pred["home_starter_goalie_id"], away_starter_goalie_id=pred["away_starter_goalie_id"],
+            injury_report_snapshot=injury_report, game_type=row.gameType,
+        )
+
     result_df = pd.DataFrame(results)
     if not result_df.empty:
         out_path = DATA_PROCESSED / f"daily_predictions_{game_date}.parquet"
         result_df.to_parquet(out_path, index=False)
-        print(f"\nsaved {out_path}", flush=True)
+        print(f"\nsaved {out_path} (mutable convenience snapshot -- the immutable record is "
+              f"data/processed/live_prediction_log.jsonl)", flush=True)
     return result_df
 
 
