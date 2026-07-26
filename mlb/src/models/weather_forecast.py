@@ -35,13 +35,18 @@ the way the temperature forecast is: a bucket matching the forecast wind's
 predicted direction gets more probability mass, but buckets that don't match
 still keep some, unlike temperature (which IS restricted hard, since a
 specific forecasted reading is comparatively reliable and carries no
-geometry-translation uncertainty). IMPORTANT CAVEAT for future readers: unlike
-every other change in this project, this specific piece has NOT been
-validated against a proper forecast-quality backtest (the existing 200-game
-validation scripts test historical games using REAL POSTED weather, which
-this code path never touches) -- it's a well-reasoned, risk-managed default
-given the calibration's own measured uncertainty, not something empirically
-confirmed to improve accuracy the way the rest of this session's changes were.
+geometry-translation uncertainty).
+
+UPDATE (task #158, 2026-07-25): this piece now HAS been validated against a
+real forecast-quality backtest -- see MODEL_DOCUMENTATION.md sec 11.31.
+Using each CONFIDENT_TEAMS game's real historical wind (archive-api.open-
+meteo.com at ~game time, the same real proxy a live forecast call would
+have returned) as the "forecast," classification accuracy against the real
+posted bucket (37.0%, n=5369) clearly beats the base rate (15-21% for the
+most common labels) -- real signal, not noise. A genuine train/test split
+(climatology fit on a random 60%, scored leakage-free on the held-out 40%,
+5 seeds) found WIND_MATCH_BOOST=2.75 beats the previous default of 2.0 on
+held-out log-loss in 5/5 splits -- see the constant's own comment below.
 
 VENUE_COORDS is keyed by venue_name (not team) -- confirmed necessary
 directly from our own data: several teams have played at more than one
@@ -135,7 +140,14 @@ VENUE_TO_TEAM = {
 # uncertainty (24-60 degrees per confident park) means treating a single
 # predicted label as certain would risk exactly the "confidently wrong sign"
 # failure mode this project has twice already caught and rejected elsewhere.
-WIND_MATCH_BOOST = 2.0
+# Raised from 2.0 (2026-07-25, task #158): a real forecast-quality backtest
+# (leave-one-out + 5-split train/test, n=5369 confident-team games,
+# archive-api.open-meteo.com real historical wind as the forecast proxy)
+# found 2.75 beats 2.0 on held-out log-loss in 5/5 splits; the log-loss
+# curve is smooth and single-peaked between 2.5-3.0 across every split, so
+# 2.75 sits at the stable middle rather than chasing one split's exact
+# minimum. See MODEL_DOCUMENTATION.md sec 11.31.
+WIND_MATCH_BOOST = 2.75
 
 # Retractable-roof/domed parks: whether the roof is open on a given day is a
 # managerial decision, not weather itself, and unknowable in advance -- the

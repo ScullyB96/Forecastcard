@@ -3417,6 +3417,75 @@ re-runnable tool (not a one-time script) — worth re-running whenever a new
 downstream signal is deployed for a top-ranked category, to check whether
 the deployed fix actually closed the gap this table originally measured.
 
+## 11.31 Task #158: the two Tier 3 "never actually validated" placeholders,
+checked for the first time (2026-07-25)
+
+Continuing directly from the audit table (sec 11.30) toward the
+foundation-constants sweep — but most of Tier 1's own refit list (sec
+11.28) requires a COMPLETED 2026 season (several entries are explicitly
+"2025→2026 season-PAIR" refits, e.g. `HR_SHARE_*`'s recency-weighted prior-
+season average needs both halves of the pair to be full seasons). Running
+those mid-season (today is 2026-07-25, 2026 is roughly half over) would
+silently corrupt the exact same-methodology bar the ritual itself demands —
+so Tier 1 stays queued for real offseason execution. Tier 3's two items,
+by contrast, test already-COMPLETE 2023-2025 data and were never blocked at
+all — pivoted to those instead.
+
+**(1) `K_STARTS = 8` in `bullpen.py`** — same leakage-free K-sweep
+methodology as task #64's `STABILIZATION_PA_*` sweep: preseason (prior-
+season-only, recency-weighted) expected-innings-per-start estimate at each
+candidate K, correlated against real target-season innings/start (min 8
+real starts to qualify), for target_season in {2024, 2025}.
+
+Result: the two target seasons **disagree in direction** across the full
+tested range (K=0.5 to K=300) — 2024 favors close to ZERO shrinkage
+(corr peaks at the smallest tested K, 0.599 at K=0.5, monotonically falling
+to 0.324 at K=300), while 2025 is nearly flat but if anything trends the
+OTHER way, still rising slightly at the largest tested K (0.340 at K=0.5 up
+to 0.362 at K=300). Neither season shows an interior peak; they don't even
+agree on which direction is better. Per this project's own "requires a
+stable, agreeing sweep before changing a constant" discipline (task #64),
+this is a clean non-result — no re-tune is justified. Context: pooled
+`prior_starts` has a median of ~130 (multi-season recency-weighted), so for
+a typical established starter K=8 is already negligible relative to that
+scale (reliability ≈0.94+ regardless of K); the constant mostly only
+matters for pitchers with under ~20 prior starts (rookies, short-tenured
+relievers converted to starters), a real caveat on how much this constant
+even can matter in practice. **Kept at 8, now checked for the first time
+rather than left as a never-validated placeholder** — no code change.
+
+**(2) `WIND_MATCH_BOOST = 2.0` in `weather_forecast.py`** — the module's
+own docstring flagged this as the one piece in the whole weather stack
+never checked against a real forecast-quality backtest (existing
+validators only replay REAL POSTED weather, a code path this one never
+touches). Built `src/models/validate_wind_forecast_boost.py`: for every
+`CONFIDENT_TEAMS` game with real posted weather (2023-2025, non-domed,
+n=5411), fetched that venue's REAL historical wind at ~game time from
+archive-api.open-meteo.com (the same free source `park_orientation.py`
+used for its own bearing calibration) as a stand-in for what a live
+forecast call would have returned, classified via the same
+`forecast_wind_to_bucket_suffix` the live code path uses.
+
+Two-stage result:
+- **Real signal confirmed first**: forecast-suffix classification accuracy
+  is 37.0% (n=5369 directional games) vs. base rates of 15-21% for the
+  most common real labels (calm 21.5%, cross_LtoR 15.3%) — clearly real,
+  not noise, before trusting any boost-value comparison built on it.
+- **Genuine 60/40 train/test split** (climatology fit on a random 60%,
+  scored leakage-free on the held-out 40%, 5 seeds — this project's own
+  5-split stability convention applied to log-loss instead of
+  correlation): `WIND_MATCH_BOOST=2.75` beat the previous default of 2.0
+  on held-out log-loss in **5/5 splits**. The log-loss curve is smooth and
+  single-peaked between 2.5-3.0 in every split (never a sharp single-point
+  spike), so 2.75 was chosen as the stable middle of that range rather than
+  chasing any one split's exact minimum. Example (seed 0, n≈1559 test
+  games): log-loss 1.26563 (no boost) → 1.19420 (boost=2.0, old default)
+  → 1.18378 (boost=2.75, new default) → 1.18350 (boost=3.0).
+
+**Deployed**: `WIND_MATCH_BOOST` raised 2.0 → 2.75 in `weather_forecast.py`,
+with the module docstring's "never validated" caveat updated to point here.
+Both findings logged to the metrics ledger.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):
