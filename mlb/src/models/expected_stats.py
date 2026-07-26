@@ -520,16 +520,31 @@ CONTACT_QUALITY_CLIP_MIN, CONTACT_QUALITY_CLIP_MAX = 0.10, 0.60
 #
 # The SAME test for home_run-share-among-hits (hr_share_multiplier below)
 # ALSO showed real incremental value (R^2 0.379->0.405, existing+barrel ->
-# +bat_speed) but failed its own real-data limit test: multipliers up to
-# 5.5x for batters with zero real home runs in their sample, the exact same
-# "regression intercept prevents predicting near-zero" failure mode this
+# +bat_speed) but originally failed its own real-data limit test: multipliers
+# up to 5.5x for batters with zero real home runs in their sample, the exact
+# same "regression intercept prevents predicting near-zero" failure mode this
 # file's own HR_SHARE_CLIP_MIN/MAX docstring already documents for the
-# ORIGINAL 2-predictor version -- a tighter clip floor (0.10) tames it, but
-# that would clip real, weak-power hitters far more aggressively than the
-# genuine data range (1st pctile ~0.03) warrants. NOT built -- a real,
-# validated incremental signal that isn't safely deployable with this
-# specific regression without more work than this session's scope allows,
-# same "found real signal but didn't clear the full bar" treatment as CSW%.
+# ORIGINAL 2-predictor version -- a tighter clip floor (0.10) tamed it, but
+# that would have clipped real, weak-power hitters far more aggressively than
+# the genuine data range (1st pctile ~0.03) warrants, so it was left NOT
+# built at the time.
+#
+# REVISITED 2026-07-25 (task #159, prompted by the audit table sec 11.30
+# independently reconfirming real R^2 was still on the table for HR-share):
+# root-caused the original rejection -- the blowup was never really about
+# bat_speed itself (the worst offenders have perfectly ORDINARY bat speeds),
+# it was the SAME clip-floor failure mode already latent in the ALREADY-
+# DEPLOYED 2-term hr_share_multiplier base formula (which itself produced up
+# to 5.02x on the identical zero-HR batters, never previously checked). A
+# more targeted floor (HR_SHARE_CLIP_MIN 0.02->0.035, touching only ~5% of
+# real batters at the very bottom of the range) fixed both at once without
+# the previously-rejected 0.10 floor's broad over-correction -- safely
+# BUILT this time. But a full-stack isolated A/B (n=8711 games) came back
+# NOISE on both SU and Brier (see hr_share_multiplier's own comment below
+# for the exact numbers) -- REVERTED again after being safely built, same
+# "real component-level signal, no detectable full-stack win" treatment as
+# CSW%. Only the CLIP_MIN safety fix survives (independently justified on
+# its own bug-fix merits). See MODEL_DOCUMENTATION.md sec 11.32.
 CONTACT_QUALITY_BATSPEED_INTERCEPT = -0.02000
 CONTACT_QUALITY_BATSPEED_COEF_XBACON = 0.33275
 CONTACT_QUALITY_BATSPEED_COEF_BATSPEED = 0.00330
@@ -575,9 +590,13 @@ def contact_quality_multiplier(rates: dict[str, float], pregame_xbacon: float,
 # this-season barrel rate together. Both coefficients meaningfully positive
 # (barrel rate weighted higher, matching it being the stronger single
 # predictor) -- a genuine BLEND, unlike xBACON's near-total substitution.
-HR_SHARE_INTERCEPT = 0.0442
-HR_SHARE_COEF_EXISTING = 0.3616
-HR_SHARE_COEF_BARREL = 0.5300
+# REFIT 2026-07-25 (task #159, HR_SHARE_CLIP_MIN raised 0.02->0.035 below --
+# refitting under the new floor moved coefficients only slightly: 0.0442/
+# 0.3616/0.5300 -> 0.0385/0.3763/0.5352, R^2 essentially unchanged (0.4202/
+# 0.3922 old floor -> 0.4290/0.3918 new floor)).
+HR_SHARE_INTERCEPT = 0.0385
+HR_SHARE_COEF_EXISTING = 0.3763
+HR_SHARE_COEF_BARREL = 0.5352
 
 # Real batter-level hr-share-among-hits ranges from ~0.03 (1st pctile) to
 # ~0.29 (99th pctile), confirmed on real data. Clipping both the existing
@@ -592,7 +611,25 @@ HR_SHARE_COEF_BARREL = 0.5300
 # same "odds-ratio explodes when one side approaches zero" failure mode as
 # this session's platoon_splits.py and weather.py bugs, just triggered by a
 # regression intercept instead of a literal 0%/100% thin-sample observation.
-HR_SHARE_CLIP_MIN = 0.02
+#
+# CLIP_MIN raised 0.02->0.035 (task #159, 2026-07-25): re-investigating the
+# rejected bat-speed extension (built, tested, and reverted again after a
+# NOISE full-stack A/B -- see hr_share_multiplier's own comment below and
+# MODEL_DOCUMENTATION.md sec 11.32) found the EXISTING 2-term formula
+# above -- already deployed, unchanged until now -- itself produces
+# multipliers up to 5.02x on real batters with zero HRs in
+# a 50+ BIP season sample (n=15/734 real 2023-2025 cases): the "regression
+# intercept prevents predicting near-zero" failure mode this file's own
+# comment already documents was never actually fully closed by the original
+# 0.02 floor, just kept below the threshold that got noticed. A floor of
+# 0.035 (just above the genuine empirical 1st percentile, so it barely
+# touches the bulk of real weak-power hitters -- only 37/734, ~5%, have a
+# real share below it) caps this SAME already-deployed formula's own max
+# multiplier at 2.88x, and is what made the bat-speed extension safely
+# deployable below (previously rejected at the OLD 0.02 floor for a 4.7-5.5x
+# tail that, it turns out, was barely worse than what the un-flagged base
+# formula was already producing on the identical batters).
+HR_SHARE_CLIP_MIN = 0.035
 HR_SHARE_CLIP_MAX = 0.35
 
 # SEVENTH LAYER (see build_pregame_pulled_air_rate above for the full
@@ -603,10 +640,49 @@ HR_SHARE_CLIP_MAX = 0.35
 # pregame_pulled_air_rate is actually available (falls back to the 2-term
 # HR_SHARE_* blend above otherwise), same "additive layer, not a silent
 # fallback" convention as contact_quality_multiplier's bat-speed extension.
-HR_SHARE_PULLEDAIR_INTERCEPT = -0.03469
-HR_SHARE_PULLEDAIR_COEF_EXISTING = 0.21480
-HR_SHARE_PULLEDAIR_COEF_BARREL = 0.64574
-HR_SHARE_PULLEDAIR_COEF_PULLED_AIR = 0.50780
+# REFIT 2026-07-25 (task #159, same HR_SHARE_CLIP_MIN change as above):
+# -0.03469/0.21480/0.64574/0.50780 -> 0.01536/0.24815/0.62223/0.19879 (the
+# intercept flips sign under the new floor -- a real shift from refitting,
+# not a typo). R^2 0.4398/0.4140 under the new floor, comparable to the
+# original fit's own 0.4259/0.4371-and-0.3876/0.4105-style gains.
+HR_SHARE_PULLEDAIR_INTERCEPT = 0.01536
+HR_SHARE_PULLEDAIR_COEF_EXISTING = 0.24815
+HR_SHARE_PULLEDAIR_COEF_BARREL = 0.62223
+HR_SHARE_PULLEDAIR_COEF_PULLED_AIR = 0.19879
+
+# EIGHTH LAYER (task #159, 2026-07-25): the bat-speed extension to hr_share_
+# multiplier that was investigated once already (see CONTACT_QUALITY_BATSPEED_*
+# above) and rejected for a 5.5x real-data-limit-test blowup on zero-HR
+# batters -- re-investigated after the audit table (sec 11.30) independently
+# reconfirmed real R^2 was still on the table for HR-share. Root-caused the
+# rejection: it was never really about bat_speed specifically (the worst
+# offenders have perfectly ORDINARY bat speeds, not extreme ones) -- it was
+# the SAME already-deployed HR_SHARE_CLIP_MIN=0.02-floor failure mode
+# documented above, which the bat-speed regression's more-negative intercept
+# happened to amplify slightly. Fixing the shared clip floor (0.035, above)
+# resolved that safety concern cleanly (real-data limit test: max multiplier
+# dropped to 2.86x, zero cases above 3x, vs. the old floor's 4.71x).
+#
+# BUT: a full-stack isolated A/B (canonical protocol, n=8711 games, this
+# extension + a 4-term pulled-air+bat_speed combined version both wired in)
+# came back NOISE on both decision metrics -- SU delta +0.0068 pp CI
+# (-0.0052,+0.0187), Brier delta -0.0004 CI (-0.0025,+0.0017), both CIs
+# include zero, point estimates if anything slightly UNFAVORABLE. Per this
+# project's own "keep only on genuine net-positive" discipline, a cleared
+# safety bar is necessary but not sufficient -- this extension was REMOVED
+# again after being safely built, same "found real component-level signal,
+# no detectable full-stack win" treatment as CSW% and the pitcher-side
+# contact-suppression investigation. Component-level R^2 gain was real
+# (0.429/0.392 -> 0.439/0.406 existing+barrel -> +bat_speed) but, matching
+# this project's own repeated finding for bat-speed-based signals elsewhere
+# (sec 11.7/11.9's "multiple thousands of games" estimate for a similarly
+# small true effect), likely too small a slice of HR-share specifically to
+# move a full-stack metric detectably at this sample size. The fitted
+# coefficients and 4-branch cascade are NOT wired in below -- only the
+# CLIP_MIN safety fix above (independently justified: it fixes a real,
+# already-deployed defect regardless of whether this extension ships) and
+# the resulting HR_SHARE_*/HR_SHARE_PULLEDAIR_* refits survive. See
+# MODEL_DOCUMENTATION.md sec 11.32.
 
 
 def hr_share_multiplier(rates: dict[str, float], pregame_barrel_rate: float,

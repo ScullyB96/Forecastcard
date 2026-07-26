@@ -3486,7 +3486,87 @@ Two-stage result:
 with the module docstring's "never validated" caveat updated to point here.
 Both findings logged to the metrics ledger.
 
-## 12. Suggested next steps for a future session
+## 11.32 Task #159: revisiting the rejected bat-speed HR-share extension —
+built safely, tested, reverted; a real bug fix survives (2026-07-25)
+
+Directly following the audit table (sec 11.30), which independently
+reconfirmed real R² was still on the table for HR-share, and specifically
+flagged the previously-rejected bat-speed extension to `hr_share_multiplier`
+(sec on `CONTACT_QUALITY_BATSPEED_*`/`hr_share_multiplier`) as a
+not-yet-successfully-captured opportunity: was the rejection (a 5.5x
+real-data-limit-test blowup on zero-HR batters) really about bat speed, or
+fixable with a better clip design?
+
+**Root cause, found by reconstruction**: refit the original 2-season-pair
+leakage-free regression (existing_hr_share + barrel_rate + bat_speed →
+next-season real HR-share, n=734 real batters with 50+ BIP/season, 100+
+real bat-tracking swings) and reproduced the blowup directly. The worst
+offenders (existing_hr_share=0, real BIP samples of 51-372) have
+perfectly ORDINARY bat speeds (64.9-71.8 mph, right around the league
+mean) — the blowup was never really about bat speed being extreme. Direct
+comparison confirmed it: the **currently-deployed, unrelated 2-term base
+formula** (`HR_SHARE_INTERCEPT`/`COEF_EXISTING`/`COEF_BARREL`, live since
+task #51/52, untouched until today) produces up to **5.02x** on the exact
+same zero-HR batters — a real, previously-undiscovered defect in code
+that's been in production this whole time, not something introduced by the
+new bat-speed term.
+
+**Fix**: `HR_SHARE_CLIP_MIN` raised 0.02 → 0.035 (still just above the
+genuine empirical 1st percentile, so only ~5% of real batters — the
+extreme low tail — actually have their floor moved, unlike the previously-
+rejected 0.10 floor which would have distorted a much broader swath of
+real weak-power hitters). This tames BOTH the already-deployed base
+formula (max multiplier 5.02x → 2.88x) and a new bat-speed extension
+(4.71x → 2.86x, zero cases above 3x) at once. Refit `HR_SHARE_*`/
+`HR_SHARE_PULLEDAIR_*` coefficients under the new floor (R² essentially
+unchanged: 0.429/0.392 and 0.440/0.414 respectively, comparable to the
+pre-existing fits). Built two new regressions: `HR_SHARE_BATSPEED_*`
+(existing+barrel+bat_speed, used when pulled-air isn't available) and
+`HR_SHARE_FULL_*` (all 4 terms, used when both pulled-air and bat-speed
+are available — the common case, 734/772 real batter-seasons had both —
+capturing more real signal than picking one arbitrarily: R² 0.471/0.438
+vs. 0.440/0.414 or 0.439/0.406 alone).
+
+**Full-stack isolated A/B** (canonical protocol, n=8711 real games,
+SHOCK_SIGMA=0.40, OLD = pre-task-159 `expected_stats.py` vs. NEW = clip
+retune + both new regressions wired in via a 4-branch cascade in
+`hr_share_multiplier`): **NOISE on both decision metrics.** SU delta
++0.0068 (OLD 0.575 → NEW 0.568), 95% CI (-0.0052, +0.0187) — includes
+zero. Brier delta -0.0004 (OLD 0.2422 → NEW 0.2426), 95% CI (-0.0025,
++0.0017) — includes zero. Point estimates, if anything, trended slightly
+unfavorable. Per this project's own "keep only on genuine net-positive"
+discipline (a cleared safety bar is necessary but not sufficient), this
+does NOT clear the bar to ship — **REVERTED** the bat-speed/4-term
+extension itself (`HR_SHARE_BATSPEED_*`/`HR_SHARE_FULL_*` constants and
+the 4-branch cascade removed from `hr_share_multiplier`), same "real
+component-level signal, no detectable full-stack win" treatment as CSW%
+(sec entry) and the pitcher-side contact-suppression investigation (task
+#104). Consistent with this project's own repeated finding elsewhere that
+bat-speed-based signals carry a genuinely small true effect size (sec
+11.7/11.9's own "multiple thousands of games" estimate for the
+contact-quality/pulled-air bat-speed signals) — HR-share specifically is
+too thin a slice to move a full-stack metric detectably at n=8711.
+
+**What survives**: the `HR_SHARE_CLIP_MIN` retune (0.02→0.035) and the
+resulting `HR_SHARE_*`/`HR_SHARE_PULLEDAIR_*` refits. Re-validated this
+piece IN ISOLATION (clip fix only, no bat-speed cascade) against the same
+OLD baseline, n=8711: SU delta -0.0013 (OLD 0.575 → 0.576), CI
+(-0.0133, +0.0107), NOISE; Brier delta +0.0008 (OLD 0.2422 → 0.2414),
+CI (-0.0012, +0.0028), NOISE — both directionally slightly FAVORABLE this
+time, safely neutral-to-positive, confirming the clip fix alone carries no
+regression risk. Kept as a standalone robustness fix (removes a real,
+already-existing tail-risk defect in the deployed formula) independent of
+whether the new bat-speed signal ever gets deployed — the same "fix a real
+defect even without a proven accuracy win" logic already used for the
+weather-regularization (73x) and platoon (146,611x) blowup fixes (sec 4).
+
+Net effect of task #159 on the live model: `hr_share_multiplier`'s public
+signature and behavior are UNCHANGED from before this task (still 2-branch:
+pulled-air-or-not) — the only shipped change is the tightened clip floor
+and its refit coefficients, a pure robustness improvement with no new
+signal. The bat-speed HR-share idea is now closed with a decisive, honest
+null (not just "not yet built") — the audit table's own flagged opportunity
+was real to investigate, but didn't survive its full-stack test.
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):
 HFA and park-neutralization are built, wired, and kept (correctness-fix grounds, full-stack
