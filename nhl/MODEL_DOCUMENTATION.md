@@ -6588,3 +6588,35 @@ Sep 19-20 rehearsal itself (can't happen before real games exist), the odds-pars
 lineups-page investigation that rehearsal is meant to close, and the MoneyPuck refresh-latency
 measurement -- all correctly deferred, none of them silently forgotten.
 
+### 42.4 The degradation-budget check, turned from a paragraph into a script
+
+`RUNBOOK.md` described §37.4's rolling 4-week check as a manual procedure -- `src/models/
+check_live_degradation.py` now actually runs it: joins the immutable prediction log against real
+completed-game outcomes (regular-season predictions only; preseason was never meant to be scored
+as real, §39.3/§41), and compares live performance to the frozen model's own backtest-holdout
+performance via an independent-samples bootstrap (live and holdout are different games entirely
+-- NOT paired -- so each set's own sampling uncertainty is bootstrapped separately, then the two
+distributions are compared for the gap, same design this project's dev-vs-holdout checks
+elsewhere already use).
+
+**Confirmed correct on synthetic data with a known ground truth** (4 regression tests: an
+identical-distribution case verifies as within-budget; a gap sized to fall strictly between the
+routine budget and escalation ceiling correctly triggers "ROUTINE BREACH" and specifically names
+the goalie pipeline for margin_mae; a gap past the escalation ceiling triggers "ESCALATION"; live
+real-outperforming holdout is noted, not flagged as a problem) -- the synthetic effect sizes were
+worked out analytically (SE dominated by the live arm's sample size) rather than guessed, so the
+test isn't relying on getting lucky with a random seed.
+
+**Also run against real data already in the log** (the 4 predictions from §41-42's own
+2026-04-06 validation runs, a genuinely completed real game): all three metrics land within
+budget on this tiny sample, correctly flagged as provisional (`only 4 live game(s) so far -- the
+bootstrap CI below will be wide`) rather than treated as a real read. This is the first-ever
+real, if trivially small, run of the actual live-vs-backtest comparison this whole project's
+deployment-hardening phase has been building toward.
+
+**Deliberately NOT yet built**: the equivalent live-vs-market script (§37.5-37.6) -- that one
+needs real captured odds to join against, which don't exist until `fetch_rotowire_odds.py`'s
+parser is fixed against real populated data (§39.2, deferred to Sep 19-20). Building it now would
+mean testing it only against synthetic data with no real integration point to confirm against,
+unlike this script, which already has a real (if small) end-to-end run.
+
