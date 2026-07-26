@@ -6471,3 +6471,38 @@ precision to the last digit.
 log output) doesn't exist yet; `predict_game.py` is the model-logic layer, callable directly
 (as this section's validation did) but not yet wired into a daily-run entry point.
 
+## 42. The orchestration layer, built and confirmed end-to-end (2026-07-25)
+
+`src/pipeline/refresh_data.py` and `src/pipeline/generate_predictions.py` -- the first real live
+daily entry point this project has had.
+
+**`refresh_data.py`**: MoneyPuck's team-situational CSV and goalie-shots archive are both
+"refreshed in place" at the source (confirmed live, Sec1) -- a plain wholesale re-fetch always
+gets the current state. The NHL API schedule is the one source needing real incremental
+handling (`fetch_nhl_api.py`'s own `__main__` hardcodes a fixed end date) -- `refresh_schedule`
+re-fetches from (last cached date - 14 days) through today and merges by `gameId`, rather than
+re-walking the full 2008-2026 range every call. **Known, flagged inefficiency**: the goalie-shots
+refetch downloads the full 2007-2024 historical archive every call even though that range never
+changes -- fine for now, worth real caching if daily latency becomes a measured problem once
+this runs every day of the season (see Sec42.1's canary work).
+
+**`generate_predictions.py`**: `games_on_date` live-fetches (not the historical cache) whatever's
+really scheduled on a given date, any `gameType` -- preseason games are deliberately priced too
+(not because their predictions mean anything, but because the Sep 19-20 rehearsal's whole point
+is exercising this exact machinery, per Sec39.3), each tagged with its `gameType` so a caller can
+filter them out of anything that matters. `run()` refreshes all data once, builds `predict_game`'s
+state once, and prices every real game found for that date.
+
+**Confirmed end-to-end against a real historical date** (2026-04-06, the same 4-game day used to
+validate `predict_game.py` in Sec41): real live data refresh (schedule: 25,104 games cached;
+MoneyPuck situational: 232,220 rows; MoneyPuck goalies: 52,502 rows), real live game resolution
+(4 games found), and predictions matching Sec41's own direct validation to displayed precision
+(TBL @ BUF: 3.38-2.85, 41.6% home win -- identical to the manual `predict_game()` call). The full
+regression suite (10 checks across both test files) still passes.
+
+**What's left before this is production-ready for October**: task #56 (ingest schema-guard
+canaries + measuring MoneyPuck's real refresh latency), task #57 (an immutable pre-game
+prediction log -- `daily_predictions_*.parquet` currently gets silently overwritten if this
+script is ever re-run for the same date, which is fine for testing but not for a real audit
+trail), and task #58 (the day-zero runbook). None of these block the Sep 19-20 rehearsal itself.
+
