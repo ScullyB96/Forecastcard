@@ -3308,6 +3308,115 @@ parquets were deleted, not left to be mistaken for a real read later.
 — same discipline as the 2026 H1 holdout (§0.3): one read, logged, acted
 on per the rule above, not re-run if the first answer is unwelcome.
 
+## 11.30 The systematic audit table — ranked, evidence-based answer to
+"where does real predictive headroom still live?" (2026-07-25)
+
+Prompted by the user's own question ("is there anything else we can do to
+improve the predictive accuracy of this model? is it the best it can ever
+get?"). Rather than keep finding new ideas ad hoc (the GB/FB pitcher
+HR-allowed signal — this session's single largest real win — was originally
+found exactly that way, by one person happening to think of it in
+conversation), this builds the standing tool the model's own roadmap had
+called for but never built: a ranked checklist covering every outcome
+category, generalizing that discovery process instead of relying on which
+ideas happen to come up.
+
+**Method** (`src/models/audit_table.py`): for target_season in {2024, 2025}
+(both have a real prior season to build a genuine preseason prior from,
+unlike 2023), compute every qualifying player's CURRENT PRODUCTION preseason
+estimate (`true_talent.build_preseason_priors` — the exact Marcel/Carleton-K/
+age-adjusted prior actually used in production, not a re-derived one) and
+correlate it against that player's REAL realized rate over the whole target
+season (min 100 real PA to qualify, matching this project's own convention
+elsewhere). R² = corr², averaged across the two target seasons. Multiply
+`(1 − R²)` by the category's run-value leverage (`LINEAR_WEIGHTS × mean real
+per-PA frequency`) to get a `priority_score` — ranking where a BETTER
+ESTIMATOR (not just a better shrinkage constant; task #64 already
+individually K-swept every category's `STABILIZATION_PA_*` on leakage-free
+correlation, see those constants' own inline sweep comments) would move
+real accuracy the most.
+
+**Critical scope caveat, stated up front so the ranking isn't misread**:
+this table measures ONLY the base Marcel-shrunk rate's own explanatory
+power. It does NOT include any of the downstream context multipliers
+(contact-quality/xBACON, HR-share/barrel rate, pulled-air rate, GB/FB
+pitcher mix, platoon, park, weather, base-out state, TTOP) that are applied
+LATER in the real pipeline. A high `priority_score` therefore does NOT mean
+"nothing has been done here" — several top-ranked categories already have
+deployed, validated downstream fixes that this base-rate-only R² gives no
+credit for. The table answers "how much does the entry-point estimate
+leave on the table," not "how good is the final per-PA probability."
+
+**Full ranked output** (32 rows, batter + pitcher × 16 outcome categories,
+`data/processed/audit_table.parquet`):
+
+| rank | side | outcome | R² | priority_score |
+|---|---|---|---|---|
+| 1 | pitcher | field_out | 0.155 | 0.0958 |
+| 2 | batter | field_out | 0.431 | 0.0653 |
+| 3 | pitcher | single | 0.110 | 0.0589 |
+| 4 | batter | single | 0.290 | 0.0470 |
+| 5 | pitcher | strikeout | 0.349 | 0.0445 |
+| 6 | pitcher | home_run | 0.047 | 0.0398 |
+| 7 | pitcher | double | 0.011 | 0.0316 |
+| 8 | batter | double | 0.021 | 0.0314 |
+| 9 | batter | strikeout | 0.573 | 0.0291 |
+| 10 | batter | home_run | 0.285 | 0.0289 |
+| 11+ | ... | (walk, double_play, triple, HBP, field_error, sac_fly, intent_walk, fielders_choice, sac_bunt, catcher_interf, triple_play) | — | ≤0.021, long tail |
+
+**Cross-referencing the top of the table against what's already been tried**
+(the actual point of building this — a ranking is only useful once checked
+against history):
+
+- **#1 pitcher field_out (R²=0.155, top priority_score)**: this is DIPS —
+  already investigated and confirmed largely irreducible at the individual-
+  pitcher level (see the run-value screen / earlier DIPS-adjacent sections);
+  a pitcher's own year-to-year control over batted-ball-out rate specifically
+  (as opposed to K/BB/HR, which pitchers DO control) is a well-established
+  sabermetric near-null. High priority_score here reflects real,
+  irreducible variance, not an unexploited opportunity.
+- **#7/#8 double (both sides, R² ≈ 0.01–0.02, the single worst-explained
+  category on the whole table)**: matches an earlier documented finding
+  (sec 11.4/11.26 pull-tercile-park-interaction work, and prior xSLG
+  investigation) that doubles resist modeling from available Statcast
+  inputs — already investigated, confirmed genuinely hard, not neglected.
+- **#3/#4 single, #5/#9 strikeout**: both sides already have deployed
+  context multipliers (contact-quality/xBACON for hit categories generally,
+  the Carleton-K stabilization + age curve for strikeout specifically) —
+  high base-rate priority_score here is expected and largely already
+  addressed downstream.
+- **#6 pitcher home_run (R²=0.047) / #10 batter home_run (R²=0.285)**: HR is
+  the one top-10 category where a genuinely open, NOT-yet-successfully-
+  captured opportunity exists. The bat-speed extension to HR-share
+  (sec 11.7/11.9) was previously found to carry real incremental R²
+  (0.379→0.405 in that investigation) but was rejected specifically because
+  its clip design produced unsafe multipliers (up to 5.5x for batters with
+  zero HR in their own sample) — a rejected IMPLEMENTATION, not a rejected
+  SIGNAL. This audit table independently reconfirms real R² is still on the
+  table for batter home_run from a totally different angle (whole-season
+  preseason-vs-real correlation, not a within-model incremental-fit test),
+  which is exactly the kind of convergent evidence that should raise this
+  above "already closed." A safer clip design (e.g. shrinking the
+  multiplier itself, not just clipping its output, or requiring a minimum
+  batted-ball sample before applying it) is the concrete, evidence-backed
+  next candidate this table surfaces — not vague brainstorming.
+- **Task #156's own bat-speed/pulled-air resolution** (sec 11.29, scheduled
+  for October) tests whether the CURRENTLY DEPLOYED bat-speed signal helps
+  at the whole-simulator level; this table's finding is complementary, not
+  redundant — it's evidence the underlying HR-share R² gap exists
+  independent of whether the current implementation captures it well.
+
+**Honest framing of the answer to "is this the best it can ever get?"**: no
+category on this table shows a "smoking gun" free R² of 0.3+ sitting
+completely untouched — the strongest true nulls (doubles, pitcher
+batted-ball-out rate) are real, published, irreducible sabermetric limits,
+not gaps in this project's own work. The one live, actionable thread this
+table surfaces is the batter/pitcher home_run clip-design revisit above.
+Logged to the metrics ledger; `src/models/audit_table.py` is a standing,
+re-runnable tool (not a one-time script) — worth re-running whenever a new
+downstream signal is deployed for a top-ranked category, to check whether
+the deployed fix actually closed the gap this table originally measured.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):
