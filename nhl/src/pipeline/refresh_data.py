@@ -29,6 +29,7 @@ import pandas as pd
 from src.ingest.fetch_moneypuck import fetch_all_teams_gamelog
 from src.ingest.fetch_moneypuck_goalie_games import fetch_and_build_goalie_game_log
 from src.ingest.fetch_nhl_api import fetch_schedule_range
+from src.ingest.schema_guards import assert_moneypuck_situational_schema, assert_schedule_schema
 from src.utils.paths import DATA_RAW
 
 SCHEDULE_PATH = DATA_RAW / "nhl_schedule_2008_2026.parquet"
@@ -51,6 +52,11 @@ def refresh_schedule() -> pd.DataFrame:
     end_date = date.today().isoformat()
 
     fresh = fetch_schedule_range(start_date, end_date)
+    # Validate the FRESH data before merging/overwriting the cache -- a schema break must not
+    # silently corrupt the last known-good cached file (task #44's degradation budget and Sec38's
+    # emergency-fix path both assume a provider break is noticed here, not discovered later as
+    # silently-wrong predictions).
+    assert_schedule_schema(fresh)
     if existing.empty:
         combined = fresh
     else:
@@ -64,6 +70,7 @@ def refresh_schedule() -> pd.DataFrame:
 
 def refresh_moneypuck_situational() -> None:
     df = fetch_all_teams_gamelog()
+    assert_moneypuck_situational_schema(df)
     df.to_parquet(DATA_RAW / "moneypuck_all_teams.parquet", index=False)
     print(f"refresh_moneypuck_situational: {len(df)} rows cached", flush=True)
 

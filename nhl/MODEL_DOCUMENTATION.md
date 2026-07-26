@@ -6506,3 +6506,26 @@ prediction log -- `daily_predictions_*.parquet` currently gets silently overwrit
 script is ever re-run for the same date, which is fine for testing but not for a real audit
 trail), and task #58 (the day-zero runbook). None of these block the Sep 19-20 rehearsal itself.
 
+### 42.1 Task #56: ingest schema-guard canaries, built
+
+`src/ingest/schema_guards.py` -- `assert_schedule_schema`/`assert_moneypuck_situational_schema`,
+wired into `refresh_data.py` so every refresh validates the FRESH data before it ever overwrites
+the cache (a schema break must not silently corrupt the last known-good cached file). Confirmed
+passing cleanly against real, current data (no false positives) and confirmed to actually fire
+on genuine breaks (6 regression tests: missing required columns, an unrecognized `lastPeriodType`
+value, a missing or new MoneyPuck `situation` value).
+
+**Deliberately scoped, not maximally strict**: the real schedule has `gameType` values well
+beyond {1,2,3} (confirmed live: 1,2,3,4,6,7,8,9,12,19,20 all appear -- likely all-star/skills-
+competition/exhibition variants this project has never needed to name, since it only ever
+filters to `gameType==2`) -- failing loudly on every new `gameType` would be noise. The guard
+checks only what the model's own `gameType==2` filter actually depends on being well-formed.
+
+**Directly mirrors this project's own history**: the MoneyPuck situation-value check is exactly
+the automated version of Cycle 3's original real bug (assuming 5on5/5on4/4on5 was the complete
+situation list, silently missing `other`, ~12.5% of real xG) -- this canary is what turns that
+multi-day-discovery-gap into an immediate, loud failure instead.
+
+**Still not measured** (can't be, off-season): MoneyPuck's actual refresh-lag timing -- whether a
+7pm slate can rely on same-day data. Flagged for the Sep 19-20 dress rehearsal (§39.3).
+
