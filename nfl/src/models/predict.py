@@ -19,6 +19,7 @@ from src.models.qb_adjustment import (
 )
 from src.models.ratings import PowerRatingEngine, build_dataset
 from src.utils.paths import DATA_RAW, DATA_PROCESSED
+from src.utils.stats import fit_linear
 
 TRAIN_SEASONS = {2018, 2019, 2020, 2021}
 DEMO_SEASON = 2025
@@ -26,8 +27,7 @@ DEMO_WEEK = 18
 
 
 def fit_calibration(x: pd.Series, y: pd.Series) -> tuple[float, float]:
-    b, a = np.polyfit(x, y, 1)
-    return a, b
+    return fit_linear(x, y)
 
 
 if __name__ == "__main__":

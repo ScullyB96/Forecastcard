@@ -145,6 +145,25 @@ class PowerRatingEngine:
         matchups["pregame_total_signal"] = pregame_totals
         return matchups
 
+    def run_walk_forward_team_ratings(self, matchups: pd.DataFrame) -> pd.DataFrame:
+        """Same walk-forward loop as run_walk_forward, but records each team's
+        own PREGAME off_rating/def_rating snapshot per game (not the combined
+        home/away net) -- used by drive_transitions.py to condition drive
+        resampling on real team strength. Returns [season, week, team,
+        off_rating, def_rating], two rows per game (team_a, team_b)."""
+        matchups = matchups.sort_values(["season", "week"]).reset_index(drop=True)
+        rows = []
+        for row in matchups.itertuples():
+            self._maybe_new_season(row.season)
+            self._ensure_team(row.team_a)
+            self._ensure_team(row.team_b)
+            rows.append({"season": row.season, "week": row.week, "team": row.team_a,
+                         "off_rating": self.off_ratings[row.team_a], "def_rating": self.def_ratings[row.team_a]})
+            rows.append({"season": row.season, "week": row.week, "team": row.team_b,
+                         "off_rating": self.off_ratings[row.team_b], "def_rating": self.def_ratings[row.team_b]})
+            self.update(row.team_a, row.team_b, row.off_epa_a, row.off_epa_b)
+        return pd.DataFrame(rows)
+
 
 def build_dataset(pbp_seasons: list[int], schedule_seasons: list[int] | None = None) -> pd.DataFrame:
     """schedule_seasons defaults to pbp_seasons -- pass it explicitly when the

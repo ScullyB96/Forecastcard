@@ -30,46 +30,18 @@ most resemble.
 import numpy as np
 import pandas as pd
 
+from src.ingest.name_matching import build_qb_name_to_id, find_qb_changes
 from src.models.injury_adjustment import JOINT_COEFS_FORWARD, apply_joint_adjustment, compute_injury_flags
 from src.models.qb_adjustment import QbRatingEngine, build_qb_week_table, build_starter_sequence
 from src.models.ratings import PowerRatingEngine, build_dataset
 from src.utils.paths import DATA_RAW, DATA_PROCESSED
+from src.utils.stats import fit_linear
 
 CALIBRATION_SEASONS = {2022, 2023, 2024, 2025}
 
 
 def fit_calibration(x: pd.Series, y: pd.Series) -> tuple[float, float]:
-    b, a = np.polyfit(x, y, 1)
-    return a, b
-
-
-def build_qb_name_to_id(schedules: pd.DataFrame) -> dict:
-    reg = schedules[schedules["game_type"] == "REG"]
-    h = reg[["home_qb_name", "home_qb_id"]].rename(columns={"home_qb_name": "name", "home_qb_id": "qb_id"})
-    a = reg[["away_qb_name", "away_qb_id"]].rename(columns={"away_qb_name": "name", "away_qb_id": "qb_id"})
-    both = pd.concat([h, a]).dropna(subset=["name", "qb_id"])
-    return both.drop_duplicates("name", keep="last").set_index("name")["qb_id"].to_dict()
-
-
-def find_qb_changes(schedules: pd.DataFrame, clay_players: pd.DataFrame) -> pd.DataFrame:
-    reg2025 = schedules[(schedules["season"] == 2025) & (schedules["game_type"] == "REG")]
-    h = reg2025[["home_team", "home_qb_name"]].rename(columns={"home_team": "team", "home_qb_name": "qb_name"})
-    a = reg2025[["away_team", "away_qb_name"]].rename(columns={"away_team": "team", "away_qb_name": "qb_name"})
-    starts = pd.concat([h, a])
-    top_2025 = (
-        starts.groupby(["team", "qb_name"]).size().reset_index(name="starts")
-        .sort_values("starts", ascending=False).drop_duplicates("team")
-    )
-    # sort by pass attempts, not 'games' -- 'games' means games on the active roster (a
-    # backup stays at 17 all season too), so it doesn't discriminate the real starter.
-    # Attempts does: a true starter is projected for 450-550+, a handcuff/insurance QB for <100.
-    clay_qb = clay_players[clay_players["position"] == "QB"].sort_values("pass_att", ascending=False).drop_duplicates(
-        "team"
-    )
-    comp = top_2025.merge(clay_qb[["team", "player"]], on="team", how="outer")
-    last_name = lambda s: str(s).split()[-1].lower() if pd.notna(s) else ""
-    comp["likely_change"] = comp["qb_name"].apply(last_name) != comp["player"].apply(last_name)
-    return comp.rename(columns={"qb_name": "starter_2025", "player": "projected_2026"})
+    return fit_linear(x, y)
 
 
 if __name__ == "__main__":
@@ -118,7 +90,19 @@ if __name__ == "__main__":
     # real rating histories elsewhere, so this is a real point estimate, not just a flag --
     # a true rookie with no NFL history (e.g. a Day 1 draft pick) defaults to 0.0 (league
     # average), the same cold-start assumption QbRatingEngine uses everywhere else.
-    SWAP_B = 6.616
+    # NOTE: this script never blends our_margin with the market line (unlike
+    # weekly_update.py, the live pipeline), so 6.616 -- fit against the pure
+    # Layer-1 residual -- is the correct value HERE. Named _LAYER1 (review
+    # round 2, #1.3) to make the residual basis explicit in the name itself,
+    # since a bare "SWAP_B" shared with weekly_update.py's differently-scaled
+    # constant is exactly the kind of same-name-different-meaning trap that's
+    # bitten this project before (np.polyfit's arg order, three times). Do not
+    # "sync" this to weekly_update.py's SWAP_B_MARKET=2.970 (refit 2026-07
+    # against the market-blend residual specifically because that pipeline
+    # applies it on top of a blended prediction); doing so here would apply a
+    # blend-fit coefficient to an unblended prediction, a different bug. See
+    # injury_adjustment.py's module docstring for the full refit rationale.
+    SWAP_B_LAYER1 = 6.616
     weekly = pd.read_parquet(DATA_RAW / "weekly_player_stats_2016_2025.parquet")
     qb_weeks = build_qb_week_table(weekly)
     qb_starters = build_starter_sequence(schedules)
@@ -143,7 +127,7 @@ if __name__ == "__main__":
         total_signal = home_net + away_net
         home_qb_swap = team_qb_swap_delta.get(home, 0.0)
         away_qb_swap = team_qb_swap_delta.get(away, 0.0)
-        our_margin = base_a + base_b * rating_diff + SWAP_B * (home_qb_swap - away_qb_swap)
+        our_margin = base_a + base_b * rating_diff + SWAP_B_LAYER1 * (home_qb_swap - away_qb_swap)
         is_indoor = team_roof.get(home, 0.0)
         our_total = total_coefs[0] + total_coefs[1] * total_signal + total_coefs[2] * is_indoor
         our_home_pts = (our_total + our_margin) / 2

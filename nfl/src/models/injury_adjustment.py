@@ -51,20 +51,19 @@ works in BOTH directions (unlike the offense positions, which only showed a
 real away-side effect) -- losing a top corner is the single most exploitable
 injury signal found in this project.
 
-FORWARD-USE COEFFICIENTS (JOINT_COEFS_FORWARD): predict_2026.py recalibrates
-its margin model on 2022-2025 rather than 2018-2021 (see that module's
-docstring -- 2019-2020 badly understate home-field advantage, a COVID
-crowd-size artifact). Refitting JOINT_COEFS against that new base prediction's
-residuals, using only 2022-2025, moved every coefficient a lot (e.g. home_cb:
--1.22 -> -4.67) -- too much to be pure signal given the sample is the same
-size as before (~150-300 flagged games total across all 4 signals). That's
-consistent with these already being estimated from rare events, not evidence
-of a real regime change. Rather than pick either 4-year window, each game's
-residual is computed against ITS OWN era's well-fit calibration (old games
-against the old fit, new games against the new fit -- both are ~unbiased
-within their own era), then pooled across all 8 seasons for one lower-variance
-regression. The result sits between the two individual fits, as expected, with
-roughly double the effective sample:
+FORWARD-USE COEFFICIENTS (JOINT_COEFS_FORWARD), v1 (SUPERSEDED, see v2 below):
+predict_2026.py recalibrates its margin model on 2022-2025 rather than
+2018-2021 (see that module's docstring -- 2019-2020 badly understate
+home-field advantage, a COVID crowd-size artifact). Refitting JOINT_COEFS
+against that new base prediction's residuals, using only 2022-2025, moved
+every coefficient a lot (e.g. home_cb: -1.22 -> -4.67) -- too much to be pure
+signal given the sample is the same size as before (~150-300 flagged games
+total across all 4 signals). That's consistent with these already being
+estimated from rare events, not evidence of a real regime change. Rather than
+pick either 4-year window, each game's residual is computed against ITS OWN
+era's well-fit calibration (old games against the old fit, new games against
+the new fit -- both are ~unbiased within their own era), then pooled across
+all 8 seasons for one lower-variance regression:
 
     margin_adjustment = -0.34
         + 2.56 * away_skill_out
@@ -72,20 +71,103 @@ roughly double the effective sample:
         - 3.43 * home_cb_out
         + 3.79 * away_cb_out
 
-Used only by predict_2026.py. JOINT_COEFS (above) stays as originally
-validated for historical backtesting (predict.py), since that number needs to
-reflect exactly what was walk-forward tested, not a later refinement.
-"""
+FORWARD-USE COEFFICIENTS, v2 (current -- fit against the BLEND residual, not
+the Layer-1 residual): a third-party review (2026-07) flagged that the live
+pipeline (weekly_update.py) applies JOINT_COEFS_FORWARD and the QB swap_delta
+adjustment ON TOP OF the already market-blended prediction (margin blend
+weight on our own model is only 0.02-0.17 -- the blend is 88-98% the closing
+line), while both were validated against PURE LAYER-1 residuals. Since the
+market already prices in real injury/QB news, this is very likely
+double-counting the same information twice.
 
-import re
+Refit against `actual_margin - blended_pred` (same era-consistent-residual
+pooling as v1, now scoring each era with that era's own market blend too, not
+just its own Layer-1 calibration; n=2127 pooled games) confirms this: every
+coefficient shrinks, and TWO of the four terms are no longer individually
+distinguishable from zero once market pricing is netted out --
+away_skill_flag (t=+1.64) and away_ol_flag (t=+1.14). Both CB terms survive
+(home_cb_flag t=-2.43, away_cb_flag t=+3.27) -- corners are the one injury
+signal genuinely not fully priced into the market number already:
+
+    margin_adjustment = -0.08
+        + 0.00 * away_skill_out   (dropped -- not distinguishable from 0 on blend residual)
+        + 0.00 * away_ol_out      (dropped -- not distinguishable from 0 on blend residual)
+        - 2.58 * home_cb_out
+        + 3.35 * away_cb_out
+
+The QB swap_delta coefficient (SWAP_B in weekly_update.py/predict_2026.py, not
+stored here) shrinks the same way: 6.616 (Layer-1 residual) -> 2.978 (blend
+residual, same pooling), t=+1.53 -- kept despite being just under conventional
+significance, since a stale-rating-catches-up mechanism is well-established
+and not obviously spurious, and it's a single coefficient rather than a
+4-way multicollinear fit.
+
+Honest empirical caveat: a strict walk-forward check (fit OLD_ERA=2018-2021
+only, score NEW_ERA=2022-2025 blind) shows the v1 (double-counting) and v2
+(corrected) coefficients are statistically indistinguishable on point-MAE
+(9.459 vs 9.493, difference well within noise) -- so this fix is not
+primarily an accuracy win. It matters because v1's larger coefficients
+overstate the true size of the edge, which is what actually gets used for bet
+sizing (Kelly-style staking on an overstated edge is a real, quantifiable risk
+that MAE alone doesn't surface -- exactly the "wrong objective function"
+critique the same review raised separately).
+
+FORWARD-USE COEFFICIENTS, v3 (current -- symmetric CB constraint, review
+#1.6): v2 left home_cb_flag (-2.576) and away_cb_flag (+3.351) as independent,
+differently-sized coefficients. Reparameterizing as ONE coefficient on
+(away_cb_flag - home_cb_flag) -- forcing the home and away effects to be
+equal and opposite -- roughly doubles the effective sample for that
+coefficient (every CB-out game contributes to the same estimate, not two
+separate ones) and the t-stat jumps from -2.43/+3.27 (independent) to +4.01
+(symmetric, pooled 8-season). A strict walk-forward check (fit OLD_ERA only,
+score NEW_ERA blind) confirms the symmetric version generalizes better, not
+just fits better in-sample: on the CB-flagged holdout subset (n=183), MAE
+9.968 (v2) -> 9.836 (v3), and signed bias +1.596 (v2, a real miscalibration)
+-> +0.542 (v3):
+
+    margin_adjustment = -0.02
+        + 0.00 * away_skill_out   (dropped, see v2)
+        + 0.00 * away_ol_out      (dropped, see v2)
+        - 2.98 * home_cb_out
+        + 2.98 * away_cb_out
+
+The QB swap_delta coefficient is refit jointly with this symmetric term:
+2.970 (from 2.978 in v2 -- negligible change, as expected since it's a
+separate, uncorrelated predictor).
+
+FORWARD-USE COEFFICIENTS, v4 (current -- shrunk toward the rolling-origin fold
+median, review round 3 #1): v3's 2.977 is a pooled 2018-2025 fit, which is
+RESUBSTITUTION for any evaluation scoring TEST=2022-2025 -- it was fit on data
+including the very seasons such an evaluation checks. The honest,
+out-of-sample estimates come from src/models/validate_adjustment_layer.py's
+rolling-origin check (refit on strictly-prior seasons only): 1.590, 2.353,
+2.539, 2.629 across the four folds -- EVERY one below 2.977. Shrunk to the
+fold median, 2.446, as an asymmetric-downside precaution (see the constant's
+own comment below for the full reasoning, including the permutation-test and
+walk-forward-ATS results that came back reassuring on direction and magnitude
+of edge even though the point-estimate coefficient itself was inflated).
+
+Used only by predict_2026.py and weekly_update.py. JOINT_COEFS (above) stays
+as originally validated for historical backtesting (predict.py), since that
+number needs to reflect exactly what was walk-forward tested, not a later
+refinement.
+"""
 
 import numpy as np
 import pandas as pd
 
+from src.ingest.name_matching import norm_name
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
+from src.utils.stats import fit_linear
 
 STATUS_OUT = "Out"
 
+# PURE LAYER-1 residual basis (fit 2018-2021, scored 2022-2025 holdout -- see module
+# docstring above). Frozen exactly as originally validated; used only by predict.py for
+# honest historical backtesting, which must reflect what was actually walk-forward tested.
+# Do NOT refit or "sync" this to JOINT_COEFS_FORWARD's blend-residual basis below (review
+# round 2, #1.3 -- same same-name-different-basis trap SWAP_B_MARKET/SWAP_B_LAYER1 guards
+# against in weekly_update.py/predict_2026.py).
 JOINT_COEFS = {
     "intercept": -0.382,
     "away_skill_flag": 1.434,
@@ -94,24 +176,44 @@ JOINT_COEFS = {
     "away_cb_flag": 3.184,
 }
 
-# pooled 8-season, era-consistent-residual fit -- see module docstring. Used by
-# predict_2026.py only.
+# pooled 8-season, era-consistent BLEND-residual fit, symmetric CB constraint
+# (v3) -- see module docstring. Used by predict_2026.py and weekly_update.py,
+# applied on top of the market-blended prediction. away_skill_flag/
+# away_ol_flag are zeroed (not distinguishable from 0 once market pricing is
+# netted out); kept as explicit keys, not removed, so apply_joint_adjustment's
+# signature doesn't need to change and a future refit can re-populate them if
+# warranted. home_cb_flag/away_cb_flag are now equal-magnitude, opposite-sign
+# by construction (fit as one coefficient on away_cb_flag - home_cb_flag).
+#
+# v4 (review round 3, #1): the pooled v3 fit above (2.977) is RESUBSTITUTION for
+# any TEST-window evaluation -- it's fit on 2018-2025 pooled, which includes the
+# very 2022-2025 games any such evaluation scores. src/models/validate_adjustment_layer.py's
+# rolling-origin check (fit on strictly-prior seasons only) gives four honest,
+# out-of-sample estimates -- 1.590, 2.353, 2.539, 2.629 -- and every single one sits
+# below 2.977. Shrunk to the fold MEDIAN (2.446) here as an asymmetric-downside
+# precaution: if the pooled estimate is genuinely inflated, a ~0.5pt-per-game
+# systematic error on ~46 CB-flagged games/season is a real, avoidable cost; if the
+# effect is exactly as strong as pooled suggests, shrinking gives up a little edge.
+# A permutation test (shuffle each team's real CB-out flags across its own played
+# weeks within season, preserving its real annual flag count, re-run the full
+# fit-and-score procedure 1000x) put the real ATS% at the ~97.5th percentile of the
+# resulting null -- real signal, not purely a forking-paths artifact of the wide
+# coefficient search, but not overwhelming either given how wide that search was
+# (top-2/3/4/5 corners x 3 injury-report designations x several position candidates
+# x 3 residual bases x the symmetry constraint). Notably, the WALK-FORWARD ATS%
+# (61.8%) came back almost identical to the flawed resubstitution number (62.4%) --
+# ATS is a sign-of-disagreement metric, much less sensitive to the coefficient's
+# exact magnitude than MAE is, so the resubstitution bias barely moved the ATS
+# read even though it did inflate the point-estimate coefficient. Shrinking here
+# protects the point-estimate margin prediction specifically, not because the ATS
+# evidence collapsed.
 JOINT_COEFS_FORWARD = {
-    "intercept": -0.339,
-    "away_skill_flag": 2.562,
-    "away_ol_flag": 1.195,
-    "home_cb_flag": -3.430,
-    "away_cb_flag": 3.792,
+    "intercept": -0.018,
+    "away_skill_flag": 0.0,
+    "away_ol_flag": 0.0,
+    "home_cb_flag": -2.446,
+    "away_cb_flag": 2.446,
 }
-
-
-def norm_name(name: str) -> str | None:
-    if pd.isna(name):
-        return None
-    s = name.lower().strip()
-    s = re.sub(r"[.'\-]", "", s)
-    s = re.sub(r"\s+(jr|sr|ii|iii|iv|v)$", "", s)
-    return re.sub(r"\s+", " ", s)
 
 
 def build_presumed_starter_by_id(df: pd.DataFrame, share_col: str, positions: list[str]) -> pd.DataFrame:
@@ -186,12 +288,37 @@ def flag_team_week_out_by_name(presumed: pd.DataFrame, injuries: pd.DataFrame, o
     return merged.groupby(["season", "week", "team"])["is_out"].sum().reset_index(name=out_col)
 
 
+def _latest_season_range_file(seasons_dir, prefix: str):
+    """Picks the widest/most-recent `<prefix>_<start>_<end>.parquet` file in
+    seasons_dir, rather than a hardcoded literal -- BUG FIX 2026-07 (found
+    during a full-codebase review): this function used to hardcode
+    `injuries_2016_2025.parquet`/`snap_counts_2016_2025.parquet` regardless of
+    what season range the pipeline had actually just fetched. Harmless while
+    2026 data isn't published yet (the fallback path happens to still write
+    the 2025-ending filename), but once a real `..._2016_2026.parquet` file
+    exists, the old hardcoded read would have silently kept using the stale
+    2025-ending one forever -- no crash, just an entire season of missing
+    injury data. Picks by highest end-year, matching this project's
+    `{prefix}_{min}_{max}.parquet` naming convention everywhere else."""
+    candidates = sorted(seasons_dir.glob(f"{prefix}_*_*.parquet"))
+    if not candidates:
+        raise FileNotFoundError(f"no {prefix}_*.parquet file found in {seasons_dir}")
+
+    def _end_year(path):
+        try:
+            return int(path.stem.split("_")[-1])
+        except ValueError:
+            return -1
+
+    return max(candidates, key=_end_year)
+
+
 def compute_injury_flags(seasons_dir=DATA_RAW, processed_dir=DATA_PROCESSED) -> pd.DataFrame:
     """Build the four team-week injury flags used by the joint model. Returns
     columns [season, week, team, skill_out, ol_out, cb_out] (skill_out/ol_out/
     cb_out are counts; threshold at >=1 to get the binary flags used in
     JOINT_COEFS)."""
-    inj = pd.read_parquet(seasons_dir / "injuries_2016_2025.parquet")
+    inj = pd.read_parquet(_latest_season_range_file(seasons_dir, "injuries"))
     inj["season"] = inj["season"].astype(int)
     inj["week"] = inj["week"].astype(int)
 
@@ -207,7 +334,7 @@ def compute_injury_flags(seasons_dir=DATA_RAW, processed_dir=DATA_PROCESSED) -> 
     )
     skill_out = skill.groupby(["season", "week", "team"])["wr_out"].max().reset_index(name="skill_out")
 
-    sc = pd.read_parquet(seasons_dir / "snap_counts_2016_2025.parquet")
+    sc = pd.read_parquet(_latest_season_range_file(seasons_dir, "snap_counts"))
     sc["name_norm"] = sc["player"].apply(norm_name)
     sc["season"] = sc["season"].astype(int)
     sc["week"] = sc["week"].astype(int)
@@ -274,7 +401,7 @@ if __name__ == "__main__":
     TRAIN = {2018, 2019, 2020, 2021}
     TEST = {2022, 2023, 2024, 2025}
     train_all = layer1[layer1["season"].isin(TRAIN)]
-    base_a, base_b = np.polyfit(train_all["pregame_rating_diff"], train_all["actual_margin"], 1)[::-1]
+    base_a, base_b = fit_linear(train_all["pregame_rating_diff"], train_all["actual_margin"])
     layer1["base_pred"] = base_a + base_b * layer1["pregame_rating_diff"]
     layer1["adjustment"] = apply_joint_adjustment(layer1, flags)
     layer1["adjusted_pred"] = layer1["base_pred"] + layer1["adjustment"]

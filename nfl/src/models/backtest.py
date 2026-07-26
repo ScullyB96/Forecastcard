@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from src.utils.paths import DATA_PROCESSED
+from src.utils.stats import fit_linear
 
 BURN_IN_SEASONS = {2016, 2017}
 TRAIN_SEASONS = {2018, 2019, 2020, 2021}
@@ -23,10 +24,7 @@ TEST_SEASONS = {2022, 2023, 2024, 2025}
 
 
 def fit_calibration(train: pd.DataFrame) -> tuple[float, float]:
-    x = train["pregame_rating_diff"].to_numpy()
-    y = train["actual_margin"].to_numpy()
-    b, a = np.polyfit(x, y, 1)
-    return a, b
+    return fit_linear(train["pregame_rating_diff"], train["actual_margin"])
 
 
 def evaluate(df: pd.DataFrame, a: float, b: float, label: str) -> dict:

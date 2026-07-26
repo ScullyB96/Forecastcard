@@ -106,17 +106,40 @@ def rookie_fallback_rb_rates(
     reallocate_shares' raw_shares pool, then use the other fields to build
     the full prop row. The normal per-roster-row loop elsewhere already
     skips anyone with zero share on both targets and carries, so this never
-    produces a duplicate row for the same player."""
-    from src.models.predict_props_2026 import norm_name
+    produces a duplicate row for the same player.
+
+    Each entry also carries `resolved_pid` (the real player_id this cascade
+    matched, or None if no match was found) -- added 2026-07 when combining
+    this with a SEPARATE real-pid-keyed rookie fallback (rookie_prior.py's
+    draft-capital one) surfaced what first looked like a double-counting bug:
+    both fallbacks appeared to fire for the same rookie RB, rendering two prop
+    rows for one real person. Root cause turned out NOT to be draft-capital
+    vs. Clay overlap at all -- it was a name-COLLISION bug in this cascade's
+    own tier-1 lookup. `name_to_id` is a single global "name_norm -> pid" map
+    (last dupe wins); when two *different* real players share the exact same
+    full name (confirmed real 2026 case: "Quinshon Judkins" is both
+    Cleveland's RB, real carry history, AND a Green Bay DL with none),
+    tier 1 can silently resolve to the WRONG same-named player, making a
+    real veteran look like a zero-history rookie (the DL's `carry_engine`
+    history is 0, so `has_history` came back False for the RB). Fixed by
+    trying the TEAM+POSITION-scoped tier (tier 2) first -- strictly tighter
+    than a bare full-name match, so it can't make the common case worse, and
+    it directly disambiguates same-named players on different teams. The
+    caller (weekly_update.py) also still de-dupes by normalized player_name
+    against draft-capital's fallback, as defense-in-depth for the separate,
+    legitimate case of a true first-year rookie covered by both sources at
+    once. `resolved_pid` is kept on each entry since it's cheap, real
+    information a caller may still find useful."""
+    from src.ingest.name_matching import norm_name
 
     team_players = clay_players[(clay_players["team"] == team) & (clay_players["position"] == "RB")]
     out = {}
     for p in team_players.itertuples():
         name_key = norm_name(p.player)
-        pid = name_to_id.get(name_key)
+        last_name = name_key.split()[-1] if name_key else None
+        pid = lastname_team_pos_to_id.get((last_name, team, "RB"))
         if pid is None:
-            last_name = name_key.split()[-1] if name_key else None
-            pid = lastname_team_pos_to_id.get((last_name, team, "RB"))
+            pid = name_to_id.get(name_key)
         if pid is None:
             pid = lastname_pos_to_id.get((last_name, "RB"))
         has_history = pid is not None and carry_engine.predict(pid) > 0
@@ -127,5 +150,6 @@ def rookie_fallback_rb_rates(
             "share": (p.rush_att / max(p.games, 1)) / rush_attempts,
             "ypc_rate": (p.rush_yds / p.rush_att) if p.rush_att > 0 else league_ypc,
             "rush_td_rate": (p.rush_td / p.rush_att) if p.rush_att > 0 else league_rush_td_rate,
+            "resolved_pid": pid,
         }
     return out

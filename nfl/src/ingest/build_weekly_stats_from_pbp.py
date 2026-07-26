@@ -35,7 +35,8 @@ def build_weekly_stats(pbp: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame
         .rename(columns={"posteam": "recent_team", "passer_player_id": "player_id"})
     )
 
-    rec_plays = pbp[(pbp["play_type"] == "pass") & pbp["receiver_player_id"].notna()]
+    rec_plays = pbp[(pbp["play_type"] == "pass") & pbp["receiver_player_id"].notna()].copy()
+    rec_plays["air_yards"] = rec_plays["air_yards"].fillna(0.0)
     receiving = (
         rec_plays.groupby(["season", "week", "posteam", "receiver_player_id"])
         .agg(
@@ -43,6 +44,7 @@ def build_weekly_stats(pbp: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame
             receptions=("complete_pass", "sum"),
             receiving_yards=("receiving_yards", "sum"),
             receiving_tds=("pass_touchdown", "sum"),
+            air_yards=("air_yards", "sum"),
         )
         .reset_index()
         .rename(columns={"posteam": "recent_team", "receiver_player_id": "player_id"})
@@ -63,7 +65,7 @@ def build_weekly_stats(pbp: pd.DataFrame, rosters: pd.DataFrame) -> pd.DataFrame
     merged = receiving.merge(
         rushing, on=["season", "week", "recent_team", "player_id"], how="outer"
     ).merge(passing, on=["season", "week", "recent_team", "player_id"], how="outer")
-    for c in ["targets", "receptions", "receiving_yards", "receiving_tds", "carries", "rushing_yards",
+    for c in ["targets", "receptions", "receiving_yards", "receiving_tds", "air_yards", "carries", "rushing_yards",
               "rushing_tds", "attempts", "passing_epa", "completions", "passing_yards", "passing_tds",
               "interceptions"]:
         merged[c] = merged[c].fillna(0)

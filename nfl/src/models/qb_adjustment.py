@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from src.utils.paths import DATA_RAW, DATA_PROCESSED
+from src.utils.stats import fit_linear
 
 TRAIN_SEASONS = {2018, 2019, 2020, 2021}
 TEST_SEASONS = {2022, 2023, 2024, 2025}
@@ -103,8 +104,7 @@ def build_starter_sequence(schedules: pd.DataFrame) -> pd.DataFrame:
 
 
 def fit_calibration(x: pd.Series, y: pd.Series) -> tuple[float, float]:
-    b, a = np.polyfit(x, y, 1)
-    return a, b
+    return fit_linear(x, y)
 
 
 if __name__ == "__main__":

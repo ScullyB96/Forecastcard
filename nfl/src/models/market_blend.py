@@ -25,6 +25,16 @@ than going stale.
 An nfelo-inspired dynamic per-team-error-weighted blend was also tried and
 UNDERPERFORMED this simple regularized blend (MAE 9.65 vs 9.55 on margin) --
 not included here.
+
+NOT used in live production as of review round 2 -- the margin blend was removed in round 1
+(a full ATS%/CRPS/signed-bias panel found it indistinguishable from a coin flip with a real
+negative bias, MODEL_DOCUMENTATION.md §4.3) and the total blend was removed in round 2 on the
+identical panel (O/U%=50.1%, CI [47.2%,53.0%], the same coin-flip failure pattern -- §4.3,
+src/models/validate_market_blend_totals.py). `fit_market_blend`/`apply_blend` are kept as
+generic, still-correct utilities -- `validate_game_simulator.py` uses them for its own
+historical comparison-baseline construction, and a future feature could reuse them -- but
+`weekly_update.py` now uses the market spread_line/total_line directly for both margin and
+total, falling back to Layer 1's own calibration only when no line is published yet.
 """
 
 import numpy as np

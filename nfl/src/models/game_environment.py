@@ -29,6 +29,7 @@ import pandas as pd
 
 from src.models.ratings import PLAY_TYPES
 from src.utils.paths import DATA_RAW, DATA_PROCESSED
+from src.utils.stats import fit_linear
 
 TRAIN_SEASONS = {2018, 2019, 2020, 2021}
 TEST_SEASONS = {2022, 2023, 2024, 2025}
@@ -124,8 +125,36 @@ class PassRateEngine:
 
 
 def fit_calibration(x: pd.Series, y: pd.Series) -> tuple[float, float]:
-    b, a = np.polyfit(x, y, 1)
-    return a, b
+    return fit_linear(x, y)
+
+
+def fit_game_script(team_margin: pd.Series, implied_team_total: pd.Series, pass_rate_residual: pd.Series) -> dict:
+    """Game-script pass-rate model, v2 (review 2026-07 #1.5): adds the
+    market-implied team total as a second regressor alongside team_margin.
+    implied_team_total = total_line/2 +/- spread_line/2 -- a team's own
+    market-implied point total, distinct from margin (who's favored) since it
+    also captures the overall scoring environment (shootout-type games see
+    more passing at a given margin than a low-total grind-it-out game).
+
+    Validated walk-forward (TRAIN=2018-2021 fit / TEST=2022-2025 held out):
+    MAE 0.07141 (team_margin alone) -> 0.07080 (+ implied_team_total),
+    p=0.0406, with a same-direction improvement in all 4 individual TEST
+    seasons (not driven by one anomalous year). The raw univariate
+    correlation of implied_team_total with pass_rate_residual is negative
+    (-0.068) while its coefficient here is positive (+0.0039) -- not a sign of
+    a fragile signal (contrast the rejected total-points wind test, §7.4):
+    implied_team_total conflates "how favored this team is" (correlated with
+    team_margin at r=0.38) with "the scoring environment", and conditioning on
+    team_margin isolates the latter, which has a sensible, interpretable
+    positive sign (higher-total games see more passing net of who's ahead)."""
+    X = np.column_stack([np.ones(len(team_margin)), team_margin, implied_team_total])
+    y = np.asarray(pass_rate_residual, dtype=float)
+    coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+    return {"intercept": float(coefs[0]), "margin_coef": float(coefs[1]), "total_coef": float(coefs[2])}
+
+
+def apply_game_script(coefs: dict, team_margin, implied_team_total):
+    return coefs["intercept"] + coefs["margin_coef"] * team_margin + coefs["total_coef"] * implied_team_total
 
 
 if __name__ == "__main__":
@@ -133,7 +162,7 @@ if __name__ == "__main__":
     pbp = pd.read_parquet(DATA_RAW / f"pbp_{min(seasons)}_{max(seasons)}.parquet")
     schedules = pd.read_parquet(DATA_RAW / f"schedules_{min(seasons)}_{max(seasons)}.parquet")
     sched = schedules[schedules["game_type"] == "REG"][
-        ["game_id", "home_team", "away_team", "home_score", "away_score"]
+        ["game_id", "home_team", "away_team", "home_score", "away_score", "spread_line", "total_line"]
     ]
 
     # --- total points calibration: Layer 1's pregame_total_signal + dome/indoor.
@@ -208,10 +237,36 @@ if __name__ == "__main__":
     print(f"\nGAME SCRIPT adjustment: pass_rate_residual = {script_intercept:.4f} + {script_slope:.5f} * team_margin")
     print(f"  test MAE: {script_mae:.4f} (naive, no script adjustment: {naive_script_mae:.4f})")
 
+    # v2: + market-implied team total (review 2026-07 #1.5) -- see fit_game_script docstring
+    full_pr_market = full_pr.dropna(subset=["spread_line", "total_line"]).copy()
+    full_pr_market["implied_team_total"] = np.where(
+        full_pr_market["team"] == full_pr_market["home_team"],
+        full_pr_market["total_line"] / 2 + full_pr_market["spread_line"] / 2,
+        full_pr_market["total_line"] / 2 - full_pr_market["spread_line"] / 2,
+    )
+    train_mask_m = full_pr_market["season"].isin(TRAIN_SEASONS)
+    test_mask_m = full_pr_market["season"].isin(TEST_SEASONS)
+    game_script_coefs = fit_game_script(
+        full_pr_market.loc[train_mask_m, "team_margin"],
+        full_pr_market.loc[train_mask_m, "implied_team_total"],
+        full_pr_market.loc[train_mask_m, "pass_rate_residual"],
+    )
+    script_pred_v2 = apply_game_script(
+        game_script_coefs, full_pr_market.loc[test_mask_m, "team_margin"], full_pr_market.loc[test_mask_m, "implied_team_total"]
+    )
+    script_mae_v2 = (script_pred_v2 - full_pr_market.loc[test_mask_m, "pass_rate_residual"]).abs().mean()
+    print(f"\nGAME SCRIPT v2 (+ implied_team_total): {game_script_coefs}")
+    print(f"  test MAE: {script_mae_v2:.4f} (v1 margin-only: {script_mae:.4f})")
+
     with open(DATA_PROCESSED / "environment_calibration.txt", "w") as fh:
         fh.write(f"total_c={c}\ntotal_d={d}\ntotal_e_is_indoor={e}\n")
         fh.write(f"league_avg_plays={league_avg_plays}\n")
         fh.write(f"script_slope={script_slope}\nscript_intercept={script_intercept}\n")
+        fh.write(
+            f"game_script_intercept={game_script_coefs['intercept']}\n"
+            f"game_script_margin_coef={game_script_coefs['margin_coef']}\n"
+            f"game_script_total_coef={game_script_coefs['total_coef']}\n"
+        )
 
     pr_result.to_parquet(DATA_PROCESSED / "pass_rate_ratings.parquet", index=False)
     print("\nsaved environment_calibration.txt, pass_rate_ratings.parquet")

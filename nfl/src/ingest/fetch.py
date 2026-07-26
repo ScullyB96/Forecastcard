@@ -91,12 +91,25 @@ def fetch_ngs(stat_type: str, seasons: list[int], force: bool = False):
     )
 
 
+def fetch_draft_picks(seasons: list[int], force: bool = False):
+    """Draft round/pick/position, keyed by real gsis_id -- used by
+    rookie_prior.py's draft-capital usage prior (review #2.6)."""
+    return _cached("draft_picks", seasons, lambda: nfl.import_draft_picks(seasons), force)
+
+
 def fetch_all(seasons: list[int], force: bool = False) -> dict[str, str]:
+    # NOTE: does NOT call fetch_weekly_data() (nfl.import_weekly_data) --
+    # confirmed unused by any downstream script (housekeeping audit, review
+    # 2026-07 #3.4). The live pipeline (weekly_update.py) deliberately never
+    # uses it either: import_weekly_data() lags the season by design, so
+    # weekly player stats are always derived from our own PBP data instead
+    # (build_weekly_stats_from_pbp.py). fetch_weekly_data() itself is kept
+    # (harmless, occasionally useful for an ad-hoc comparison), just not spent
+    # on by default here.
     paths = {
         "schedules": fetch_schedules(seasons, force),
         "pbp": fetch_pbp(seasons, force),
         "weekly_rosters": fetch_weekly_rosters(seasons, force),
-        "weekly_player_stats": fetch_weekly_data(seasons, force),
         "injuries": fetch_injuries(seasons, force),
         "ngs_passing": fetch_ngs("passing", seasons, force),
         "ngs_receiving": fetch_ngs("receiving", seasons, force),

@@ -15,6 +15,7 @@ import pandas as pd
 
 from src.models.ratings import PowerRatingEngine, build_dataset
 from src.utils.paths import DATA_PROCESSED
+from src.utils.stats import fit_linear
 
 TUNE_TRAIN = {2018, 2019, 2020}
 TUNE_VAL = {2021}
@@ -27,10 +28,7 @@ DEF_SHRINK_GRID = [0.35, 0.50, 0.65]
 
 
 def fit_calibration(train: pd.DataFrame) -> tuple[float, float]:
-    x = train["pregame_rating_diff"].to_numpy()
-    y = train["actual_margin"].to_numpy()
-    b, a = np.polyfit(x, y, 1)
-    return a, b
+    return fit_linear(train["pregame_rating_diff"], train["actual_margin"])
 
 
 def mae_for(df: pd.DataFrame, a: float, b: float) -> float:

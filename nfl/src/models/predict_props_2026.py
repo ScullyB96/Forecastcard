@@ -30,11 +30,15 @@ engine for the players it was built for, and outside expertise exactly where
 we have a known, structural blind spot.
 """
 
-import re
-
 import numpy as np
 import pandas as pd
 
+from src.ingest.name_matching import (
+    build_lastname_pos_to_id,
+    build_lastname_team_pos_to_id,
+    build_name_to_id,
+    norm_name,
+)
 from src.models.game_environment import PassRateEngine, build_pass_rate_table
 from src.models.player_usage import ShareEngine, TdRateEngine, build_player_week_shares
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
@@ -46,49 +50,6 @@ LEAGUE_AVG_PLAYS = 62.859
 # Fitted on 2022-2025 holdout, corr 0.992 across deciles.
 TD_PROB_CALIB_A = 0.046
 TD_PROB_CALIB_B = 0.769
-
-
-def norm_name(name: str) -> str | None:
-    if pd.isna(name):
-        return None
-    s = name.lower().strip()
-    s = re.sub(r"[.'\-]", "", s)
-    s = re.sub(r"\s+(jr|sr|ii|iii|iv|v)$", "", s)
-    return re.sub(r"\s+", " ", s)
-
-
-def build_name_to_id(rosters: pd.DataFrame) -> dict:
-    ros = rosters[["player_name", "player_id"]].dropna().copy()
-    ros["name_norm"] = ros["player_name"].apply(norm_name)
-    return ros.drop_duplicates("name_norm", keep="last").set_index("name_norm")["player_id"].to_dict()
-
-
-def build_lastname_team_pos_to_id(rosters: pd.DataFrame, season: int) -> dict:
-    """Fallback index for nickname mismatches (Ken/Kenneth, Cam/Cameron) that
-    the exact-name lookup misses. Keyed on (last_name, team, position) from
-    the most recent season's roster -- tight enough (team+position narrows
-    the field to a handful of players at most) that it won't accidentally
-    match two different people, unlike matching on last name alone."""
-    ros = rosters[(rosters["season"] == season) & rosters["player_name"].notna()].copy()
-    ros["last_name"] = ros["player_name"].apply(norm_name).str.split().str[-1]
-    lookup = ros.groupby(["last_name", "team", "position"])["player_id"].nunique()
-    unambiguous_keys = lookup[lookup == 1].index
-    ros = ros.set_index(["last_name", "team", "position"]).loc[lambda d: d.index.isin(unambiguous_keys)]
-    return ros["player_id"].to_dict()
-
-
-def build_lastname_pos_to_id(rosters: pd.DataFrame, season: int) -> dict:
-    """Third-tier fallback for players who changed teams in the offseason
-    (e.g. Kenneth Walker III: SEA in 2025, KC per Clay's 2026 projection) --
-    team+position no longer matches, so drop team and require the last
-    name+position combo to be unique LEAGUE-WIDE, which is true for the
-    large majority of surnames at a given position."""
-    ros = rosters[(rosters["season"] == season) & rosters["player_name"].notna()].copy()
-    ros["last_name"] = ros["player_name"].apply(norm_name).str.split().str[-1]
-    lookup = ros.groupby(["last_name", "position"])["player_id"].nunique()
-    unambiguous_keys = lookup[lookup == 1].index
-    ros = ros.set_index(["last_name", "position"]).loc[lambda d: d.index.isin(unambiguous_keys)]
-    return ros["player_id"].to_dict()
 
 
 if __name__ == "__main__":

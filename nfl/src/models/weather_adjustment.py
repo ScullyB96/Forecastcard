@@ -24,6 +24,8 @@ one, alongside fresher inactive-list data.
 import numpy as np
 import pandas as pd
 
+from src.utils.stats import fit_linear
+
 FIT_SEASONS = set(range(2018, 2026))
 
 
@@ -35,8 +37,7 @@ def fit_wind_adjustment(rate_result: pd.DataFrame, actual_col: str, touch_col: s
         (rate_result["roof"] == "outdoors") & rate_result["wind"].notna() & rate_result["season"].isin(FIT_SEASONS)
     ].copy()
     fit["resid"] = fit[actual_col] / fit[touch_col] - fit[pregame_rate_col]
-    slope, intercept = np.polyfit(fit["wind"], fit["resid"], 1)
-    return intercept, slope
+    return fit_linear(fit["wind"], fit["resid"])
 
 
 def apply_wind_adjustment(base_rate: float, wind: float | None, roof: str | None, coefs: tuple[float, float]) -> float:
