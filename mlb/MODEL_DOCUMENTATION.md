@@ -4146,6 +4146,54 @@ scripts, the FastAPI site itself, Railway deployment) are tracked in the
 task list (#164–#167), not detailed further here since they touch `site/`
 and sibling-sport directories outside this file's scope.
 
+## 11.38 Task #165 (MLB part): export_to_site_db.py, Phase 3 of the
+combined-site deployment (2026-08-01)
+
+Reads task #163's parquet outputs (`daily_props`/`batter_props`/
+`pitcher_props`) and upserts them into task #164's shared Postgres
+`games`/`props`/`runs` tables via a plain `DATABASE_URL`-driven
+`psycopg2` connection — no ORM, matching this project's existing
+dependency-light style. Explodes each wide per-player prop table into the
+shared long (player, market) row shape (`p_1plus_hr` → market `"1+ HR"`,
+`over_prob`; `mean_total_bases` → market `"Total Bases"`, `proj_mean`;
+etc.).
+
+**Real-name resolution, not scoped by the original plan but cheap and
+clearly worth doing**: `batter_props`/`pitcher_props` carry only MLBAM
+player ids, no names — would have shipped a props page showing raw ids.
+Added a single batched `pybaseball.playerid_reverse_lookup` call (Chadwick
+register, already a project dependency, no new API key/service) per
+export run. Verified on real 2026-07-25 data: 714/732 real players (97.5%)
+resolved to a real name; the remaining 18 fall back to the raw id (almost
+certainly very recent debuts the register hasn't caught up to yet — not
+investigated further, a graceful degradation, not a blocker); the 30
+`"{TEAM}_POSITION_PLAYER"` blowout placeholder ids are intentionally never
+looked up (not real MLBAM ids).
+
+**Real bug found and fixed during verification**: `props`' primary key
+(`sport, slate_key, game_id, player_id, market`) has no `role` column, and
+the batter table's `mean_k` and the pitcher table's `mean_k` both mapped
+to the same display market name `"Strikeouts"` — for a two-way player
+(batter AND pitcher in the same real game), both rows share every primary-
+key column and collide on `ON CONFLICT`, silently dropping one. Confirmed
+6 real such collisions in 2026-07-25 data alone (verified via a direct
+`(game_pk, player_id)` set-intersection between `batter_props`/
+`pitcher_props` before vs. after — exactly matched the 5178-generated vs.
+5172-landed row discrepancy first noticed). Fixed by renaming the batter
+market to `"Batter Strikeouts"` (pitcher keeps the more conventional bare
+`"Strikeouts"`) rather than changing the shared schema — cheaper and just
+as correct, since the actual collision source was naming, not a genuine
+need for a 4th key column.
+
+**Verification**: local Postgres 16 (Homebrew), schema from task #164
+applied, `DATABASE_URL=postgresql://$(whoami)@localhost:5432/sports_site_dev
+python -m src.pipeline.export_to_site_db 2026-07-25` — 15 games, 5178 prop
+rows, exact match to the source parquet row count post-fix (`py_compile`
+clean; spot-checked `games`/`props`/`runs` contents directly via `psql`).
+Known, documented, not-yet-solved gap: prop rows have no `team` column
+(the source parquet has none to read) — left NULL, the site can still
+group props by `game_id` without it.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):
