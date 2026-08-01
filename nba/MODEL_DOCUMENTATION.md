@@ -2434,3 +2434,26 @@ strength) is fully exhausted for OREB. Combined with Sec26's earlier finding tha
 weighted league average moved OREB from a clear holdout loss to a statistical tie (real progress,
 but insufficient to adopt), OREB team-level anchoring's tractable levers are now genuinely spent;
 it remains unanchored (bottom-up player-sum only) per Sec23's original decision.
+
+## 31. Detrend-then-retrend tested on 3PT-makes -- the audit lever's own premise didn't survive a real-data check
+
+A third audit lever: Sec17's detrend-then-retrend architecture (`add_era_adjusted_player_rate`) was
+built and validated exclusively for steals, where it failed decisively on holdout (a genuine regime
+change, not a trend). The audit flagged 3PT-makes as untested and structurally better-suited (a
+continuous, CLT-like trend rather than a level-shift). **Checked the premise directly against real
+per-season data BEFORE spending effort on the fix itself**: mean 3PT attempts/made per player-game
+by dev season -- 2.27/0.80 (2015) rising to 3.02/1.07 (2018), then essentially FLAT through the rest
+of dev (3.23, 3.25, 3.32, 3.25, 3.27 attempts, 2019-2023). The rise is real but plateaus WITHIN the
+dev range itself -- a materially different shape from margin's continuous-through-2023 climb
+(Sec9.5), and actually closer to steals' own regime-change profile (a shift concentrated at/after
+the dev/holdout boundary, not a trend visible throughout dev) than the audit's stated premise
+suggested.
+
+Swept `current_rate_halflife_games` in {25,50,100,200,400} on the recent-dev slice anyway (fit on
+the full dev range, same discipline as every other candidate): all 5 values showed a REAL
+REGRESSION vs. the current flat expanding-shrinkage baseline, consistently and by a similar small
+magnitude -- a clean, decisive stop at Stage 1, no holdout read spent. This is a useful negative
+result on two levels: it confirms detrend-then-retrend still isn't the right tool outside the
+regime-change-diagnosis case it was actually built for, and it's a concrete example of this
+project's own discipline (check the premise against real data before trusting a lever's stated
+rationale) catching a plausible-sounding assumption that didn't actually hold up.
