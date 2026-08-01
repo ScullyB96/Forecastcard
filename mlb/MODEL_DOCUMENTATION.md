@@ -4096,6 +4096,56 @@ need to re-litigate it. The underlying policy tables (hook-timing,
 tier-share) remain valid, correctly-fit descriptions of real managerial
 behavior — this is a downstream-value null, not evidence the fits are wrong.
 
+## 11.37 Task #163: MLB batter/pitcher props persistence — Phase 1 of the
+combined multi-sport site deployment (2026-08-01)
+
+Pure infrastructure, zero model-logic change: the first step of a new
+multi-session effort to deploy a combined FastAPI site (all 4 sports) on
+Railway, backed by a shared Postgres database. Each sport's own pipeline
+keeps running unchanged on its own schedule; a small per-sport
+`export_to_site_db.py` (later phase) reads that sport's latest output and
+upserts into 3 shared tables. MLB's `generate_daily_props.py` already
+computed `batter_props`/`pitcher_props` per game via `generate_game_props`
+but discarded them — only `game_props` was ever persisted
+(`daily_props_{date}.parquet`). This left MLB with no per-player prop data
+for the export script to read, unlike NFL/NBA's existing separate props
+files. Fixed by collecting and saving `batter_props_{date}.parquet` /
+`pitcher_props_{date}.parquet` alongside the existing file, tagging each
+row with `game_pk`/`matchup` the same way `results` already does for
+`game_props`.
+
+**Real bug found and fixed along the way**: `pitcher_props`'s index
+(`pitcher_id`) mixes real integer pitcher ids with a
+`"{TEAM}_POSITION_PLAYER"` placeholder string used for blowout
+position-player-pitching innings (`props.py:619`) — a legitimate, existing
+in-memory design (pandas tolerates a mixed-type object column fine), but
+pyarrow's parquet writer requires one type per column and raised
+`ArrowInvalid` the first time this table was actually persisted. Fixed by
+casting `pitcher_id` to `str` right before saving (persisted-output-only;
+the in-memory model code that groups by this column is untouched).
+
+**Verification** (real date, 2026-07-25, 15 games — the date this session's
+last daily props file happened to be cached for):
+- `daily_props_{date}.parquet`'s own schema is unaffected: columns/dtypes
+  match exactly; the only difference found against an old on-disk snapshot
+  of this file (`postseason`, `used_debut_fallback`) was confirmed via
+  `git log -p` to predate this task by one commit (`8be96d8`), i.e. the old
+  snapshot was just stale, not a regression from this change.
+- New files: 270 batter-prop rows / 503 pitcher-prop rows across the 15
+  games (one row per real batter/pitcher per game, including 27 real
+  position-player-placeholder pitcher rows, which now serialize correctly),
+  confirmed at both a quick n=50 smoke-test trial count and the real n=1000
+  default.
+- `py_compile` clean; no other file touched.
+
+No model-accuracy row was added to the metrics ledger for this task beyond
+a carried-forward marker (row 30, `config_flags.model_logic_changed: false`)
+— nothing about the simulation changed, so there's no new accuracy number
+to report. Remaining phases (shared Postgres schema, per-sport export
+scripts, the FastAPI site itself, Railway deployment) are tracked in the
+task list (#164–#167), not detailed further here since they touch `site/`
+and sibling-sport directories outside this file's scope.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):

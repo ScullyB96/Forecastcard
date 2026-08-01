@@ -183,6 +183,8 @@ if __name__ == "__main__":
 
     rng = np.random.default_rng()
     results = []
+    batter_prop_rows = []
+    pitcher_prop_rows = []
     for row in games.itertuples():
         home_pid, away_pid = row.home_probable_pitcher_id, row.away_probable_pitcher_id
         if pd.isna(home_pid) or pd.isna(away_pid):
@@ -235,17 +237,45 @@ if __name__ == "__main__":
             # the lineup-source flags above.
             print(f"    note: player id(s) {props['debut_fallback_pids']} had no cached history "
                   f"(true MLB debut) -- used generic debut-cohort profile", flush=True)
+        matchup = f"{row.away_team} @ {row.home_team}"
         results.append({
-            "game_pk": row.game_pk, "matchup": f"{row.away_team} @ {row.home_team}",
+            "game_pk": row.game_pk, "matchup": matchup,
             "home_lineup_source": home_source, "away_lineup_source": away_source,
             "real_weather": has_real_weather, "postseason": is_postseason,
             "used_debut_fallback": bool(props["debut_fallback_pids"]), **props["game_props"],
         })
+        # task #163 (combined-site export prerequisite, 2026-08): generate_game_props
+        # already computes batter_props/pitcher_props per game -- previously discarded,
+        # only game_props was ever persisted. Tag each with game_pk/matchup (not part of
+        # the per-player DataFrame itself) and collect across games, same convention as
+        # `results` above, so the site's export script has real per-player prop data to
+        # read, matching NBA's own daily_props file pattern.
+        bp = props["batter_props"].reset_index()  # index is already named "batter_id"
+        bp.insert(0, "matchup", matchup)
+        bp.insert(0, "game_pk", row.game_pk)
+        batter_prop_rows.append(bp)
+        pp = props["pitcher_props"].reset_index()  # index is already named "pitcher_id"
+        # pitcher_id mixes real int ids with the "TEAM_POSITION_PLAYER" blowout
+        # placeholder (props.py:619) -- parquet needs one type per column, so
+        # cast to str for the persisted output (in-memory model code is unaffected).
+        pp["pitcher_id"] = pp["pitcher_id"].astype(str)
+        pp.insert(0, "matchup", matchup)
+        pp.insert(0, "game_pk", row.game_pk)
+        pitcher_prop_rows.append(pp)
 
     summary = pd.DataFrame(results)
     out_path = DATA_PROCESSED / f"daily_props_{target_date}.parquet"
     summary.to_parquet(out_path, index=False)
     print(f"\n=== summary: {len(summary)} games, saved to {out_path.name} ===", flush=True)
+
+    batter_props_out = pd.concat(batter_prop_rows, ignore_index=True) if batter_prop_rows else pd.DataFrame()
+    pitcher_props_out = pd.concat(pitcher_prop_rows, ignore_index=True) if pitcher_prop_rows else pd.DataFrame()
+    batter_props_path = DATA_PROCESSED / f"batter_props_{target_date}.parquet"
+    pitcher_props_path = DATA_PROCESSED / f"pitcher_props_{target_date}.parquet"
+    batter_props_out.to_parquet(batter_props_path, index=False)
+    pitcher_props_out.to_parquet(pitcher_props_path, index=False)
+    print(f"=== {len(batter_props_out)} batter-prop rows saved to {batter_props_path.name} ===", flush=True)
+    print(f"=== {len(pitcher_props_out)} pitcher-prop rows saved to {pitcher_props_path.name} ===", flush=True)
     for row in summary.itertuples():
         matchup = row.matchup
         away_team, home_team = matchup.split(" @ ")
