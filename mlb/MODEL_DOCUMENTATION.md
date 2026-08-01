@@ -3715,3 +3715,153 @@ known-destination build; Phase 2 converts it into what the Discord use case actu
 Phase 3 is cheap opportunistic upside now that rejection costs minutes, not hours; Phase 4
 protects the whole thing once it's actually being used. **If only two things happen next
 session: the 2026 holdout run (0.3), then start the latent-effect measurement (1.1).**
+
+## 12. Suggested next steps for a future session
+
+**§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):
+HFA and park-neutralization are built, wired, and kept (correctness-fix grounds, full-stack
+effect not distinguishable at n=597 — §11.8's status note). The backtest protocol is scaled to
+n=7237 (claim 6), now the reference baseline (56.3% SU / 0.2416 Brier / 3.543 total MAE / 3.442
+margin MAE) superseding every earlier-cited figure in this document. Rookie priors
+(`use_debut_prior`, task #119) tested decisively NULL on that protocol (tight CI, not
+deployed). GB/FB→pitcher-HR-allowed (task #120) tested REAL (SU +1.53pp, CI excludes zero) and
+is now live in all 3 consumer files. Bat speed and pulled-air rate were re-tested at n=7237
+too (§11.9) — both still NOISE (CI excludes neither zero nor a small effect, ~±1.2pp), a
+tighter confirmation of §11.7's original "unresolved" verdict, not a reversal — neither
+reverted. **Remaining open work**: (a) the total-runs dispersion diagnostic (claim 5,
+std(z)=1.087, under-dispersed — no fix attempted); (b) the 3 smaller notes (SB battery-side,
+bullpen back-to-back performance, stale AGE_PEAK=29); (c) HFA/park-neutralization's own
+full-stack delta is still only measured at the smaller n=597 protocol (§11.8's status note) —
+re-running that specific comparison on the n=7237 protocol remains open.
+**The phased roadmap below (per an external reviewer, 2026-07-22, reacting to §11.10-11.11's
+close-out) supersedes every list previously in this section — those are preserved in git
+history, not repeated here.** Sequenced by dependency and expected value; effort estimates
+assume the current toolkit (CRN pairing, run-value screen, n=7237 protocol) as standard.
+
+### Phase 0 — Lock the foundation (one short session)
+
+**0.1 Persisted metrics ledger.** This session's own wrong-baseline mistake (§11.9) and the
+project's habit of citing numbers no file actually stores are the same disease: no
+append-only record of runs. Every validation run should write one row (run ID, git hash,
+config/factor flags, n, trials, SU, Brier, total/margin MAE, std(z), PIT coverage, home-win
+share) to a parquet this document can defer to instead of restating figures inline. Cheap
+(~an hour), and prevents the whole class of reference-point errors permanently.
+
+**0.2 Re-baseline at full n with the complete diagnostic suite.** One canonical n=7237 run
+emitting every metric above together. Closes two open items for free: HFA/park-
+neutralization's full-stack effect gets measured at a sample size that can actually resolve
+it (§11.8's status note is still only at n=597), and simulated home-win share can be checked
+directly against the real 52.3% as confirmation the HFA fix is calibrated, not just present.
+
+**0.3 The 2026 first-half holdout — the single most informative run available right now.**
+It's 2026-07-22; roughly 1,300-1,400 completed 2026 games exist that NO fitting, selection,
+or keep/revert decision in this project has ever touched. Every kept signal was chosen using
+2023-2025 backtests, so selection bias accumulates across dozens of decisions even with fully
+honest per-test methodology — and no further 2023-2025 testing can detect that. One
+walk-forward run against the CURRENT FROZEN stack on 2026 H1 answers whether 57.9% is the
+real number. Two rules: run it once and don't iterate against it (iterating turns a holdout
+into just more training data), then adopt 2026 as a standing rolling out-of-sample set going
+forward so the selection-bias problem never re-accumulates silently.
+
+### Phase 1 — The pitcher-appearance latent effect (the dispersion fix; 1-2 sessions)
+
+The marked frontier per §11.11 — the highest-value remaining build, with a known destination
+before starting (the diagnostic already proves the current shape is wrong).
+
+**1.1 Confirm the mechanism in real data FIRST** — the same component-level discipline this
+project already demands of every signal. Test for day-level pitcher overdispersion directly:
+for each real start, compare the variance of per-start outcome rates (wOBA-allowed, or
+K/BB/HR rate per start) against the binomial variance the pitcher's own season rate implies.
+Real day-to-day effectiveness variation shows up as excess variance beyond that binomial
+floor; a split-half check (odd vs. even PAs within the same start, do their residuals
+correlate) confirms it's a shared within-start shock, not noise. Run the same test on
+team-offense-days to size the batter-side analog too — published expectation is the pitcher
+side dominates, but measure both before assuming.
+
+**1.2 Minimal implementation once 1.1 confirms it's real**: one latent scalar per
+(pitcher-appearance, trial) — draw `g ~ Normal(0, σ²)` once, apply in odds space to that
+pitcher's whole allowed-rate vector (one shared shift moving K down and BB/hits/HR up
+together, or the reverse), mean-corrected so expected rates are unchanged in aggregate. Start
+with one global σ; only split starter-vs-reliever σ if 1.1's own measurement shows they
+differ materially. This is deliberately the smallest possible version of within-game
+correlation — one new parameter, drawn once per trial, touching no matchup logic.
+
+**1.3 Fit σ on 2023-2024, validate on 2025** (NOT on the same data used to tune it, to avoid
+overfitting the very diagnostic being targeted): sweep σ to close the dispersion diagnostic
+(std(z) → ~1.0, 13+/≤4-run tail frequencies matching reality) on the fit seasons, then check
+the held-out season's own PIT coverage at 50/80/95%.
+
+**1.4 Acceptance criteria, stated BEFORE running**: std(z) within ~0.03 of 1.0 on held-out
+data; PIT coverage CIs containing nominal; CRN-paired Brier delta not significantly worse;
+**SU expected flat and NOT the arbiter**. This targets distribution SHAPE, not matchup
+separation — judging it on SU is exactly how a good calibration fix gets wrongly reverted
+(the same mistake this session's §11.9 correction was about, in reverse). Note the explicit
+exception to §11.5's "new heterogeneity axis = full-stack risk" rule: this IS formally a new
+heterogeneity axis, but unlike the 6 that failed, it isn't trying to improve matchup
+separation — it's a correctness fix in the same family as HFA, with a diagnostic that already
+proves the current shape is wrong before any code is written. Judge it on the metric it
+targets, not the one it was never meant to move.
+
+**1.5 Measure the residual.** If a gap remains after 1.2-1.4, the leftover is within-INNING
+contagion (not just within-game) — a separate, harder build, worth attempting only if the
+residual after this phase actually justifies it.
+
+Note the ordering dependency already satisfied: without CRN pairing (§11.10), adding this new
+source of within-game variance would have wrecked the ability to measure anything ELSE
+afterward (every future A/B's noise floor would widen along with the intentional dispersion
+fix) — CRN had to come first, and now it has.
+
+### Phase 2 — Cash the calibration in where the value actually lives (one session)
+
+**2.1 Re-fit prop calibration.** `validate_prop_calibration.py`'s existing linear
+recalibration coefficients were fit under the under-dispersed model — after Phase 1 they are
+stale by construction. Re-fit and re-validate at full n once Phase 1 lands.
+
+**2.2 Build totals/margin distribution outputs** (P(total > X) across the ladder, P(team
+total > X), margin quantiles) directly from the now-correctly-dispersed trial distribution.
+This is where the dispersion fix actually converts into better posted picks: an
+under-dispersed model systematically overprices the middle and underprices the tails on
+every total, and Phase 1 removes that bias at its source.
+
+**2.3 Measure the oracle-vs-deployable gap at full n.** Scale `validate_predictive_bullpen.py`
+to the n=7237 protocol and decompose the degradation vs. the oracle backtest by component
+(predictive bullpen, predictive catcher, forecast weather, lineup projection). Whatever
+dominates that gap is a LIVE-accuracy improvement no further oracle-backtest signal work can
+buy — plausibly lineup-projection timing and bullpen usage, in that order, though this should
+be measured, not assumed.
+
+### Phase 3 — Clear the open ledger through the cheap funnel (ongoing, low effort each)
+
+Run everything below through the standard funnel (run-value screen → sliced CRN check →
+full-n confirmation, §11.10) and let most of it die cheaply rather than consuming a full
+backtest to reject:
+
+- **Bat speed and pulled-air rate, resolved permanently.** Run the run-value screen first —
+  if their maximum plausible per-game margin impact is small, reclassify as "kept on
+  component evidence, full-stack immaterial by construction" and stop re-litigating this
+  question. Only a screen showing real material impact earns one more CRN-paired full-n test.
+- **The systematic audit table** (generalizing how the GB/FB win was actually found): for
+  each of ~16 outcome categories × both sides, compute the walk-forward predictive R² of the
+  CURRENT production estimate, multiply by run-value leverage. This mechanically ranks where
+  a better estimator could matter, replacing research-pass-driven idea generation with a
+  checklist — and tells you definitively when the well is actually dry instead of guessing.
+- **The 3 smaller flagged items** (§11.8): `AGE_PEAK=29` → ~26-27 (a constants change, the
+  cheapest test in this entire queue — run it first), stolen-base battery-side suppression
+  folded into existing runner SB rates as a multiplier, reliever back-to-back-day performance
+  penalty on existing reliever rates. Plus two never-tried park/weather refinements: roof
+  status and a league-season ball/drag term.
+
+### Phase 4 — Operational hardening (background, ongoing)
+
+2026 is live and this model is presumably informing real picks: adopt rolling walk-forward
+evaluation against the current season (a weekly Brier/calibration check against the Phase 0.1
+ledger), automate the daily pipeline's completeness checks for in-season use, and version the
+model so any posted pick is traceable to a specific git hash. Unglamorous, but it's what makes
+whatever accuracy number gets quoted a real, checkable one rather than a vibe.
+
+**Sequencing logic in one line**: Phase 0 makes every future number trustworthy (and 0.3 is
+the single most informative run available this week); Phase 1 is the one remaining
+known-destination build; Phase 2 converts it into what the Discord use case actually consumes;
+Phase 3 is cheap opportunistic upside now that rejection costs minutes, not hours; Phase 4
+protects the whole thing once it's actually being used. **If only two things happen next
+session: the 2026 holdout run (0.3), then start the latent-effect measurement (1.1).**
