@@ -55,8 +55,10 @@ from src.models.validate_game_simulator import (
 )
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
-N_TRIALS = 50  # matches the canonical protocol (sec 11.16) -- raise to match
-                # whatever task #140 has made canonical by the time this runs.
+N_TRIALS = 200  # matches the canonical protocol -- task #140 (2026-07-26) raised
+                 # this from 50 to 200; kept in sync here so this one-shot,
+                 # no-redo protocol runs at full intended precision (task #160
+                 # correctness audit caught this at 50, stale since task #140).
 N_GAMES = 25000  # effectively "every complete-lineup game available" --
                   # matches N_GAMES_TO_VALIDATE's own "not really a cap" role.
 
@@ -123,8 +125,16 @@ def main(test_seasons: set[int] | None = None) -> None:
     print(f"bat speed: {resolved(bat_speed_result)}", flush=True)
     print(f"pulled-air rate: {resolved(pulled_air_result)}", flush=True)
 
-    for label, result in [("bat_speed", bat_speed_result), ("pulled_air", pulled_air_result)]:
-        r = pd.read_parquet(baseline_path)
+    # task #160 (2026-07-26 correctness audit) fix: this previously read
+    # baseline_path for BOTH labels, so both ledger rows' numeric columns
+    # (su_primary/brier/etc.) were always the baseline's own metrics,
+    # identical regardless of which arm was being logged -- defeating the
+    # whole point of metrics_ledger.py (letting a future reader verify a
+    # result from the row's own numbers, not just trust the notes text).
+    # Each row now carries its OWN arm's actual OFF-path metrics.
+    for label, result, off_path in [("bat_speed", bat_speed_result, bat_speed_off_path),
+                                     ("pulled_air", pulled_air_result, pulled_air_off_path)]:
+        r = pd.read_parquet(off_path)
         append_run(r, config_flags={"task": "156_resolve_bat_speed_pulled_air", "arm": label,
                                      "test_seasons": sorted(test_seasons), "n_trials": N_TRIALS},
                    n_trials=N_TRIALS,

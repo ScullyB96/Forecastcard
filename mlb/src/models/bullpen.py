@@ -181,23 +181,38 @@ def build_expected_starter_innings(pa: pd.DataFrame) -> pd.DataFrame:
             priors = []
             for pitcher, g in season_agg.groupby("pitcher"):
                 g = g.set_index("season")
-                num, den = 0.0, 0.0
+                num, den, raw_starts = 0.0, 0.0, 0.0
                 for i, w in enumerate(MARCEL_WEIGHTS):
                     s = season - 1 - i
                     if s in g.index:
                         num += w * g.loc[s, "total_innings"]
                         den += w * g.loc[s, "starts"]
+                        raw_starts += g.loc[s, "starts"]
                 if den == 0:
                     continue
-                priors.append({"pitcher": pitcher, "prior_starts": den, "prior_innings": num})
-            priors_df = pd.DataFrame(priors, columns=["pitcher", "prior_starts", "prior_innings"])
+                priors.append({"pitcher": pitcher, "prior_starts": den, "prior_innings": num, "raw_prior_starts": raw_starts})
+            priors_df = pd.DataFrame(priors, columns=["pitcher", "prior_starts", "prior_innings", "raw_prior_starts"])
             if not priors_df.empty:
-                priors_df["reliability"] = priors_df["prior_starts"] / (priors_df["prior_starts"] + K_STARTS)
+                # RELIABILITY (and prior_weight_starts below) must use RAW,
+                # unweighted starts -- not the MARCEL_WEIGHTS-weighted
+                # `prior_starts`, which sums to 12 (not 3) across a full
+                # 3-year history. Same bug class true_talent.py's own
+                # reliability formula was fixed for (task #53): plugging a
+                # ~4-5x-inflated denominator into K_STARTS silently
+                # overstates confidence for any pitcher without a full,
+                # uninterrupted 3-season track record (rookies, midseason
+                # call-ups, converted relievers) -- verified on real 2025
+                # data (task #160 correctness audit): median reliability
+                # 0.852 (buggy, weighted) vs. 0.579 (correct, raw). The
+                # WEIGHTED sum (prior_innings/prior_starts) is still exactly
+                # right for the RATE estimate itself (real Marcel recency-
+                # weighting) -- only the confidence side was wrong units.
                 raw_avg = priors_df["prior_innings"] / priors_df["prior_starts"]
+                priors_df["reliability"] = priors_df["raw_prior_starts"] / (priors_df["raw_prior_starts"] + K_STARTS)
                 priors_df["preseason_innings"] = (
                     priors_df["reliability"] * raw_avg + (1 - priors_df["reliability"]) * league_avg
                 )
-                priors_df["prior_weight_starts"] = np.minimum(priors_df["prior_starts"], K_STARTS)
+                priors_df["prior_weight_starts"] = np.minimum(priors_df["raw_prior_starts"], K_STARTS)
                 priors_df = priors_df[["pitcher", "preseason_innings", "prior_weight_starts"]]
             else:
                 priors_df = pd.DataFrame(columns=["pitcher", "preseason_innings", "prior_weight_starts"])

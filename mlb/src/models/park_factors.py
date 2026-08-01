@@ -237,10 +237,33 @@ def build_outcome_park_factors(pa: pd.DataFrame) -> pd.DataFrame:
     road_roll_pa = grp.apply(lambda g: _same_venue_rolling_sum(g, "road_pa"), include_groups=False)
     road_roll_ev = grp.apply(lambda g: _same_venue_rolling_sum(g, "road_events"), include_groups=False)
 
-    league_rate_by_outcome = rates.groupby("outcome").apply(
-        lambda d: d["home_events"].sum() / d["home_pa"].sum(), include_groups=False
+    # WALK-FORWARD league-rate anchor (task #160, 2026-07-26 correctness audit
+    # fix): previously `rates.groupby("outcome")` pooled ALL seasons (2023-2026)
+    # into one anchor reused for every season, contradicting this function's
+    # own "STRICTLY BEFORE" docstring claim -- a real leakage bug, since the
+    # Bayesian-shrinkage anchor is what PARK_FACTOR_PRIOR_PA=5000 pseudo-PA
+    # dominates for any sparse cell. Verified: up to 26.6% relative error on
+    # rare categories (triple_play, sac_bunt) from including 2025-2026 data in
+    # what should be a strictly-prior-seasons anchor for a 2024 factor. Fixed
+    # by cumulative-summing home_events/home_pa per outcome across seasons,
+    # shifted by 1 (matching every other walk-forward step in this file) --
+    # the true first season (no prior data at all) correctly gets NaN here,
+    # which downstream callers (validate_game_simulator.py's park_factors_wide
+    # lookup) already treat as "no adjustment" (1.0), same as a missing key.
+    season_totals = rates.groupby(["outcome", "season"], as_index=False).agg(
+        se_ev=("home_events", "sum"), se_pa=("home_pa", "sum")
+    ).sort_values(["outcome", "season"])
+    season_totals["cum_ev"] = season_totals.groupby("outcome")["se_ev"].transform(lambda s: s.shift(1).cumsum())
+    season_totals["cum_pa"] = season_totals.groupby("outcome")["se_pa"].transform(lambda s: s.shift(1).cumsum())
+    season_totals["league_rate"] = season_totals["cum_ev"] / season_totals["cum_pa"]
+    # looked up via a (outcome, season) map rather than a merge -- a merge
+    # resets rates' index, which would desync it from home_roll_pa/home_roll_ev/
+    # road_roll_pa/road_roll_ev (Series computed above, aligned to rates' PRE-
+    # merge index labels via the group-apply calls).
+    league_rate_lookup = season_totals.set_index(["outcome", "season"])["league_rate"]
+    league_rate = pd.Series(
+        pd.MultiIndex.from_frame(rates[["outcome", "season"]]).map(league_rate_lookup), index=rates.index
     )
-    league_rate = rates["outcome"].map(league_rate_by_outcome)
 
     rates["home_rate_rolling"] = (home_roll_ev + PARK_FACTOR_PRIOR_PA * league_rate) / (home_roll_pa + PARK_FACTOR_PRIOR_PA)
     rates["road_rate_rolling"] = (road_roll_ev + PARK_FACTOR_PRIOR_PA * league_rate) / (road_roll_pa + PARK_FACTOR_PRIOR_PA)
@@ -299,10 +322,15 @@ def build_hfa_factors(pa: pd.DataFrame) -> dict[int, dict[str, float]]:
     road_roll_pa = grp["road_pa"].transform(lambda s: s.shift(1).rolling(ROLLING_YEARS, min_periods=1).sum())
     road_roll_ev = grp["road_events"].transform(lambda s: s.shift(1).rolling(ROLLING_YEARS, min_periods=1).sum())
 
-    league_rate_by_outcome = pooled.groupby("outcome").apply(
-        lambda d: d["home_events"].sum() / d["home_pa"].sum(), include_groups=False
-    )
-    league_rate = pooled["outcome"].map(league_rate_by_outcome)
+    # WALK-FORWARD league-rate anchor (task #160, 2026-07-26 correctness audit
+    # fix -- same bug and same fix as build_outcome_park_factors above): this
+    # previously pooled ALL seasons into one anchor reused everywhere,
+    # contradicting this function's own "STRICTLY BEFORE" docstring claim.
+    # `.transform` (not a separate merge) keeps this correctly aligned to
+    # `pooled`'s own index, which home_roll_pa/home_roll_ev/etc. below also rely on.
+    league_cum_ev = grp["home_events"].transform(lambda s: s.shift(1).cumsum())
+    league_cum_pa = grp["home_pa"].transform(lambda s: s.shift(1).cumsum())
+    league_rate = league_cum_ev / league_cum_pa
 
     home_rate_rolling = (home_roll_ev + HFA_PRIOR_PA * league_rate) / (home_roll_pa + HFA_PRIOR_PA)
     road_rate_rolling = (road_roll_ev + HFA_PRIOR_PA * league_rate) / (road_roll_pa + HFA_PRIOR_PA)

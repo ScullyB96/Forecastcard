@@ -812,23 +812,30 @@ def build_groundball_rate_by_season(pa: pd.DataFrame) -> pd.DataFrame:
             priors = []
             for batter, g in season_agg.groupby("batter"):
                 g = g.set_index("season")
-                num, den = 0.0, 0.0
+                num, den, raw_bb = 0.0, 0.0, 0.0
                 for i, w in enumerate(MARCEL_WEIGHTS):
                     s = season - 1 - i
                     if s in g.index:
                         num += w * g.loc[s, "events"]
                         den += w * g.loc[s, "bb"]
+                        raw_bb += g.loc[s, "bb"]
                 if den == 0:
                     continue
-                priors.append({"batter": batter, "prior_bb": den, "prior_events": num})
-            priors_df = pd.DataFrame(priors, columns=["batter", "prior_bb", "prior_events"])
+                priors.append({"batter": batter, "prior_bb": den, "prior_events": num, "raw_prior_bb": raw_bb})
+            priors_df = pd.DataFrame(priors, columns=["batter", "prior_bb", "prior_events", "raw_prior_bb"])
             if not priors_df.empty:
-                priors_df["reliability"] = priors_df["prior_bb"] / (priors_df["prior_bb"] + K)
+                # RELIABILITY must use RAW (unweighted) prior_bb -- not the
+                # MARCEL_WEIGHTS-weighted `prior_bb`, same units-mismatch bug
+                # true_talent.py's own reliability formula was fixed for
+                # (task #53), copy-pasted into this function unfixed (task
+                # #160 correctness audit, 2026-07-26). The rate estimate
+                # itself (raw_rate) correctly keeps using the weighted sum.
+                priors_df["reliability"] = priors_df["raw_prior_bb"] / (priors_df["raw_prior_bb"] + K)
                 raw_rate = priors_df["prior_events"] / priors_df["prior_bb"]
                 priors_df["preseason_rate"] = (
                     priors_df["reliability"] * raw_rate + (1 - priors_df["reliability"]) * league_rate
                 )
-                priors_df["prior_weight_bb"] = np.minimum(priors_df["prior_bb"], K)
+                priors_df["prior_weight_bb"] = np.minimum(priors_df["raw_prior_bb"], K)
                 priors_df = priors_df[["batter", "preseason_rate", "prior_weight_bb"]]
             else:
                 priors_df = pd.DataFrame(columns=["batter", "preseason_rate", "prior_weight_bb"])
@@ -880,21 +887,25 @@ def build_pregame_bacon_gb(pa: pd.DataFrame) -> pd.DataFrame:
             rows = []
             for batter, g in season_agg.groupby("batter"):
                 g = g.set_index("season")
-                num, den = 0.0, 0.0
+                num, den, raw_gb = 0.0, 0.0, 0.0
                 for i, w in enumerate(MARCEL_WEIGHTS):
                     s = season - 1 - i
                     if s in g.index:
                         num += w * g.loc[s, "gb_hits"]
                         den += w * g.loc[s, "n_gb"]
+                        raw_gb += g.loc[s, "n_gb"]
                 if den == 0:
                     continue
-                rows.append({"batter": batter, "prior_gb": den, "prior_gb_hits": num})
-            priors_df = pd.DataFrame(rows, columns=["batter", "prior_gb", "prior_gb_hits"])
+                rows.append({"batter": batter, "prior_gb": den, "prior_gb_hits": num, "raw_prior_gb": raw_gb})
+            priors_df = pd.DataFrame(rows, columns=["batter", "prior_gb", "prior_gb_hits", "raw_prior_gb"])
             if not priors_df.empty:
-                reliability = priors_df["prior_gb"] / (priors_df["prior_gb"] + K)
+                # RELIABILITY must use RAW (unweighted) prior_gb -- see task
+                # #53/#160's fix elsewhere; the rate estimate itself keeps
+                # using the weighted sum.
+                reliability = priors_df["raw_prior_gb"] / (priors_df["raw_prior_gb"] + K)
                 raw_rate = priors_df["prior_gb_hits"] / priors_df["prior_gb"]
                 priors_df["preseason_bacon_gb"] = reliability * raw_rate + (1 - reliability) * league_rate
-                priors_df["prior_weight_gb"] = np.minimum(priors_df["prior_gb"], K)
+                priors_df["prior_weight_gb"] = np.minimum(priors_df["raw_prior_gb"], K)
                 priors_df = priors_df[["batter", "preseason_bacon_gb", "prior_weight_gb"]]
             else:
                 priors_df = pd.DataFrame(columns=["batter", "preseason_bacon_gb", "prior_weight_gb"])
@@ -950,11 +961,32 @@ GB_FB_STABILIZATION_BIP = 200  # same order of magnitude as GROUNDBALL_STABILIZA
                                # pitcher GB%/FB% is well-established to stabilize fast (~70 BF per
                                # Carleton's published research), a modest prior is enough
 
-HR_SHARE_PITCHER_CLIP_MIN, HR_SHARE_PITCHER_CLIP_MAX = 0.01, 0.20  # pitcher HR-among-BIP runs much
+HR_SHARE_PITCHER_CLIP_MIN, HR_SHARE_PITCHER_CLIP_MAX = 0.02, 0.20  # pitcher HR-among-BIP runs much
                                                                      # lower than batter HR-among-hits
                                                                      # (BIP includes all the extra outs
                                                                      # HIT_EVENTS excludes) -- confirmed
                                                                      # on real data: p1=0.010, p99=0.103
+                                                                     #
+                                                                     # CLIP_MIN raised 0.01->0.02 (task
+                                                                     # #160, 2026-07-26 correctness audit):
+                                                                     # this is the CONFIRMED, KEPT, live
+                                                                     # full-stack-win mechanism (task #120,
+                                                                     # SU +1.53pp) -- but unlike its batter-
+                                                                     # side sibling hr_share_multiplier
+                                                                     # (which got two rounds of clip-floor
+                                                                     # hardening: the original 13.8x fix,
+                                                                     # then task #159's 0.02->0.035 retune),
+                                                                     # this pitcher-side twin never got a
+                                                                     # real-data limit test at all. Same
+                                                                     # "regression intercept prevents
+                                                                     # predicting near-zero" failure mode:
+                                                                     # at the old 0.01 floor, real 2023-2025
+                                                                     # pitcher-seasons (50+ BIP) produced up
+                                                                     # to 5.2x multipliers on thin-sample
+                                                                     # pitchers. 0.02 caps this at 2.82x,
+                                                                     # zero cases above 3x, touching ~9% of
+                                                                     # real pitcher-seasons at the very
+                                                                     # bottom of the range.
 
 # Fit 2026-07-22: leakage-free walk-forward regression of next-season real
 # pitcher HR-share-among-BIP on this-season existing HR-share-among-BIP, GB
@@ -994,26 +1026,30 @@ def build_pitcher_gb_fb_rate_by_season(pa: pd.DataFrame) -> pd.DataFrame:
             priors = []
             for pitcher, g in season_agg.groupby("pitcher"):
                 g = g.set_index("season")
-                num_gb, num_fb, den = 0.0, 0.0, 0.0
+                num_gb, num_fb, den, raw_bip = 0.0, 0.0, 0.0, 0.0
                 for i, w in enumerate(MARCEL_WEIGHTS):
                     s = season - 1 - i
                     if s in g.index:
                         num_gb += w * g.loc[s, "gb"]
                         num_fb += w * g.loc[s, "fb"]
                         den += w * g.loc[s, "bip"]
+                        raw_bip += g.loc[s, "bip"]
                 if den == 0:
                     continue
-                priors.append({"pitcher": pitcher, "prior_bip": den, "prior_gb": num_gb, "prior_fb": num_fb})
-            priors_df = pd.DataFrame(priors, columns=["pitcher", "prior_bip", "prior_gb", "prior_fb"])
+                priors.append({"pitcher": pitcher, "prior_bip": den, "prior_gb": num_gb, "prior_fb": num_fb, "raw_prior_bip": raw_bip})
+            priors_df = pd.DataFrame(priors, columns=["pitcher", "prior_bip", "prior_gb", "prior_fb", "raw_prior_bip"])
             if not priors_df.empty:
-                reliability = priors_df["prior_bip"] / (priors_df["prior_bip"] + K)
+                # RELIABILITY must use RAW (unweighted) prior_bip -- see task
+                # #53/#160's fix elsewhere; the rate estimates themselves
+                # (gb/fb-among-BIP) keep using the weighted sum.
+                reliability = priors_df["raw_prior_bip"] / (priors_df["raw_prior_bip"] + K)
                 priors_df["preseason_gb_rate"] = (
                     reliability * (priors_df["prior_gb"] / priors_df["prior_bip"]) + (1 - reliability) * league_gb
                 )
                 priors_df["preseason_fb_rate"] = (
                     reliability * (priors_df["prior_fb"] / priors_df["prior_bip"]) + (1 - reliability) * league_fb
                 )
-                priors_df["prior_weight_bip"] = np.minimum(priors_df["prior_bip"], K)
+                priors_df["prior_weight_bip"] = np.minimum(priors_df["raw_prior_bip"], K)
                 priors_df = priors_df[["pitcher", "preseason_gb_rate", "preseason_fb_rate", "prior_weight_bip"]]
             else:
                 priors_df = pd.DataFrame(columns=["pitcher", "preseason_gb_rate", "preseason_fb_rate", "prior_weight_bip"])

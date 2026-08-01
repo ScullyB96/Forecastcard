@@ -121,7 +121,16 @@ def build_umpire_factors_by_season(seasons: list[int]) -> dict[int, dict[int, di
     out = {}
     for season in sorted(border["season"].unique()):
         prior = border[border["season"] < season]
-        ref = prior if len(prior) else border[border["season"] == season]
+        if prior.empty:
+            # task #160 (2026-07-26 correctness audit) -- same real leak and
+            # same fix as catcher_framing.py's identical cold-start pattern:
+            # the true first season previously fell back to ITS OWN full
+            # data instead of a neutral default. An empty dict here means
+            # every resolve_umpire_factor lookup for this season correctly
+            # falls back to NEUTRAL_UMPIRE_FACTOR.
+            out[season] = {}
+            continue
+        ref = prior
         league_rate = ref["is_strike"].mean()
 
         by_ump = ref.groupby("ump_id").agg(n=("is_strike", "size"), k=("is_strike", "sum"))

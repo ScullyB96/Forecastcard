@@ -125,7 +125,20 @@ def build_catcher_framing_factors_by_season(seasons: list[int]) -> dict[int, dic
     out = {}
     for season in sorted(border["season"].unique()):
         prior = border[border["season"] < season]
-        ref = prior if len(prior) else border[border["season"] == season]
+        if prior.empty:
+            # task #160 (2026-07-26 correctness audit): the true cold-start
+            # season (no prior season exists at all) previously fell back to
+            # THIS season's own full data -- a real look-ahead leak (a
+            # catcher's April game got a factor partly informed by their own
+            # September performance), not the harmless "neutral by
+            # construction" case park_factors.py's own ratio-based cold-start
+            # fallback is. Fixed: an empty factor dict here means every
+            # resolve_catcher_factor lookup for this season correctly falls
+            # back to NEUTRAL_CATCHER_FACTOR (already-existing behavior for
+            # any missing catcher_id), rather than serving a leaked value.
+            out[season] = {}
+            continue
+        ref = prior
 
         cell_means = ref.groupby("cell")["is_strike"].transform("mean")
         excess = ref["is_strike"] - cell_means

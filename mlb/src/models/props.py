@@ -107,7 +107,18 @@ N_TRIALS = 1000
 # validate_prop_calibration.py's "real" ground-truth RBI label, so any
 # future calibration re-check stays apples-to-apples against the SAME
 # definition of RBI, not a stale one on one side.
-RBI_EXCLUDED_OUTCOMES = {"double_play", "field_error"}
+#
+# "strikeout" added (task #160, 2026-07-26 correctness audit): a run scored
+# during a strikeout PA can only come from a wild pitch, passed ball, or
+# defensive indifference -- no batted ball occurred at all, so Official
+# Rule 9.04 never credits an RBI here, unambiguously (no scorer's judgment
+# involved, unlike the fielders_choice case this project already
+# deliberately leaves alone). Quantified before fixing: 379 real strikeout
+# PAs with runs_scored>0 across 2023-2026 (116/109/91/63 by season) --
+# comparable magnitude to double_play's already-fixed 68-of-21594 (0.43% of
+# 2025's 21594 season-total runs), the same bug class task #154 fixed,
+# simply missed for this outcome at the time.
+RBI_EXCLUDED_OUTCOMES = {"double_play", "field_error", "strikeout"}
 
 HOOK_TABLE_FIT_SEASONS = {2023, 2024}  # matches task #145's own fit period exactly.
 
@@ -789,7 +800,7 @@ def _game_props(scores_df: pd.DataFrame, n_trials: int) -> dict:
         "p_over_8.5": (total > 8.5).mean(),
         "p_under_8.5": (total < 8.5).mean(),
         "home_covers_minus_1_5": (margin > 1.5).mean(),
-        "away_covers_plus_1_5": (margin > -1.5).mean(),
+        "away_covers_plus_1_5": (margin < 1.5).mean(),
     }
 
 

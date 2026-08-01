@@ -3767,6 +3767,207 @@ important attribution correction for any future reader tempted to credit
 the wrong change. Real, bounded one-time cost paid (~4x runtime vs. the
 old K=50 canonical run); no further trial-count increases planned.
 
+## 11.34 Task #160: comprehensive correctness audit of the full model
+codebase (2026-07-26) — a dozen real, verified bugs found and fixed
+
+Prompted by an explicit request for a full deep-dive: verify every file for
+bugs, calculation errors, data gaps, miscalibration, bad logic, before
+moving to a research pass. Split the ~11,264-line `src/models/` codebase
+into 6 subsystems, ran an independent review of each, then personally
+verified every reported finding against real data/code before fixing
+anything (per this project's own standing discipline — a review is a lead,
+not a verdict). Below is what survived verification, grouped by severity.
+Every fix was individually confirmed via real-data before/after comparison
+(not just "compiles") before being kept.
+
+### CRITICAL
+
+**`props.py:792` — `away_covers_plus_1_5` computed the wrong condition
+entirely, silently wrong since the file's first commit.** `margin =
+home_score - away_score`; away covers a +1.5 line iff `margin < 1.5`. The
+code computed `margin > -1.5` — a completely different, nearly-always-true
+condition (effectively "home doesn't lose by 2+"), not the away spread at
+all. Concrete failure: home wins 10-2 (`margin=8`) — away obviously loses
+a +1.5 bet by a mile, but `8 > -1.5` is `True`, so the buggy formula
+reported `away_covers_plus_1_5≈1.0` in exactly the games it should report
+near-zero. This is a real, live, user-facing prop (`generate_daily_props.py`
+→ `game_props`) that has been wrong for as long as it's existed. Fixed:
+`(margin < 1.5).mean()`.
+
+### HIGH
+
+**`props.py` — `RBI_EXCLUDED_OUTCOMES` missing `strikeout`, same bug class
+task #154 already fixed for `double_play`/`field_error`.** A run scoring
+during a strikeout PA (wild pitch/passed ball/defensive indifference — no
+batted ball occurred) is never an RBI per Official Rule 9.04, unambiguously
+(no scorer's judgment involved). Verified on real data: 379 such PAs across
+2023-2026 (116/109/91/63 by season), comparable magnitude to
+`double_play`'s already-fixed 68-of-21594 (0.43% of 2025's season-total
+runs). Added `"strikeout"` to the set.
+
+**`park_factors.py` — the Bayesian-shrinkage league-rate anchor was pooled
+across ALL seasons, contradicting the function's own "STRICTLY BEFORE"
+walk-forward docstring, in both `build_outcome_park_factors` AND
+`build_hfa_factors`.** `rates.groupby("outcome")` (no `"season"` in the
+groupby) meant a 2024 park factor's shrinkage anchor silently included
+2025-2026 data — real leakage, not neutral, since `PARK_FACTOR_PRIOR_PA
+=5000` pseudo-PA dominates any sparse cell. Verified on real data: up to
+26.6% relative error on rare categories (triple_play, sac_bunt) between the
+old (leaky) and new (walk-forward, cumulative-shifted) anchor; common
+categories (home_run, single, walk, strikeout) moved <0.4%, as expected
+since league rates for common outcomes are stable year to year. Fixed by
+computing a cumulative, `shift(1)`'d per-(outcome,season) anchor instead of
+one global pooled value — the true first season (2023, no prior data at
+all) correctly gets `NaN`, which downstream callers already treat as "no
+adjustment" (same as a missing key).
+
+**Cold-start (2023) look-ahead leak in `catcher_framing.py`, `weather.py`,
+`umpire_factor.py`, and `ttop.py` — all four shared the identical `ref =
+prior if len(prior) else X[X["season"]==season]` pattern**, meaning the
+dataset's true first season fell back to using ITS OWN full-season data
+(including future-in-season games relative to whatever game is being
+scored) instead of a neutral default. This is a genuine leak, NOT the
+harmless case `park_factors.py`'s own cold-start edge case turned out to be
+(there, home/road rates collapse to an identical value regardless of the
+anchor, cancelling to exactly 1.0 — here, a catcher's/umpire's/park's own
+"excess" deviation is a real, informative quantity that happens to include
+future data). This directly contradicts what sec 11.8/§11.13 previously
+assumed ("these modules degrade the same way `build_hfa_factors` does for
+their first season, neutral 1.0") — that assumption was wrong for these
+four specifically. Every real validator whose `TEST_SEASONS` includes 2023
+(`validate_game_simulator.py`, `validate_predictive_bullpen.py`,
+`validate_oracle_vs_predictive.py`, `resolve_bat_speed_pulled_air.py`'s
+default) inherited this for 1/3 of the canonical n≈7237 sample. Fixed:
+the true cold-start season now gets an explicitly empty factor dict, which
+every consumer (`resolve_catcher_factor`, `resolve_umpire_factor`,
+`ttop_factors.get(times_through)`, `weather_factors_by_season.get(season,
+{}).get(bucket)`) already treats as neutral/no-adjustment — verified
+directly (2023 entries: 0, matching the intended fix; 2024+: real,
+non-empty factors as before).
+
+**Same weighted-vs-raw reliability-formula units bug (task #53's original
+fix, never propagated) found in 5 more places**: `bullpen.py`'s
+`build_expected_starter_innings`, and `expected_stats.py`'s
+`build_groundball_rate_by_season`/bacon_gb function/
+`build_pitcher_gb_fb_rate_by_season`, and `spray.py`'s
+`build_pull_rate_by_season`. Each independently copy-pasted the same
+Marcel two-level-shrinkage template from `true_talent.py` — but only
+`true_talent.py`'s own instance (and `pitch_talent.py`, built afterward
+with the fix already applied) ever got task #53's correction. Every other
+copy used the MARCEL_WEIGHTS-*weighted* prior count directly in the
+`n/(n+K)` reliability formula, inflating apparent confidence ~4-5x for any
+player/pitcher without a full, uninterrupted 3-season track record
+(rookies, midseason call-ups, converted relievers) — Carleton's published
+stabilization constants are calibrated against RAW, unweighted samples, so
+this systematically under-shrunk toward league average for exactly the
+population where getting shrinkage right matters most. Verified on real
+2025 bullpen data: median reliability 0.852 (buggy) vs. 0.579 (correct).
+Fixed in all 5 places identically: track a separate raw (unweighted) count
+alongside the existing weighted sum, use the RAW count for reliability and
+the pseudo-sample-weight cap, keep using the WEIGHTED sum for the rate
+estimate itself (that's real Marcel recency-weighting, unaffected). Direct
+before/after check on `build_groundball_rate_by_season`: real, meaningful
+shifts for thin-track-record batters (up to ~0.2 absolute rate change for
+one real batter), consistent with the expected direction and magnitude of
+the fix.
+
+**`expected_stats.py`'s `pitcher_hr_allowed_multiplier` — the ONE confirmed,
+kept, live full-stack-win mechanism (task #120, SU +1.53pp) — never got the
+real-data limit test every sibling multiplier in this file explicitly
+required, and its clip floor was measurably too loose.** `HR_SHARE_PITCHER_
+CLIP_MIN=0.01`'s own comment cited p1=0.010 as justification, but real
+pitcher-seasons (50+ BIP, 2023-2025) show a materially tighter distribution
+(5th pctile 0.0147, mean 0.045); at the old floor, real thin-sample
+pitchers produced multipliers up to ~5.2x — worse than the batter-side
+sibling `hr_share_multiplier`'s own tail even after two rounds of dedicated
+hardening (the original 13.8x fix, then task #159's 0.02→0.035 retune).
+Raised `HR_SHARE_PITCHER_CLIP_MIN` 0.01→0.02: verified this caps the real
+tail at 2.82x with zero cases above 3x, touching ~9% of real pitcher-seasons
+at the very bottom of the range (comparable in spirit to task #159's own
+~5%-touched floor retune).
+
+**`resolve_bat_speed_pulled_air.py` — two bugs in the pre-registered,
+run-once, no-redo October protocol.** (1) `N_TRIALS=50`, stale since task
+#140 raised the canonical protocol to 200 — this script's own comment even
+flagged "raise to match whatever task #140 has made canonical," but nobody
+came back to do it; fixed, now 200, restoring the intended precision for a
+decision that literally cannot be redone if the answer looks wrong. (2) The
+ledger-logging loop read `baseline_path` for BOTH the `bat_speed` and
+`pulled_air` rows regardless of label, so both logged rows' NUMERIC columns
+(su_primary/brier/etc.) were always the baseline's own metrics — the notes
+text was correct, but the whole point of `metrics_ledger.py` is letting a
+future reader verify a result from its own numbers, not just trust prose.
+Fixed: each row now reads its own arm's actual OFF-path metrics.
+
+### Fixes verified individually; full canonical A/B still pending
+
+Every fix above was verified in isolation against real data (concrete
+failure scenario reproduced pre-fix, confirmed corrected post-fix, no new
+blowup introduced) and the full pipeline was smoke-tested end-to-end
+(n=300 games, all fixes combined, no crashes, sane aggregate output). None
+of these are new speculative signals requiring a "prove a net-positive
+accuracy win" bar — they're correctness fixes for objectively wrong logic
+(leakage, wrong condition, wrong units, an unvalidated clip), the same
+"fix a real defect regardless of the accuracy question" standard already
+applied to the weather/platoon regularization fixes and task #159's
+CLIP_MIN retune. A full canonical re-baseline A/B (n=7237, K=200, all
+fixes combined vs. the pre-audit state) was launched to quantify the
+aggregate effect — a multi-hour run given the K=200 protocol's own cost —
+results to be logged to the metrics ledger and this section updated once
+complete; not blocking the rest of this audit's documentation/commit on it.
+
+### Real findings NOT fixed this session — documented, lower priority
+
+Time-boxed after the above; these are genuine, verified-plausible findings
+(from the same 6-way review) that either affect dormant/dead code paths,
+are diagnostic-script-only, or are methodology notes rather than
+mechanism bugs. Flagged here so they aren't silently lost:
+
+- **`crn.py`**: 3 reserved CRN decision-tags (`DECISION_BULLPEN_PICK`,
+  `DECISION_CLOSER_USAGE`, `DECISION_WEATHER_BUCKET`) are defined but never
+  wired to `crn_bool`/`crn_choice`/`crn_uniform` anywhere — bullpen-pick and
+  weather-bucket resampling still consume the shared sequential `self.rng`
+  stream even under `crn_keys`, and `sample_bullpen_plan`'s conditional
+  extra draw (closer-inning-9 check) can desynchronize a CRN-paired
+  comparison's later draws when the tested factor influences bullpen/closer
+  state. Affects the PRECISION of any CRN-paired A/B involving bullpen
+  sampling, not correctness of the base model.
+- **`expected_stats.py`'s `pitcher_double_play_multiplier`**: gated off
+  everywhere (`pitcher_fullmix=False`, no call site sets it `True`), but
+  has the widest real-data tail in the whole file (6.33x) plus a
+  documented coefficient sign instability. A real landmine if a future
+  session flips `pitcher_fullmix=True` without first hardening its clip —
+  flagged so that doesn't happen silently.
+- **`validate_oracle_vs_predictive.py`**: the game-population mismatch
+  across arms (oracle-lineup configs never skip on projection failure,
+  predictive-lineup configs do) was fixed ad hoc once outside this file,
+  not baked into the permanent tool itself — a future re-run (already
+  earmarked once task #144's state-conditioned bullpen work lands) needs
+  the same manual restriction repeated.
+- **`validate_predictive_bullpen.py`**: docstring claims an isolated
+  "bullpen-only" predictive swap, but the starting catcher is also resolved
+  predictively — the measured gap isn't attributable to bullpen alone as
+  claimed (though the later oracle-vs-predictive decomposition suggests
+  catcher's own contribution is empirically small).
+- **`validate_wind_forecast_boost.py`**: its own "check 1" (classification
+  accuracy) compares against the GLOBAL label base rate, not a per-
+  (venue,month) climatology as its docstring claims — a park with a
+  strongly dominant prevailing wind could inflate the reported "37% real
+  signal" via pure climatological skill, not forecast-specific skill. Also
+  uses a fixed T19:00 reading for every game regardless of real start time
+  (undisclosed approximation). Doesn't invalidate check 2 (the actual
+  boost-value comparison), which is methodologically sound on its own.
+- **`jetlag.py`** (dead/reverted code, currently unused): travel log groups
+  by team only, not team+season, so a team's season-opener can get flagged
+  jet-lagged based on the PREVIOUS season's road-trip finale months
+  earlier — verified 5 real such cases. Should be fixed before any future
+  re-enablement attempt, not urgent while dormant.
+- **`defense_factor.py`'s own `__main__` sanity-check script** (not the
+  live pipeline): passes all-season data but filters to only one season
+  when calling `team_game_defense_snapshot`, which doesn't self-filter by
+  season — a real leak, but confined to a standalone diagnostic, not
+  production code.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):

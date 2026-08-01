@@ -27,6 +27,16 @@ from src.models.game_simulator import OUTCOMES
 
 MAX_TIMES_THROUGH = 3
 TTOP_FACTOR_PRIOR_PA = 5000  # same shrinkage fix as build_state_factors_by_season -- see its docstring
+TTOP_FACTOR_CLIP_MIN, TTOP_FACTOR_CLIP_MAX = 0.03, 20.0  # task #160 (2026-07-26 correctness
+                                                           # audit): this table had no clip at all,
+                                                           # unlike every sibling factor table
+                                                           # (weather.py's WEATHER_FACTOR_CLIP_MIN/MAX,
+                                                           # park_factors.py's renormalization) --
+                                                           # real current values (0.041x-3.81x) sit
+                                                           # comfortably inside this band, so it's
+                                                           # pure insurance against a future data
+                                                           # update sparsening a cell further, not a
+                                                           # change to today's real factors.
 
 
 def build_ttop_factors_by_season(pa: pd.DataFrame) -> dict[int, dict[int, dict[str, float]]]:
@@ -44,7 +54,14 @@ def build_ttop_factors_by_season(pa: pd.DataFrame) -> dict[int, dict[int, dict[s
     capped_all = pa["n_thruorder_pitcher"].clip(upper=MAX_TIMES_THROUGH)
     for season in sorted(pa["season"].unique()):
         prior = pa[pa["season"] < season]
-        ref = prior if len(prior) else pa[pa["season"] == season]
+        if prior.empty:
+            # task #160 (2026-07-26 correctness audit) -- same real look-
+            # ahead leak and same fix as catcher_framing.py/weather.py/
+            # umpire_factor.py's identical cold-start pattern: the true
+            # first season previously fell back to ITS OWN full data.
+            out[season] = {}
+            continue
+        ref = prior
         capped = capped_all.loc[ref.index]
         overall = ref["outcome"].value_counts(normalize=True)
         factors = {}
@@ -57,7 +74,8 @@ def build_ttop_factors_by_season(pa: pd.DataFrame) -> dict[int, dict[int, dict[s
                 shrunk_rate = (
                     (counts.get(o, 0) + TTOP_FACTOR_PRIOR_PA * overall_rate) / (n_bucket + TTOP_FACTOR_PRIOR_PA)
                 )
-                cell[o] = shrunk_rate / overall_rate if overall_rate > 1e-9 else 1.0
+                factor = shrunk_rate / overall_rate if overall_rate > 1e-9 else 1.0
+                cell[o] = max(TTOP_FACTOR_CLIP_MIN, min(TTOP_FACTOR_CLIP_MAX, factor))
             factors[int(times_through)] = cell
         out[season] = factors
     return out

@@ -176,7 +176,18 @@ def build_weather_factors_by_season(pa_with_bucket: pd.DataFrame) -> dict[int, d
     out = {}
     for season in sorted(pa["season"].unique()):
         prior = pa[pa["season"] < season]
-        ref = prior if len(prior) else pa[pa["season"] == season]
+        if prior.empty:
+            # task #160 (2026-07-26 correctness audit) -- same real leak and
+            # same fix as catcher_framing.py/umpire_factor.py's identical
+            # cold-start pattern: the true first season previously fell back
+            # to ITS OWN full data instead of a neutral default. An empty
+            # dict here means the caller's own `.get(season, {}).get(bucket)`
+            # lookup (validate_game_simulator.py) correctly returns None
+            # (treated as "no weather adjustment"), matching how a missing
+            # park-factor season is already handled.
+            out[season] = {}
+            continue
+        ref = prior
         overall_counts_by_group = {group: g["outcome"].value_counts() for group, g in ref.groupby("group")}
         overall_n_by_group = {group: len(g) for group, g in ref.groupby("group")}
 

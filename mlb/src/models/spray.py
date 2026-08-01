@@ -110,23 +110,29 @@ def build_pull_rate_by_season(pa: pd.DataFrame) -> pd.DataFrame:
             priors = []
             for batter, g in season_agg.groupby("batter"):
                 g = g.set_index("season")
-                num, den = 0.0, 0.0
+                num, den, raw_bb = 0.0, 0.0, 0.0
                 for i, w in enumerate(MARCEL_WEIGHTS):
                     s = season - 1 - i
                     if s in g.index:
                         num += w * g.loc[s, "events"]
                         den += w * g.loc[s, "bb"]
+                        raw_bb += g.loc[s, "bb"]
                 if den == 0:
                     continue
-                priors.append({"batter": batter, "prior_bb": den, "prior_events": num})
-            priors_df = pd.DataFrame(priors, columns=["batter", "prior_bb", "prior_events"])
+                priors.append({"batter": batter, "prior_bb": den, "prior_events": num, "raw_prior_bb": raw_bb})
+            priors_df = pd.DataFrame(priors, columns=["batter", "prior_bb", "prior_events", "raw_prior_bb"])
             if not priors_df.empty:
-                priors_df["reliability"] = priors_df["prior_bb"] / (priors_df["prior_bb"] + K)
+                # RELIABILITY must use RAW (unweighted) prior_bb -- same
+                # units-mismatch bug true_talent.py's reliability formula
+                # was fixed for (task #53), copy-pasted into this function
+                # unfixed until now (task #160 correctness audit, 2026-07-26).
+                # The rate estimate itself keeps using the weighted sum.
+                priors_df["reliability"] = priors_df["raw_prior_bb"] / (priors_df["raw_prior_bb"] + K)
                 raw_rate = priors_df["prior_events"] / priors_df["prior_bb"]
                 priors_df["preseason_rate"] = (
                     priors_df["reliability"] * raw_rate + (1 - priors_df["reliability"]) * league_rate
                 )
-                priors_df["prior_weight_bb"] = np.minimum(priors_df["prior_bb"], K)
+                priors_df["prior_weight_bb"] = np.minimum(priors_df["raw_prior_bb"], K)
                 priors_df = priors_df[["batter", "preseason_rate", "prior_weight_bb"]]
             else:
                 priors_df = pd.DataFrame(columns=["batter", "preseason_rate", "prior_weight_bb"])
