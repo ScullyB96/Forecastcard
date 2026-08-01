@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Predictions{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/">Predictions</a>
+    <nav class="sport-nav">
+      <a href="/" class="{{ 'active' if active_sport is not defined else '' }}">All</a>
+      {% for s in sports %}
+      <a href="/{{ s }}" class="{{ 'active' if active_sport == s else '' }}">{{ s|upper }}</a>
+      {% endfor %}
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

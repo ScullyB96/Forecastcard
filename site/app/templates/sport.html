@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% import "_game_card.html" as cards %}
+{% block title %}{{ sport|upper }} Predictions{% endblock %}
+{% block content %}
+<h1>{{ sport|upper }}</h1>
+{% if slate_key %}
+  <p class="slate-meta">slate {{ slate_key }}</p>
+  <div class="game-grid">
+    {% for game in games %}
+      {{ cards.game_card(game, props_by_game_id, sport) }}
+    {% else %}
+      <p class="empty-state">No games in this slate.</p>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="empty-state">No runs yet for {{ sport|upper }}.</p>
+{% endif %}
+{% endblock %}

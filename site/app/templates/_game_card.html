@@ -1,0 +1,52 @@
+{% macro game_card(game, props_by_game_id, sport) %}
+<div class="game-card">
+  <div class="matchup">
+    {% if game.home_win_prob is not none and game.home_win_prob >= 0.5 %}
+      {{ game.away_team }} @ <span class="fav">{{ game.home_team }}</span>
+    {% elif game.away_win_prob is not none and game.away_win_prob > 0.5 %}
+      <span class="fav">{{ game.away_team }}</span> @ {{ game.home_team }}
+    {% else %}
+      {{ game.away_team }} @ {{ game.home_team }}
+    {% endif %}
+  </div>
+  {% if game.home_win_prob is not none %}
+  <div class="win-prob-bar"><span style="width: {{ (game.home_win_prob * 100)|round(1) }}%"></span></div>
+  <div class="score-row">
+    <span>{{ game.away_team }} win% {{ (game.away_win_prob * 100)|round(1) if game.away_win_prob is not none else '—' }}</span>
+    <span>{{ game.home_team }} win% {{ (game.home_win_prob * 100)|round(1) }}</span>
+  </div>
+  {% endif %}
+  {% if game.projected_home_score is not none %}
+  <div class="score-row">
+    <span>proj {{ game.away_team }} {{ '%.1f'|format(game.projected_away_score) }}</span>
+    <span>proj {{ game.home_team }} {{ '%.1f'|format(game.projected_home_score) }}</span>
+  </div>
+  {% endif %}
+  {% set props = props_by_game_id.get(game.game_id, []) %}
+  {% if props %}
+  <details class="props-toggle">
+    <summary>{{ props|length }} prop{{ 's' if props|length != 1 }}</summary>
+    <table class="props-table">
+      <thead><tr><th>Player</th><th>Market</th><th>Proj</th></tr></thead>
+      <tbody>
+        {% for p in props %}
+        <tr>
+          <td>{{ p.player_name }}{% if p.team %} ({{ p.team }}){% endif %}</td>
+          <td>{{ p.market }}</td>
+          <td>
+            {%- if p.proj_mean is not none -%}
+              {{ '%.2f'|format(p.proj_mean) }}
+            {%- elif p.over_prob is not none -%}
+              {{ (p.over_prob * 100)|round(1) }}%
+            {%- else -%}
+              —
+            {%- endif -%}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+</div>
+{% endmacro %}

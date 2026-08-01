@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% import "_game_card.html" as cards %}
+{% block title %}Predictions — All Sports{% endblock %}
+{% block content %}
+<h1>Today across all sports</h1>
+<p class="slate-meta">Showing the latest run for each sport — not necessarily the same calendar day.</p>
+
+{% for sport in sports %}
+<div class="sport-section">
+  <span class="sport-badge {{ sport }}">{{ sport|upper }}</span>
+  {% set slate_key = slate_keys.get(sport) %}
+  {% if slate_key %}
+    <div class="slate-meta">slate {{ slate_key }}</div>
+    <div class="game-grid">
+      {% for game in games_by_sport.get(sport, []) %}
+        {{ cards.game_card(game, props_by_sport.get(sport, {}), sport) }}
+      {% else %}
+        <p class="empty-state">No games in this slate.</p>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty-state">No runs yet for {{ sport|upper }}.</p>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}
