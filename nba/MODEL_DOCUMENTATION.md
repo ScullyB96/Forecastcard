@@ -180,6 +180,24 @@ points already used (`usage_allocation.allocate_team_total`, generalized from
 `allocate_team_points`). 36 regression tests (97 assertions) passing. See Sec23 for the full
 writeup.
 
+**Attempted fix for Phase 1's still-open margin/scoring-era-drift issue (Sec24, 2026-08-01):
+decisive dev-only negative result.** Confirmed the scoring rise (102.7 -> 115.6 pts/team-game,
+2015-16 -> 2025-26) is a continuous multi-year TREND visible throughout the entire dev range, not
+a sudden regime jump like steals' -- a genuinely better candidate for recency-weighting than the
+props subsystem's 3-strikes-and-out steals attempts. Built the same `league_avg_halflife_games`
+option for `shrinkage.py`'s TEAM-level primitives and swept 7 halflife values (100-10000 games).
+`total_mae` improves at longer halflives (confirms the scale-correction hypothesis), but
+`margin_mae` -- the actual metric with the real holdout regression -- shows a REAL REGRESSION at
+EVERY halflife tested, never crossing to noise or improvement even near-flat. Diagnosed why:
+recency-weighting the SHARED league-average blending target reduces mean-scale bias but adds
+per-team noise that a DIFFERENCE metric (margin) is more exposed to than a SUM metric (total).
+Stopped cleanly at the dev-only Stage 1 gate -- no holdout read spent, nothing reverted (the new
+option is harmless-by-default, kept as a tested-but-unused primitive). Phase 1's margin issue
+remains open, unchanged from Sec9.5 -- refined diagnosis: it's not simply "stale scoring level"
+(that would move margin and total together), so the real fix (if one exists) is a different
+mechanism entirely, e.g. team-quality-spread drift across eras. 37 regression tests (100
+assertions) passing.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -1721,3 +1739,73 @@ oreb/2pt/3pt/ft (the last three were never anchored, matchup-adjusted makes asid
 regression tests added (for/against symmetry in `build_team_stat_game_log`, the ratio-idiom combine
 formula, `ADOPTED_CATEGORIES` correctly excluding OREB, and `_team_stat_totals`'s fallback-to-empty
 behavior when a team is missing) -- 36 regression tests (97 assertions) passing.
+
+## 24. Attempted fix for Phase 1's still-open scoring-era-drift margin regression (2026-08-01) -- decisive dev-only negative result, caught before spending the holdout read
+
+Sec9.5 diagnosed but never fixed a real margin_mae dev/holdout regression: mean actual
+points/team-game rose ~13 points from 2015-16 (102.7) to 2025-26 (115.6), and critically -- re-
+confirmed directly here via `team_strength.build_team_game_log`'s own per-season means -- this
+rise is almost MONOTONIC THROUGHOUT THE ENTIRE DEV RANGE (102.7 -> 105.6 -> 106.3 -> 111.2 -> 111.8
+-> 112.1 -> 110.6 -> 114.7 -> 114.2 by 2023-24), not a sudden jump only at the dev/holdout boundary.
+This is structurally different from the props subsystem's steals investigation (Sec16-19, three
+attempts at the SAME family of fix, all failed on holdout, diagnosed as a genuine REGIME CHANGE
+with zero precedent in pre-2024 data) -- a continuously-visible, multi-year trend is exactly the
+kind of pattern recency-weighting is suited to extrapolate, unlike a level-shift with no
+within-dev precedent to learn from. Worth a genuinely new attempt, not the same bet retried.
+
+**Built**: added `league_avg_halflife_games` (default `None`, preserving the exact original
+flat-cumulative behavior byte-for-byte -- regression-tested) to `shrinkage.py`'s
+`add_walk_forward_rate`/`add_walk_forward_mean`, mirroring `player_rate_shrinkage.py`'s identical
+option exactly. Threaded through `team_strength.add_team_ratings`. New
+`validate_scoring_era_drift_fix.py`: fits BOTH the baseline (flat) and every candidate halflife on
+the FULL dev range (fitting on a short recent-only window would never let the flat baseline's
+staleness actually accumulate -- the whole thing being tested), then evaluates each fit on just the
+last 3 dev seasons (2021-2023, where staleness is worst) as a cheap Stage 1 screen before ever
+considering a full-dev-range Stage 2 or a holdout read.
+
+**Result: a clean, decisive negative finding for the target metric, across a wide sweep.** Swept
+halflife in {100, 300, 600, 1000, 2000, 5000, 10000} games (very responsive to nearly-flat) on the
+2021-2023 evaluation slice, all vs. the current flat-cumulative baseline:
+
+| halflife | total_mae delta | margin_mae delta | su delta |
+|---|---|---|---|
+| 100 | +0.089, NOISE | **+0.0078, REAL REGRESSION** | 0, NOISE |
+| 300 | -0.092, NOISE | **+0.0074, REAL REGRESSION** | 0, NOISE |
+| 600 | -0.135, NOISE | **+0.0066, REAL REGRESSION** | 0, NOISE |
+| 1000 | -0.148, REAL IMPROVEMENT | **+0.0057, REAL REGRESSION** | 0, NOISE |
+| 2000 | -0.159, REAL IMPROVEMENT | **+0.0039, REAL REGRESSION** | 0, NOISE |
+| 5000 | -0.116, REAL IMPROVEMENT | **+0.0018, REAL REGRESSION** | 0, NOISE |
+| 10000 | -0.070, REAL IMPROVEMENT | **+0.0009, REAL REGRESSION** | 0, NOISE |
+
+`total_mae` improves at longer halflives (as hypothesized -- a responsive league average correctly
+raises the model's expected SCALE to match the recent higher-scoring era). But `margin_mae` --
+the ACTUAL metric with the confirmed real holdout regression -- shows a REAL REGRESSION at EVERY
+halflife tested, monotonically shrinking toward (but never crossing into noise or improvement,
+even at halflife=10000, which is nearly indistinguishable from the flat-cumulative baseline
+itself) zero as halflife grows. No candidate cleared the Stage 1 bar (a real margin_mae
+IMPROVEMENT), so the script correctly stopped before ever running a full-dev-range Stage 2 or
+touching holdout -- the two-gate discipline did its job, catching a bad idea cheaply.
+
+**Why this happens (mechanistic, not just empirical)**: `add_walk_forward_rate`'s shrinkage formula
+blends EVERY team's own cumulative rating toward the SAME shared `league_avg` value. Making that
+shared target more responsive (EWMA) corrects the AVERAGE scale (helping `total_mae`, a sum) but
+also makes each INDIVIDUAL team's own rating estimate more sensitive to short-term noise in the
+blending target -- noise that two different teams (rated at different points in their own history,
+with different amounts of games-based shrinkage weight already accumulated) don't share and don't
+cancel out. `margin_mae` is a DIFFERENCE of two such noisy estimates, so it's the metric most
+exposed to this added per-team noise, while `total_mae` (a SUM) benefits from the corrected mean
+scale enough to outweigh it. **This refines Sec9.5's diagnosis**: the margin problem isn't simply
+"the model doesn't know today's league scores more" (that hypothesis would predict margin
+improving right along with total, which did NOT happen) -- it's something structurally different
+that a shared-blending-target recency fix can't reach.
+
+**Not adopted, nothing reverted** (the new `league_avg_halflife_games` option is harmless by
+default, kept as a tested-but-unused primitive -- same convention as `add_era_adjusted_player_rate`
+from Sec17). **Stopping this specific line of attack for margin_mae** -- a comprehensive 7-point
+sweep spanning very-responsive to near-flat, with a consistent, monotonic, never-crossing-zero
+pattern, is stronger evidence of a genuine dead end than a single failed attempt would be. Phase
+1's margin/scoring-era-drift issue remains open, documented, and monitored (unchanged from Sec9.5)
+-- a candidate for a DIFFERENT mechanism (e.g. team-quality-spread/variance drift across eras,
+rather than a scoring-level trend) in a future cycle, not this one. 2 new regression tests added
+(`league_avg_halflife_games=None` default-preserving check + EWMA responsiveness check, both at
+team level) -- 37 regression tests (100 assertions) passing.

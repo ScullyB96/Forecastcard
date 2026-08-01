@@ -931,6 +931,57 @@ def test_adopted_categories_excludes_oreb_holdout_failure():
           set(ADOPTED_CATEGORIES) == {"dreb", "ast", "tov", "stl", "blk"}, f"got {ADOPTED_CATEGORIES}")
 
 
+def test_team_level_adaptive_league_average_default_preserving_and_responsive():
+    """`shrinkage.add_walk_forward_rate`/`add_walk_forward_mean`'s new
+    `league_avg_halflife_games` option (2026-08-01, motivated by Sec9.5's
+    still-open scoring-era-drift finding: mean points/team-game rose ~13
+    points 2015-16 -> 2025-26, almost monotonically THROUGHOUT the dev
+    range, unlike the props subsystem's steals regime-change -- see
+    `_trailing_league_stat_ewma`'s docstring for why this is a genuinely
+    different empirical situation, not the same failed bet retried). Same
+    two checks as the player-level version (Sec16): (1) `None` reproduces
+    the exact original flat-cumulative column; (2) given a clear league-
+    wide shift, the EWMA-weighted average ends up closer to the new rate."""
+    from src.models.shrinkage import _trailing_league_stat, add_walk_forward_mean, add_walk_forward_rate
+
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "X", "opp": "Y", "pts": 100.0, "opp_pts": 100.0},
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "Y", "opp": "X", "pts": 100.0, "opp_pts": 100.0},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "team": "X", "opp": "Y", "pts": 100.0, "opp_pts": 100.0},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "team": "Y", "opp": "X", "pts": 100.0, "opp_pts": 100.0},
+        {"gameId": "g3", "gameDate": pd.Timestamp("2020-01-03"), "season": 2020, "team": "X", "opp": "Y", "pts": 130.0, "opp_pts": 130.0},
+        {"gameId": "g3", "gameDate": pd.Timestamp("2020-01-03"), "season": 2020, "team": "Y", "opp": "X", "pts": 130.0, "opp_pts": 130.0},
+        {"gameId": "g4", "gameDate": pd.Timestamp("2020-01-04"), "season": 2020, "team": "X", "opp": "Y", "pts": 130.0, "opp_pts": 130.0},
+        {"gameId": "g4", "gameDate": pd.Timestamp("2020-01-04"), "season": 2020, "team": "Y", "opp": "X", "pts": 130.0, "opp_pts": 130.0},
+        {"gameId": "g5", "gameDate": pd.Timestamp("2020-01-05"), "season": 2020, "team": "Z", "opp": "W", "pts": 0.0, "opp_pts": 0.0},
+        {"gameId": "g5", "gameDate": pd.Timestamp("2020-01-05"), "season": 2020, "team": "W", "opp": "Z", "pts": 0.0, "opp_pts": 0.0},
+    ])
+
+    default_out = add_walk_forward_rate(log.copy(), "pts", "opp_pts", prior_games=10.0, prefix="pts")
+    expected_flat = _trailing_league_stat(log.copy(), "pts")
+    check("league_avg_halflife_games=None reproduces the exact original flat-cumulative column",
+          (default_out["pts_league_avg"].reset_index(drop=True).fillna(-999)
+           == expected_flat.reset_index(drop=True).fillna(-999)).all())
+
+    adaptive_out = add_walk_forward_rate(log.copy(), "pts", "opp_pts", prior_games=10.0,
+                                          prefix="pts", league_avg_halflife_games=1.0)
+    g5_flat = default_out[default_out["gameId"] == "g5"].iloc[0]["pts_league_avg"]
+    g5_adaptive = adaptive_out[adaptive_out["gameId"] == "g5"].iloc[0]["pts_league_avg"]
+    true_recent_rate = 130.0
+    check("the EWMA-weighted league average is closer to the NEW (recent, high-scoring) rate than "
+          "the flat-cumulative one after a clear shift",
+          abs(g5_adaptive - true_recent_rate) < abs(g5_flat - true_recent_rate),
+          f"flat={g5_flat}, adaptive={g5_adaptive}, true_recent={true_recent_rate}")
+
+    # Same two checks for add_walk_forward_mean (used for PACE, a single-value not a for/against pair).
+    mean_log = log.rename(columns={"pts": "pace"}).drop(columns=["opp_pts"])
+    default_mean = add_walk_forward_mean(mean_log.copy(), "pace", prior_games=10.0, prefix="pace")
+    expected_mean_flat = _trailing_league_stat(mean_log.copy(), "pace")
+    check("add_walk_forward_mean: league_avg_halflife_games=None reproduces the exact original column",
+          (default_mean["pace_league_avg"].reset_index(drop=True).fillna(-999)
+           == expected_mean_flat.reset_index(drop=True).fillna(-999)).all())
+
+
 def test_team_stat_totals_falls_back_to_empty_when_team_missing():
     """`generate_props._team_stat_totals` is the live wiring's per-game
     combine step -- must return real per-category (home, away) totals when
@@ -997,6 +1048,7 @@ if __name__ == "__main__":
     test_project_team_stat_matches_ratio_idiom_formula()
     test_adopted_categories_excludes_oreb_holdout_failure()
     test_team_stat_totals_falls_back_to_empty_when_team_missing()
+    test_team_level_adaptive_league_average_default_preserving_and_responsive()
 
     print()
     if FAILURES:

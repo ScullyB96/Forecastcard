@@ -64,11 +64,22 @@ def build_team_game_log(start_year: int, end_year: int) -> pd.DataFrame:
     return log.sort_values(["gameDate", "gameId", "is_home"], ascending=[True, True, False]).reset_index(drop=True)
 
 
-def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = 0.0) -> pd.DataFrame:
+def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = 0.0,
+                      league_avg_halflife_games: float | None = None) -> pd.DataFrame:
     """Adds walk-forward shrunk pace_shrunk_mean, rtg_attack_rate (OFF),
-    rtg_defense_rate (DEF), and their league-average companions."""
-    log = add_walk_forward_mean(log, "pace", PRIOR_GAMES_PACE, prefix="pace", cross_season_weight=cross_season_weight)
-    log = add_walk_forward_rate(log, "offRtg", "defRtg", PRIOR_GAMES_RATING, prefix="rtg", cross_season_weight=cross_season_weight)
+    rtg_defense_rate (DEF), and their league-average companions.
+
+    `league_avg_halflife_games` (default None, i.e. the original flat
+    infinite-memory league average): passed straight through to
+    `shrinkage.py`'s primitives -- see their docstrings for the
+    scoring-era-drift motivation (Sec9.5/Sec24). None preserves the
+    exact original, already-validated Phase 1 behavior."""
+    log = add_walk_forward_mean(log, "pace", PRIOR_GAMES_PACE, prefix="pace",
+                                 cross_season_weight=cross_season_weight,
+                                 league_avg_halflife_games=league_avg_halflife_games)
+    log = add_walk_forward_rate(log, "offRtg", "defRtg", PRIOR_GAMES_RATING, prefix="rtg",
+                                 cross_season_weight=cross_season_weight,
+                                 league_avg_halflife_games=league_avg_halflife_games)
     return log
 
 

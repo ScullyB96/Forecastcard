@@ -35,13 +35,56 @@ def _trailing_league_stat(log: pd.DataFrame, value_col: str) -> pd.Series:
     return log.merge(per_game[["gameId", "_trailing"]], on="gameId", how="left")["_trailing"]
 
 
+def _trailing_league_stat_ewma(log: pd.DataFrame, value_col: str, halflife_games: float) -> pd.Series:
+    """The recency-weighted analog of `_trailing_league_stat`: an EWMA
+    (half-life in GAMES, not calendar time) over the same per-gameId-
+    collapsed, `shift(1)`-guarded series, instead of an infinite-memory
+    flat cumulative mean. Same same-game leak guard, same interface.
+
+    MOTIVATION (2026-08-01, Sec9.5's still-open scoring-era-drift finding):
+    mean actual points/team-game rose ~13 points from 2015-16 (102.7) to
+    2025-26 (115.6), ALMOST MONOTONICALLY THROUGHOUT THE ENTIRE DEV RANGE
+    (102.7 -> 105.6 -> 106.3 -> 111.2 -> ... -> 114.2 by 2023-24, not a
+    sudden jump only at the dev/holdout boundary) -- confirmed directly
+    from `team_strength.build_team_game_log`'s own per-season means. This
+    is a structurally DIFFERENT situation from the props subsystem's
+    steals investigation (Sec16-19), where the SAME family of fix
+    (recency-weighted league average, then a full detrend-then-retrend)
+    was tried THREE times and failed on real holdout every time -- but
+    steals' problem was diagnosed as a genuine REGIME CHANGE with NO
+    precedent anywhere in the pre-2024 dev data (the shift only appeared
+    at the exact dev/holdout boundary), which by definition no
+    within-dev-range technique could have learned to extrapolate. Scoring
+    inflation is the opposite case: the trend is continuously present and
+    visible THROUGHOUT the dev range itself, so a technique that tracks it
+    within dev has real signal to learn from, not just noise to overfit --
+    a genuinely different empirical situation, not the same bet retried a
+    fourth time. Still not assumed to work -- tested via the exact same
+    dev-only-first, holdout-only-once discipline as everything else."""
+    per_game = log.groupby("gameId", as_index=False).agg(gameDate=("gameDate", "first"), _val=(value_col, "mean"))
+    per_game = per_game.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
+    per_game["_trailing_ewma"] = per_game["_val"].shift(1).ewm(halflife=halflife_games, min_periods=1).mean()
+    return log.merge(per_game[["gameId", "_trailing_ewma"]], on="gameId", how="left")["_trailing_ewma"]
+
+
 def add_walk_forward_rate(log: pd.DataFrame, for_col: str, against_col: str,
                            prior_games: float, prefix: str,
-                           cross_season_weight: float = 0.0) -> pd.DataFrame:
+                           cross_season_weight: float = 0.0,
+                           league_avg_halflife_games: float | None = None) -> pd.DataFrame:
     """log must have columns: gameId, gameDate, season, team, <for_col>,
     <against_col>, one row per team per game. Adds f"{prefix}_league_avg",
     f"{prefix}_attack_rate", f"{prefix}_defense_rate", and
     "games_played_before" (shared across prefixes).
+
+    `league_avg_halflife_games` (default None, i.e. the original flat
+    infinite-memory cumulative average): when set, uses
+    `_trailing_league_stat_ewma` instead of `_trailing_league_stat` for the
+    league-average blending TARGET, so it tracks a genuine multi-year trend
+    (see that function's docstring -- Sec9.5's scoring-era-drift finding)
+    instead of averaging it away across the full dev history. Mirrors
+    `player_rate_shrinkage.py`'s identical optional param exactly, same
+    default-preserving discipline: None reproduces the original column
+    byte-for-byte (regression-tested).
 
     `cross_season_weight` (default 0.0, i.e. a full within-season reset,
     matching the NHL sibling's own default): at 0, a team's rating shrinks
@@ -61,7 +104,8 @@ def add_walk_forward_rate(log: pd.DataFrame, for_col: str, against_col: str,
     log = log.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
 
     league_avg_col = f"{prefix}_league_avg"
-    log[league_avg_col] = _trailing_league_stat(log, for_col)
+    log[league_avg_col] = (_trailing_league_stat(log, for_col) if league_avg_halflife_games is None
+                            else _trailing_league_stat_ewma(log, for_col, league_avg_halflife_games))
 
     grp_team_season = log.groupby(["team", "season"])
     games_before = grp_team_season.cumcount()
@@ -92,16 +136,20 @@ def add_walk_forward_rate(log: pd.DataFrame, for_col: str, against_col: str,
 
 
 def add_walk_forward_mean(log: pd.DataFrame, value_col: str, prior_games: float, prefix: str,
-                           cross_season_weight: float = 0.0) -> pd.DataFrame:
+                           cross_season_weight: float = 0.0,
+                           league_avg_halflife_games: float | None = None) -> pd.DataFrame:
     """Games-based shrinkage of a SINGLE per-game value (not a for/against
     pair) toward its trailing league average -- used for PACE, which isn't a
     for/against pair (both teams in a game share one realized pace). Resets
     per season by default (`cross_season_weight=0.0`); see
-    `add_walk_forward_rate`'s docstring for the blend semantics when nonzero."""
+    `add_walk_forward_rate`'s docstring for the blend semantics when nonzero,
+    and for `league_avg_halflife_games`'s semantics (default None preserves
+    the original flat cumulative average exactly)."""
     log = log.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
 
     league_avg_col = f"{prefix}_league_avg"
-    log[league_avg_col] = _trailing_league_stat(log, value_col)
+    log[league_avg_col] = (_trailing_league_stat(log, value_col) if league_avg_halflife_games is None
+                            else _trailing_league_stat_ewma(log, value_col, league_avg_halflife_games))
 
     grp_team_season = log.groupby(["team", "season"])
     games_before = grp_team_season.cumcount()
