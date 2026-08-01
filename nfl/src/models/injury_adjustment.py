@@ -197,16 +197,39 @@ JOINT_COEFS = {
 # A permutation test (shuffle each team's real CB-out flags across its own played
 # weeks within season, preserving its real annual flag count, re-run the full
 # fit-and-score procedure 1000x) put the real ATS% at the ~97.5th percentile of the
-# resulting null -- real signal, not purely a forking-paths artifact of the wide
-# coefficient search, but not overwhelming either given how wide that search was
-# (top-2/3/4/5 corners x 3 injury-report designations x several position candidates
-# x 3 residual bases x the symmetry constraint). Notably, the WALK-FORWARD ATS%
-# (61.8%) came back almost identical to the flawed resubstitution number (62.4%) --
-# ATS is a sign-of-disagreement metric, much less sensitive to the coefficient's
-# exact magnitude than MAE is, so the resubstitution bias barely moved the ATS
-# read even though it did inflate the point-estimate coefficient. Shrinking here
-# protects the point-estimate margin prediction specifically, not because the ATS
-# evidence collapsed.
+# single-configuration null -- real signal, not purely a forking-paths artifact of
+# the wide coefficient search, but not overwhelming either given how wide that
+# search was (top-2/3/4/5 corners x 3 injury-report designations x several position
+# candidates x 3 residual bases x the symmetry constraint). CORRECTED (review round
+# 4, #1): that single-config null only prices in "fit and scored on the same
+# games," not the specification search itself -- extending the permutation to
+# re-run the actual corner-count x designation grid search per shuffle puts the
+# real number at only the ~95th percentile of the corrected null, right at the
+# edge of conventional significance, not comfortably in the tail. Also (round 4,
+# #1): the WALK-FORWARD ATS% (61.8%) came back almost identical to the flawed
+# resubstitution number (62.4%) NOT because the in-sample fit was vindicated, but
+# because ATS is a sign-of-disagreement metric and every fold coefficient has the
+# same sign -- the two numbers are nearly the same statistic, not independent
+# corroboration. See MODEL_DOCUMENTATION.md §6.1.1 for the full, current writeup;
+# held provisionally, not proven as strongly as round 3 first reported. Shrinking
+# here still protects the point-estimate margin prediction specifically (every
+# honest fold estimate sits below 2.977), independent of how the ATS question
+# above resolves.
+#
+# WHY THIS IS A FROZEN CONSTANT, NOT AUTO-REFIT EVERY RUN (unlike LEAGUE_AVG_PLAYS,
+# the EB-fitted prior_weights, or the TD-probability calibrator, all of which
+# `weekly_update.py` recomputes fresh from current data every pipeline run): those
+# are single, cheap, mechanical recalculations (a mean, a closed-form MoM estimate,
+# a 2-parameter OLS fit) with no real judgment call involved. This coefficient is
+# the opposite -- it took 4 review rounds of real scrutiny (resubstitution bias,
+# a wide specification search, a permutation test, a lookahead audit) to arrive at
+# the current value, and silently auto-refitting it every week would re-run that
+# entire judgment-laden process with zero human review of the result. Deliberately
+# left as a frozen production value, updated only through a reviewed refit
+# (matching how `JOINT_COEFS`/`SWAP_B_LAYER1` are already treated) -- if a future
+# session revisits this, that should be an explicit, documented refit (e.g. once
+# a season, with the same validate_adjustment_layer.py scrutiny), not an automatic
+# recompute inside the live pipeline.
 JOINT_COEFS_FORWARD = {
     "intercept": -0.018,
     "away_skill_flag": 0.0,

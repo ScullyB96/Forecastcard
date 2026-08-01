@@ -92,6 +92,15 @@ def _statline_rows(team_props: pd.DataFrame) -> str:
     return "\n".join(rows)
 
 
+def _moneyline_badge(moneyline) -> str:
+    """Renders a game simulator moneyline (§9.5) as a small badge -- '' if unavailable (no
+    market line published yet for this game, same fallback case margin/total already handle)."""
+    if moneyline is None or (isinstance(moneyline, float) and pd.isna(moneyline)):
+        return ""
+    moneyline = int(moneyline)
+    return f'<span class="moneyline">{"+" if moneyline > 0 else ""}{moneyline}</span>'
+
+
 def build_page(season: int, week: int, games: pd.DataFrame, props: pd.DataFrame | None = None) -> str:
     cards = []
     for g in games.itertuples():
@@ -114,18 +123,41 @@ def build_page(season: int, week: int, games: pd.DataFrame, props: pd.DataFrame 
             {home_stats}
           </details>"""
 
+        # Monte Carlo game simulator's moneyline/win-probability (§9.5) -- computed and
+        # validated since round 2, never actually surfaced on this page until now. Recentered
+        # on our_margin/our_total as of round 4, so it's consistent with the displayed score.
+        away_ml = _moneyline_badge(getattr(g, "sim_away_moneyline", None))
+        home_ml = _moneyline_badge(getattr(g, "sim_home_moneyline", None))
+        win_prob = getattr(g, "sim_home_win_prob", None)
+        confidence_note = ""
+        if win_prob is not None and not (isinstance(win_prob, float) and pd.isna(win_prob)):
+            fav = home if win_prob >= 0.5 else away
+            fav_prob = win_prob if win_prob >= 0.5 else 1 - win_prob
+            margin_std = getattr(g, "sim_margin_std", None)
+            total_std = getattr(g, "sim_total_std", None)
+            spread_bits = f"&plusmn;{margin_std:.0f} margin" if margin_std is not None and not pd.isna(margin_std) else ""
+            total_bits = f"&plusmn;{total_std:.0f} total" if total_std is not None and not pd.isna(total_std) else ""
+            range_bits = " / ".join(b for b in (spread_bits, total_bits) if b)
+            confidence_note = (
+                f'<div class="confidence">{fav} {fav_prob:.0%} to win'
+                + (f" &middot; {range_bits}" if range_bits else "")
+                + "</div>"
+            )
+
         cards.append(f"""
         <div class="card">
           <div class="row {'winner' if not home_win else ''}">
             <span class="swatch" style="background:{away_name[1]}"></span>
             <span class="team">{away}<small>{away_name[0]}</small></span>
+            {away_ml}
             <span class="score">{g.our_away_pts:.0f}</span>
           </div>
           <div class="row {'winner' if home_win else ''}">
             <span class="swatch" style="background:{home_name[1]}"></span>
             <span class="team">{home}<small>{home_name[0]}</small></span>
+            {home_ml}
             <span class="score">{g.our_home_pts:.0f}</span>
-          </div>{stats_block}
+          </div>{confidence_note}{stats_block}
         </div>""")
 
     return f"""<title>Week {week} &middot; {season} Predictions</title>
@@ -191,7 +223,7 @@ h1 {{
 }}
 .row {{
   display: grid;
-  grid-template-columns: 10px 1fr auto;
+  grid-template-columns: 10px 1fr auto auto;
   align-items: center;
   gap: 0.7rem;
   padding: 0.4rem 0;
@@ -226,6 +258,23 @@ h1 {{
   text-align: right;
 }}
 .row.winner .score {{ color: var(--accent); }}
+.moneyline {{
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  white-space: nowrap;
+}}
+.confidence {{
+  font-size: 0.75rem;
+  color: var(--muted);
+  padding: 0.3rem 0 0.1rem;
+  border-top: 1px dashed var(--border);
+  margin-top: 0.15rem;
+}}
 .statlines {{
   margin-top: 0.6rem;
   padding-top: 0.6rem;

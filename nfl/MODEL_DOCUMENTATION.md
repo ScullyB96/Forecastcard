@@ -1616,6 +1616,18 @@ URL every time — the scheduled-task prompt explicitly instructs WebFetching th
 version before republishing, since a fresh session hasn't "seen" it and the publish would
 otherwise be rejected).
 
+**Real gap found and fixed (2026-07, no review prompted this — a direct audit of what's
+actually shipped vs. what's just sitting in a parquet file):** the game simulator's
+moneyline, win probability, and margin/total distribution (§9.5 — built round 2, recentered
+and total shipped round 4) were computed and validated for two full review rounds but never
+actually rendered on this page. Added: a moneyline badge next to each team (`sim_home_
+moneyline`/`sim_away_moneyline`), and a confidence line under the score
+("SEA 62% to win · ±14 margin / ±13 total", from `sim_home_win_prob`/`sim_margin_std`/
+`sim_total_std`) — all gracefully blank when a market line isn't published yet for a game,
+same fallback convention as margin/total themselves. Verified visually in-browser against the
+real live Week 1 2026 page: badges and confidence text render cleanly at both 2- and 3-digit
+odds, no layout breakage.
+
 ### 11.4 `data/manual_overrides/known_outs_2026.json`
 The stopgap for verified breaking news the automated roster-status data hasn't caught up to
 yet (§6.2). Format: `{team, player_name, reason, expected_return, verified_date, source}`.
@@ -2057,8 +2069,22 @@ per this project's standing rule on acquiring new external data.
   literature on prop-market efficiency specifically; the one well-evidenced, narrow edge
   mechanism (secondary/backup props going stale after injury news, since pricing models
   react to the starter's line but lag on role changes) is exactly what §6.2's injury-
-  reallocation system already targets structurally. Getting real player-prop odds would
-  require a new paid data source — a genuine, separate decision, not yet made.
+  reallocation system already targets structurally. Getting real player-prop odds requires a
+  new paid data source — a genuine, separate decision. **Priced and scoped 2026-07**: The
+  Odds API (the-odds-api.com) has a confirmed `player_rush_yds` market; its cheapest tier
+  with player props is the $99/mo "Business" plan (200k requests/mo, NFL props during
+  season) — real, current pricing, checked directly against their docs, not assumed. Player
+  props require their per-event odds endpoint, not the bulk sport-level one. **The
+  experiment's code is now built and tested end-to-end against mock data matching this
+  real, documented response shape** (`src/ingest/fetch_prop_odds.py`,
+  `src/models/prop_odds_experiment.py`) — identify a team with a real lead-RB-out
+  (`identify_lead_rb_outs`, gated on the engine's own pre-injury carry share ≥15%), pull that
+  team's reallocated backup projections straight from the live pipeline's own props output,
+  match to the posted line by normalized name, snapshot (append-not-overwrite, same
+  discipline as the CLV log, §11.2.1), and reconcile against real outcomes later. Confirmed
+  working end-to-end on a synthetic scenario (Cleveland's real 2026 depth chart, one real RB
+  marked Out, mock posted odds) before any subscription exists. **Still gated on the actual
+  $99/mo purchase decision** — that's the only remaining step, not more engineering.
 - **QB completion-rate wind adjustment**: real, correctly-signed raw correlation, doesn't
   clear significance at current sample size (p=0.34, n=1282) — plausible with more data,
   not shipped on a hunch (§8).
@@ -2104,7 +2130,9 @@ download):**
    single result) rather than a large commitment. Round 3's props-simulator tail-calibration
    work (§9.6) found the bootstrap-vs-naive probability gap is comparably sized to a realistic
    vig hold — real reason to think this experiment could resolve something, not just a
-   nice-to-have.
+   nice-to-have. **All the engineering for this is done** (§13.3) — pricing confirmed ($99/mo,
+   The Odds API), the full identify→match→snapshot→reconcile pipeline built and tested
+   end-to-end against mock data. The only remaining step is the actual subscription decision.
 
 **Open questions from this project's own work, not yet resolved:**
 1. **The CB adjustment's edge is held provisionally** (§6.1.1) — real-looking (permutation test

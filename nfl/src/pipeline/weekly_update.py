@@ -68,6 +68,9 @@ CALIBRATION_SEASONS = {2022, 2023, 2024, 2025}  # most recent, non-COVID-anomalo
 # with different meanings is exactly the bug class np.polyfit's arg-order bit this project
 # three times, so the two are named for their basis rather than left as bare "SWAP_B" in
 # both files. Do NOT sync the two values; each is correct for its own file's residual basis.
+# Frozen, not auto-refit every run -- same reasoning as JOINT_COEFS_FORWARD's own comment in
+# injury_adjustment.py: this took real, multi-round scrutiny to arrive at, and a silent
+# weekly auto-recompute would re-run that judgment-laden process with no human review.
 SWAP_B_MARKET = 2.970
 
 # TD-probability calibration: TD_PROB_CALIB_A/B is now AUTO-REFIT LINEAR every pipeline run
