@@ -4,8 +4,14 @@ source of truth -- props and game predictions can never silently disagree
 on a team's total), resolves tonight's active roster via the SHARED
 `active_roster.py` helpers, projects each active player's full stat line
 from every rate-category model built this session, composes points via
-`usage_allocation.py`'s macro-anchor + micro-reallocation rule, and writes
-one row per (game, player, stat).
+`usage_allocation.py`'s macro-anchor + micro-reallocation rule, attaches a
+full predictive distribution per `prop_distribution.py` (Task #26 -- see
+that module's `CATEGORY_FAMILY` docstring: every category is Poisson or
+Negative-Binomial, refit fresh from historical data every call), and
+writes one row per (game, player, stat) with `proj_mean`/`proj_var`/
+`family`/`family_param` -- enough for any downstream caller to compute
+`prop_distribution.over_under_prob(line, proj_mean, family,
+json.loads(family_param))` for an arbitrary betting line.
 
 Run as `python -m src.pipeline.generate_props [YYYY-MM-DD]` (defaults to
 today).
@@ -42,6 +48,7 @@ today).
   a share-reallocation the way points' adjustment is.
 """
 
+import json
 import sys
 from datetime import date
 
@@ -76,6 +83,7 @@ from src.models.player_playmaking_rates import add_playmaking_rates
 from src.models.player_rate_shrinkage import add_walk_forward_player_rate
 from src.models.player_rebounding_rates import add_rebounding_rates
 from src.models.player_scoring_rates import add_scoring_rates
+from src.models.prop_distribution import CATEGORY_FAMILY, fit_continuous_family, fit_count_family
 from src.models.team_stat_rates import ADOPTED_CATEGORIES, add_team_stat_ratings, build_team_stat_game_log, project_team_stat
 from src.models.team_strength import add_team_ratings, build_team_game_log
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta, raw_projected_points
@@ -347,6 +355,89 @@ def _build_rate_logs(current_season: int, game_date: str) -> tuple:
     return scoring_log, rebounding_log, playmaking_log, defensive_log
 
 
+# name -> (actual_col, proj_col) on the log that category naturally lives on. "points" is
+# special-cased in _fit_prop_distributions (proj = sum of the 3 scoring sub-categories, not a
+# single rate model's own column).
+_CATEGORY_ACTUAL_PROJ_COLS = {
+    "points": ("points", None),
+    "2pt_made": ("fgMade2", "2pt_proj_made"), "3pt_made": ("fg3Made", "3pt_proj_made"),
+    "ft_made": ("ftMade", "ft_proj_made"),
+    "oreb": ("oreb", "oreb_proj"), "dreb": ("dreb", "dreb_proj"),
+    "ast": ("assists", "ast_proj"), "tov": ("turnovers", "tov_proj"),
+    "stl": ("steals", "stl_proj"), "blk": ("blocks", "blk_proj"),
+}
+
+
+def _fit_prop_distributions(scoring_log: pd.DataFrame, rebounding_log: pd.DataFrame,
+                             playmaking_log: pd.DataFrame, defensive_log: pd.DataFrame) -> dict:
+    """Refits each category's own family parameters fresh from historical
+    residuals every call (mirrors `generate_predictions.run`'s identical
+    live-refit-over-caching tradeoff for `score_distribution.py` --
+    correctness over efficiency, caching deferred). Driven entirely by
+    `prop_distribution.CATEGORY_FAMILY` so a category's fitting logic
+    automatically follows its own validated config, not a hardcoded
+    per-category branch here:
+    - "count" (all 10 categories currently, see CATEGORY_FAMILY's
+      docstring -- points/2PT/3PT/FT-made included, NOT the plan's
+      original continuous assumption): refits via `fit_count_family`;
+      Poisson needs nothing further, NegBin needs the fitted dispersion
+      `r`. `fitted[name]` is `{}` for Poisson (present so the category is
+      known-fitted, distinguishing it from "no data available yet").
+    - "continuous" (none currently adopted, kept generic in case a future
+      category needs it): refits a variance-vs-exposure model + Student-t df.
+    Every log passed in is already `_before`-filtered by the caller, so
+    this never sees game_date's own (or later) games."""
+    logs_by_name = {
+        "points": scoring_log, "2pt_made": scoring_log, "3pt_made": scoring_log, "ft_made": scoring_log,
+        "oreb": rebounding_log, "dreb": rebounding_log, "ast": playmaking_log, "tov": playmaking_log,
+        "stl": defensive_log, "blk": defensive_log,
+    }
+    points_proj = (2 * scoring_log["2pt_proj_made"] + 3 * scoring_log["3pt_proj_made"] + scoring_log["ft_proj_made"])
+
+    fitted = {}
+    for name, (actual_col, proj_col) in _CATEGORY_ACTUAL_PROJ_COLS.items():
+        spec = CATEGORY_FAMILY[name]
+        log = logs_by_name[name]
+        proj = points_proj if name == "points" else log[proj_col]
+        rows = pd.DataFrame({"_actual": log[actual_col], "_proj": proj})
+        if spec["family_type"] == "continuous":
+            rows["_exposure"] = log[spec["exposure_col"]]
+        rows = rows.dropna()
+        if rows.empty:
+            continue
+
+        if spec["family_type"] == "count":
+            count_fit = fit_count_family(rows["_actual"].to_numpy(), rows["_proj"].to_numpy())
+            fitted[name] = {"r": count_fit["r"]} if count_fit["family"] == "negbin" else {}
+        else:
+            resid = (rows["_actual"] - rows["_proj"]).to_numpy()
+            fitted[name] = fit_continuous_family(resid, rows["_exposure"].to_numpy())
+    return fitted
+
+
+def _distribution_fields(stat_name: str, mean: float, distribution_fits: dict) -> tuple[float | None, str, dict]:
+    """(proj_var, family, family_param) for one output row. `proj_var` is
+    the IMPLIED variance under the fitted family (mean+mean^2/r for
+    NegBin, mean itself for Poisson, informational only -- neither
+    `over_under_prob` nor `log_score` needs it passed back in for a count
+    family, they derive it from mean/r themselves) -- NaN only if this
+    category has no fit yet (e.g. no historical data at all for a
+    brand-new call-up situation, extremely unlikely at the category
+    level but handled honestly rather than assumed impossible)."""
+    spec = CATEGORY_FAMILY[stat_name]
+    if stat_name not in distribution_fits:
+        return None, spec["family"], {}
+    fit = distribution_fits[stat_name]
+    if spec["family"] == "poisson":
+        return mean, "poisson", {}
+    if spec["family"] == "negbin":
+        r = fit["r"]
+        return mean + mean ** 2 / r, "negbin", {"r": r}
+    # continuous (kept generic for a future category) -- needs its own projected exposure, which
+    # this generic per-row call site doesn't have; not reachable for any currently-adopted category.
+    return None, spec["family"], {}
+
+
 def run(game_date: str) -> pd.DataFrame:
     game_preds = generate_game_predictions(game_date)
     if game_preds.empty:
@@ -378,6 +469,7 @@ def run(game_date: str) -> pd.DataFrame:
     team_history, team_side = build_team_history(team_log[team_log["season"] == current_season])
 
     scoring_log, rebounding_log, playmaking_log, defensive_log = _build_rate_logs(current_season, game_date)
+    distribution_fits = _fit_prop_distributions(scoring_log, rebounding_log, playmaking_log, defensive_log)
     matchup_ctx = _build_matchup_context(current_season, game_date)
     if matchup_ctx is None:
         print(f"  NOTE: season {current_season} predates matchup data (starts {MATCHUP_DATA_START_SEASON}) "
@@ -483,9 +575,11 @@ def run(game_date: str) -> pd.DataFrame:
                 for stat_name, mean in stat_values.items():
                     if mean is None or (isinstance(mean, float) and np.isnan(mean)):
                         continue
+                    proj_var, family, family_param = _distribution_fields(stat_name, float(mean), distribution_fits)
                     all_rows.append({
                         "gameId": row.gameId, "playerId": pid, "team": team_abbrev, "opponent": opp_abbrev,
                         "stat_name": stat_name, "proj_mean": float(mean),
+                        "proj_var": proj_var, "family": family, "family_param": json.dumps(family_param),
                         "minutes_tier_tag": tag,
                         "anchored_to_team_total": stat_name == "points" or anchored_flags.get(stat_name, False),
                         # matchup difficulty reshapes points (position-group-aware) and ast/tov

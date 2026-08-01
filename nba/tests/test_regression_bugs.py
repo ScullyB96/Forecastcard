@@ -28,7 +28,7 @@ from src.models.matchup_difficulty import (
 from src.models.player_defensive_event_rates import add_defensive_event_rates
 from src.models.player_playmaking_rates import PRIOR_TOUCHES_AST, PRIOR_TOUCHES_TOV
 from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FTA, add_scoring_rates
-from src.models.prop_distribution import log_score, over_under_prob
+from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_family, log_score, over_under_prob, predict_variance
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
@@ -591,6 +591,46 @@ def test_negbin_parameterization_matches_target_mean_and_variance():
           abs(dist.var() - expected_var) < 1e-9, f"got {dist.var()}, expected {expected_var}")
 
 
+def test_prop_distribution_variance_floor_is_player_scale_not_team_scale():
+    """REAL BUG (2026-08-01, found by inspecting real live `generate_props.py`
+    output): `prop_distribution.py` originally imported and called
+    `score_distribution.predict_variance` directly, which floors variance
+    at `score_distribution.MIN_VARIANCE=4.0` -- a constant sized for
+    TEAM-SCORE variance (a ~100-point game). Applied to PLAYER-level
+    stats (raw fitted variance routinely well under 1 for low-exposure
+    players), this silently clamped nearly every low-exposure player's
+    variance up to exactly 4.0 regardless of their own real uncertainty --
+    confirmed directly on real 2025-01-15 output (2PT-makes variance stuck
+    at 4.0 for players with proj_mean of 0.2, 0.6, 2.5). Worse: this same
+    inflated `predict_variance` call is used INSIDE `fit_continuous_family`
+    to standardize residuals before fitting Student-t df, so the original
+    family-choice validation itself (Sec11's points check, and this bug's
+    own earlier all-9-category run) was distorted, not just the live
+    output -- re-run after the fix flipped points/2PT/3PT/FT from
+    "Normal adopted" to a decisive Student-t (e.g. points log-score:
+    normal=76.22 vs t=3.53). Fixed with a player-scale `MIN_PLAYER_VARIANCE`
+    floor. This test locks in that a near-zero raw-variance fit floors at
+    `MIN_PLAYER_VARIANCE`, NOT anywhere near `score_distribution.MIN_VARIANCE`."""
+    from src.models.score_distribution import MIN_VARIANCE as TEAM_MIN_VARIANCE
+
+    # A degenerate fit (residuals always exactly 0) -> raw predicted variance is 0 at any exposure.
+    variance_model = {"intercept": 0.0, "slope": 0.0}
+    predicted = predict_variance(variance_model, np.array([1.0, 5.0, 50.0]))
+    check("predict_variance floors at the player-scale constant",
+          np.allclose(predicted, MIN_PLAYER_VARIANCE), f"got {predicted}")
+    check("the player-scale floor is far smaller than score_distribution's team-scale floor",
+          MIN_PLAYER_VARIANCE < TEAM_MIN_VARIANCE / 100, f"got {MIN_PLAYER_VARIANCE} vs {TEAM_MIN_VARIANCE}")
+
+    # A realistic low-exposure fit (small but nonzero variance) must NOT be forced up to 4.0.
+    rng = np.random.default_rng(0)
+    exposure = rng.uniform(1, 10, size=2000)
+    residuals = rng.normal(0, 0.3, size=2000) * np.sqrt(exposure)  # genuinely small player-scale variance
+    fitted = fit_continuous_family(residuals, exposure)
+    low_exposure_variance = predict_variance(fitted["variance_model"], np.array([1.0]))[0]
+    check("a realistic low-exposure player-level fit is NOT clamped to the team-score floor",
+          low_exposure_variance < 1.0, f"got {low_exposure_variance}")
+
+
 def test_usage_shares_sum_to_team_total_not_double_counted():
     """`usage_allocation.py`'s macro-anchor + micro-reallocation rule: the
     team total must be distributed EXACTLY once. This test confirms
@@ -1049,6 +1089,7 @@ if __name__ == "__main__":
     test_adopted_categories_excludes_oreb_holdout_failure()
     test_team_stat_totals_falls_back_to_empty_when_team_missing()
     test_team_level_adaptive_league_average_default_preserving_and_responsive()
+    test_prop_distribution_variance_floor_is_player_scale_not_team_scale()
 
     print()
     if FAILURES:

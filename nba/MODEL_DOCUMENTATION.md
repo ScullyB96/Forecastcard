@@ -198,6 +198,23 @@ remains open, unchanged from Sec9.5 -- refined diagnosis: it's not simply "stale
 mechanism entirely, e.g. team-quality-spread drift across eras. 37 regression tests (100
 assertions) passing.
 
+**prop_distribution.py finally wired into the live pipeline, with two real findings along the way
+(Sec25, 2026-08-01).** Discovered the module (built/dev-validated in Sec11) had NEVER actually been
+imported by `generate_props.py` -- the live pipeline shipped bare point projections only, no
+variance/probability, for its entire existence. Found and fixed a real bug while wiring it up: the
+continuous-family code reused `score_distribution`'s team-score-sized variance floor
+(`MIN_VARIANCE=4.0`), silently inflating every low-exposure player's assumed uncertainty (and
+distorting Sec11's own original family-choice validation, not just live output). Fixing that floor
+and adding a genuine calibration check (PIT vs nominal quantiles -- never done here before, only
+log-score comparisons) surfaced a bigger, structural finding: the plan's a priori "points/2PT/3PT/
+FT-made are continuous, CLT-justified" assumption was WRONG at the per-player-per-game level (true
+only for TEAM aggregates) -- testing them as COUNT categories instead (like OREB/DREB/etc already
+were) gave both better log-scores and dramatically better calibration for all four (e.g. ft_made:
+calibration max-deviation 0.35 as Student-t vs 0.012 as NegBin). All 10 prop categories now use
+Poisson/NegBin, live-refit fresh every call, and every output row carries `proj_var`/`family`/
+`family_param` -- the actual sportsbook-style deliverable the plan always intended. 38 regression
+tests (103 assertions) passing.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -1809,3 +1826,77 @@ pattern, is stronger evidence of a genuine dead end than a single failed attempt
 rather than a scoring-level trend) in a future cycle, not this one. 2 new regression tests added
 (`league_avg_halflife_games=None` default-preserving check + EWMA responsiveness check, both at
 team level) -- 37 regression tests (100 assertions) passing.
+
+## 25. Wired prop_distribution.py into the live pipeline (Task #26, 2026-08-01) -- two real findings along the way, both against the plan's original assumptions
+
+Closing a gap bigger than expected: `prop_distribution.py` was built and dev-validated back in
+Sec11 (points, blocks only), but `generate_props.py` never actually imported it -- confirmed by
+grepping the whole codebase, the live pipeline had been shipping ONLY `proj_mean` for every
+category, no variance/family/over-under-probability at all, despite the module's whole purpose
+being "the actual sportsbook-style deliverable." Extended `validate_prop_distribution.py` from its
+original 2-category smoke test to all 10 categories `generate_props.py` outputs, and along the way
+found two real, structural problems with the ORIGINAL Sec11 design -- not just missing wiring.
+
+**Finding 1 -- a real bug: the variance floor was borrowed from the wrong scale.**
+`prop_distribution.py` originally called `score_distribution.predict_variance` directly, which
+floors variance at `MIN_VARIANCE=4.0` -- sized for TEAM-SCORE variance (a ~100-point game). Applied
+to PLAYER-level stats (raw fitted variance routinely well under 1 for a low-exposure player), this
+silently clamped nearly every low-exposure player's variance up to exactly 4.0 -- confirmed
+directly on real 2025-01-15 output (2PT-makes variance stuck at 4.0 for players projected at 0.2,
+0.6, and 2.5 makes, regardless of their own actual uncertainty). Worse: this same inflated
+`predict_variance` call is used INSIDE `fit_continuous_family` to standardize residuals before
+fitting Student-t df -- meaning Sec11's ORIGINAL points family-choice validation itself was
+distorted, not just later live output. Fixed with a new `MIN_PLAYER_VARIANCE=1e-3` floor, a local
+`predict_variance` in `prop_distribution.py` (no longer importing `score_distribution`'s version).
+Re-running the fit after the fix completely FLIPPED the family choice for every continuous
+category, from "Normal, essentially tied with t" to a decisive Student-t: points log-score
+normal=76.22 vs t=3.53; 3pt_made normal=13.65 vs t=1.57; ft_made normal=298.59(!) vs t=5.49. The old
+bug had been masking real heavy-tailed behavior by making every low-exposure player's assumed
+uncertainty artificially large, which incidentally made Normal look falsely competitive.
+
+**Finding 2 -- a bigger, structural re-derivation: the plan's continuous-vs-count axis assignment
+was itself wrong for player-level shot-based makes.** This validation script never had an actual
+CALIBRATION check before (only log-score comparisons between two candidate families) -- added one
+(the probability integral transform: `F(actual)` under the fitted distribution should be
+~Uniform(0,1) if the model is well-calibrated; randomized PIT for discrete families to avoid
+spurious clumping at integer jumps). Running it on the newly-fixed Student-t fits surfaced a second,
+more important problem: real, sometimes severe miscalibration even AFTER Finding 1's fix --
+ft_made's max deviation from nominal was 0.35 (badly wrong), 3pt_made's was 0.145. The plan's
+original a priori split ("points/2PT/3PT/FT-made aggregate over many shot attempts, genuinely
+continuous by CLT") was never actually re-derived until now -- tested directly by treating all four
+as COUNT categories (Poisson/NegBin) instead, the same treatment already used for OREB/DREB/AST/
+TOV/STL/BLK. Result: BOTH better log-score AND dramatically better calibration for every one of
+them:
+
+| category | as continuous (Student-t) | as count | calibration improvement |
+|---|---|---|---|
+| points | log-score 3.53, calib max-dev 0.032 | NegBin (r=7.70) log-score 2.85, calib max-dev 0.022 | better both ways |
+| 2pt_made | log-score 1.86 | Poisson log-score 1.73, calib max-dev 0.027 | better |
+| 3pt_made | log-score 1.57, calib max-dev 0.145 | Poisson log-score 1.21, calib max-dev 0.005 | dramatically better |
+| ft_made | log-score 5.49, calib max-dev 0.352 | NegBin (r=1.80) log-score 1.52, calib max-dev 0.012 | dramatically better |
+
+The plan's domain reasoning ("aggregates over many attempts, CLT applies") is true for a TEAM's
+total points (Phase 1-3 already correctly treats that as continuous) but does NOT hold at the
+PER-PLAYER-PER-GAME level: a typical player attempts far fewer 2PT/3PT/FT shots in one game (often
+single digits) than a team accumulates points-scoring possessions -- nowhere near enough volume for
+continuity to be the right approximation. **All 10 prop categories now use count families** (6
+Poisson: 2pt_made, 3pt_made, oreb, dreb, ast, tov, stl, blk; 2 NegBin: points, ft_made).
+`fit_continuous_family`/local `predict_variance` are kept as tested, available primitives (not
+deleted) for any future category that might genuinely need them, matching this project's standing
+convention for validated-but-unused code.
+
+**Live wiring** (`generate_props.py`): `_fit_prop_distributions` refits each category's family
+parameters fresh from historical data every call (mirrors `generate_predictions.run`'s identical
+live-refit-over-caching tradeoff for `score_distribution.py`) -- Poisson needs nothing beyond the
+mean, NegBin needs the fitted dispersion `r`, driven entirely by `prop_distribution.CATEGORY_FAMILY`
+so the fitting logic follows each category's own validated config rather than a hardcoded branch.
+Output rows now carry `proj_var` (the family's implied variance, informational), `family`, and
+`family_param` (JSON, `{"r": ...}` for NegBin, `{}` for Poisson) -- enough for any downstream caller
+to compute `over_under_prob(line, proj_mean, family, family_param)` for an arbitrary betting line.
+Confirmed on the real 2025-01-15 slate: variance scales smoothly with each player's own mean (no
+more flooring artifacts), `r` is a single shared value per category across every player (correct --
+NB2 dispersion is a population-level parameter), and a spot-checked `over_under_prob` call for a
+32.4-point-projected star player returns a sensible ~47% for a 31.89-point line. 1 new regression
+test added (`test_prop_distribution_variance_floor_is_player_scale_not_team_scale`, 3 assertions:
+the floor value itself, its scale relative to `score_distribution.MIN_VARIANCE`, and a realistic
+low-exposure fit staying well under the old floor) -- 38 regression tests (103 assertions) passing.

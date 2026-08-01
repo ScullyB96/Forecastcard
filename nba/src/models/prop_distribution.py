@@ -4,12 +4,14 @@ enabling over/under probabilities the same way `score_distribution.py`
 does for game totals/margins -- the actual sportsbook-style deliverable.
 
 HIGH-COUNT stats (points, minutes, 2PM/3PM/FTM) -> Normal or Student-t,
-REUSING `score_distribution.fit_residual_variance_model`/`predict_variance`/
-`fit_student_t_df` directly (not reimplemented) -- refit on player
-residuals against the player's own projected EXPOSURE (minutes or
-attempts) as the variance-scaling regressor, in place of game-level
-`score_distribution.py`'s "pace" (more exposure -> more aggregated
-variance, the identical logic, just at player scale).
+REUSING `score_distribution.fit_residual_variance_model`/`fit_student_t_df`
+directly (not reimplemented) -- refit on player residuals against the
+player's own projected EXPOSURE (minutes or attempts) as the variance-
+scaling regressor, in place of game-level `score_distribution.py`'s "pace"
+(more exposure -> more aggregated variance, the identical logic, just at
+player scale). `predict_variance` itself is a LOCAL reimplementation, not
+reused directly -- see `MIN_PLAYER_VARIANCE`'s docstring for why
+`score_distribution.py`'s own version can't be shared as-is.
 
 LOW-COUNT stats (OREB, STL, BLK, low-usage AST/TOV) -> Poisson or
 Negative-Binomial, picked via a variance-to-mean overdispersion check --
@@ -25,7 +27,29 @@ well justified by the central limit theorem.
 import numpy as np
 from scipy import stats
 
-from src.models.score_distribution import fit_residual_variance_model, fit_student_t_df, predict_variance
+from src.models.score_distribution import fit_residual_variance_model, fit_student_t_df
+
+# Floor on a CONTINUOUS category's predicted variance. NOT `score_distribution.MIN_VARIANCE`
+# (=4.0) -- that constant is sized for TEAM-SCORE variance (a ~100-point game's variance is
+# naturally in the dozens, so 4.0 is a negligible floor there). REAL BUG FOUND (2026-08-01): this
+# module originally imported and called `score_distribution.predict_variance` directly, which
+# applies that SAME 4.0 floor to PLAYER-level stats whose raw fitted variance is routinely well
+# under 1 (e.g. 2PT-makes variance at 1 projected attempt fits to ~0.54 on real dev data) --
+# confirmed directly: nearly every player's variance was being silently clamped up to exactly 4.0
+# regardless of their own actual exposure, and (more seriously) this SAME inflated-variance
+# `predict_variance` call is also used internally by `fit_continuous_family` to standardize
+# residuals before fitting Student-t df, meaning the original family-choice validation itself was
+# distorted, not just the live output. Fixed with a player-scale floor instead, re-validated after
+# the fix (see MODEL_DOCUMENTATION.md).
+MIN_PLAYER_VARIANCE = 1e-3
+
+
+def predict_variance(variance_model: dict, exposure: np.ndarray) -> np.ndarray:
+    """Player-scale analog of `score_distribution.predict_variance` --
+    same linear-in-exposure formula, floored at `MIN_PLAYER_VARIANCE`
+    instead of that module's team-score-sized `MIN_VARIANCE`."""
+    raw = variance_model["intercept"] + variance_model["slope"] * exposure
+    return np.maximum(raw, MIN_PLAYER_VARIANCE)
 
 # Variance/mean ratio above which Negative-Binomial is preferred over Poisson (which assumes
 # variance == mean exactly). A placeholder pending empirical confirmation on real per-player
@@ -36,6 +60,46 @@ OVERDISPERSION_THRESHOLD = 1.2
 # Floor on NB's dispersion parameter r -- guards against a pathological near-zero r (from a
 # near-zero variance-minus-mean denominator) producing a degenerate, wildly overdispersed fit.
 MIN_NB_DISPERSION = 1.0
+
+# Per-category family choice, confirmed empirically (not assumed) by `validate_prop_distribution.py`
+# on the full dev range. Two rounds of real findings here, both against the plan's original a
+# priori "continuous vs count" axis assignment:
+#
+# ROUND 1 (variance-floor bug fix): the continuous branch originally reused
+# `score_distribution.predict_variance` directly, which floors variance at that module's
+# team-score-sized `MIN_VARIANCE=4.0` -- silently inflating every low-exposure player's assumed
+# uncertainty. Fixed with a player-scale `MIN_PLAYER_VARIANCE` floor (see above).
+#
+# ROUND 2 (the bigger finding): once a genuine CALIBRATION check was added (PIT values vs nominal
+# quantiles -- something this module never actually verified before, only log-score comparisons),
+# points/2PT/3PT/FT-made ALL showed real, sometimes severe miscalibration even after Round 1's fix
+# (e.g. ft_made's Student-t: max deviation from nominal 0.35 -- badly wrong). Directly tested the
+# plan's assumed axis itself (never re-derived until now): treating ALL FOUR as COUNT categories
+# (Poisson/NegBin, same treatment as OREB/DREB/etc, since a player's shot-based makes in one game
+# are genuinely low-count -- 5-10 2PT attempts, 2-5 3PT attempts, 1-4 FTs is nowhere near enough
+# volume for the CLT-based continuity the plan assumed) gives BOTH a better log-score AND a
+# dramatically better calibration for every one of them (e.g. ft_made count-family calibration max
+# deviation: 0.012, vs 0.35 as continuous; points: negbin log-score 2.85 vs t's 3.53, calibration
+# 0.022 vs 0.032). The plan's original domain-reasoning split ("points/makes aggregate over many
+# attempts, genuinely continuous by CLT") does NOT hold at the PER-PLAYER-PER-GAME level -- it
+# would hold for a TEAM's aggregate points (Phase 1-3 already treats that correctly as continuous),
+# but an individual player's own makes in one game is a much smaller, genuinely discrete sample.
+# ALL 10 categories now use count families -- `family_type: "continuous"` and its supporting
+# machinery (`fit_continuous_family`, `predict_variance`) are kept as tested, available primitives
+# (not deleted) in case a future category genuinely needs them, following this project's standing
+# convention for validated-but-currently-unused code (see `add_era_adjusted_player_rate`).
+CATEGORY_FAMILY = {
+    "points": {"family_type": "count", "family": "negbin", "exposure_col": None},
+    "2pt_made": {"family_type": "count", "family": "poisson", "exposure_col": None},
+    "3pt_made": {"family_type": "count", "family": "poisson", "exposure_col": None},
+    "ft_made": {"family_type": "count", "family": "negbin", "exposure_col": None},
+    "oreb": {"family_type": "count", "family": "poisson", "exposure_col": None},
+    "dreb": {"family_type": "count", "family": "poisson", "exposure_col": None},
+    "ast": {"family_type": "count", "family": "poisson", "exposure_col": None},
+    "tov": {"family_type": "count", "family": "poisson", "exposure_col": None},
+    "stl": {"family_type": "count", "family": "poisson", "exposure_col": None},
+    "blk": {"family_type": "count", "family": "poisson", "exposure_col": None},
+}
 
 # Floor on a count family's mean (mu) before evaluating pmf/logpmf. BUG FOUND (2026-08-01,
 # validate_prop_distribution.py's real run on 66,937 blocks eval rows): a player with an

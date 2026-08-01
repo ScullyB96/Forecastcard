@@ -62,8 +62,13 @@ pip install -r requirements.txt
   - `usage_allocation.py` — the macro-anchor + micro-reallocation composition rule (points and
     DREB/AST/TOV/STL/BLK anchored to a team total -- RAPM's for points, `team_stat_rates.py`'s for
     the rest; OREB left unanchored)
-  - `prop_distribution.py` — player-level predictive distributions (Normal/Student-t for
-    high-count stats, Poisson/Negative-Binomial for low-count ones) and `over_under_prob`
+  - `prop_distribution.py` — player-level predictive distributions and `over_under_prob`; all 10
+    prop categories use Poisson/Negative-Binomial (`CATEGORY_FAMILY`) -- continuous (Normal/
+    Student-t) was the plan's original a priori assumption but empirically lost on both log-score
+    and calibration once actually tested (see `MODEL_DOCUMENTATION.md` Sec25), kept available as a
+    tested-but-unused primitive. Wired live into `generate_props.py` (`proj_var`/`family`/
+    `family_param` per output row), closing a gap where the live pipeline had shipped bare point
+    projections only since the props subsystem's inception
   - `final_holdout_check.py`, `bootstrap_significance.py`, `metrics_ledger.py` — the shared
     validation harness (dev/holdout split, paired bootstrap, append-only results log)
   - `validate_*.py` — one acceptance-gate script per model, each runnable standalone
