@@ -1,7 +1,11 @@
 """Live daily player-props entry point: reuses `generate_predictions.py`'s
-already-RAPM-adjusted team point totals as the macro anchor (a single
-source of truth -- props and game predictions can never silently disagree
-on a team's total), resolves tonight's active roster via the SHARED
+team point totals as the macro anchor (a single source of truth -- props
+and game predictions can never silently disagree on a team's total, and
+this file has no separate lineup-adjustment logic of its own, so whatever
+`generate_predictions.py` currently produces -- Phase 1 team-strength
+alone as of 2026-08-01, see that module's docstring and
+MODEL_DOCUMENTATION.md Sec28.2 -- is exactly what flows through here too),
+resolves tonight's active roster via the SHARED
 `active_roster.py` helpers, projects each active player's full stat line
 from every rate-category model built this session, composes points via
 `usage_allocation.py`'s macro-anchor + micro-reallocation rule, attaches a

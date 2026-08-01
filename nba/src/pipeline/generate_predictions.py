@@ -1,8 +1,6 @@
 """Live daily entry point: refresh data, resolve tonight's active lineups,
-run the full Phase 1 (team strength) + Phase 2 (RAPM-lite lineup
-adjustment, PREDICTIVE minutes mode -- see below) + Phase 3 (score
-distribution) stack, and write out win probability / spread / total for
-every game on a given date.
+run the Phase 1 (team strength) + Phase 3 (score distribution) stack, and
+write out win probability / spread / total for every game on a given date.
 
 Run as `python -m src.pipeline.generate_predictions [YYYY-MM-DD]` (defaults
 to today).
@@ -24,22 +22,26 @@ produced it.
 `validate_rapm_lineup_adjustment.py`'s backtest, which uses real
 already-known minutes to measure a ceiling): each active player's own
 trailing-average minutes over their team's last `MINUTES_LOOKBACK_GAMES`,
-renormalized across tonight's active roster -- the actual PRE-game
-projection a deployed system has to work with.
+renormalized across tonight's active roster.
 
-**Phase 2 (RAPM-lite lineup adjustment) IS wired in as of 2026-07-25**,
-now that `validate_predictive_lineup_adjustment.py`'s dev-only bootstrap
-confirmed predictive-minutes mode captures essentially all of oracle
-mode's real improvement (total_mae -0.0206 vs oracle's -0.0217, margin_mae
--0.0336 vs oracle's -0.0350, both real -- see MODEL_DOCUMENTATION.md
-Sec7/Sec9). The single latest RAPM-lite snapshot is fit fresh on every call
-from ALL cached stints through the most recent completed/backfilled
-season (`_fit_latest_player_ratings`) -- a full periodic walk-forward
-refit series (as the dev backtest uses, one snapshot per historical
-checkpoint) isn't needed live, since a live call only ever needs "the
-single best rating estimate as of right now". Recomputing this fresh per
-invocation is the same correctness-over-efficiency tradeoff already
-documented above for the score-distribution/home-court fits.
+**Phase 2 (RAPM-lite lineup adjustment) is DISABLED as of 2026-08-01**
+(`INCLUDE_LINEUP_ADJUSTMENT = False`), reverting a 2026-07-25 decision.
+The dev-only bootstrap that originally justified wiring it in
+(`validate_predictive_lineup_adjustment.py`) had a real hindsight leak in
+its own active-player-set selection (it used the real historical game's
+actual attendance -- perfect foreknowledge of who plays -- instead of the
+same trailing-rotation-union `resolve_active_lineup` genuinely has to work
+with, live). Fixed and re-ran (Sec28.2 of MODEL_DOCUMENTATION.md): under
+the honest methodology, Phase 2 shows a REAL REGRESSION on margin_mae on
+BOTH dev (+0.0146) and holdout (+0.0181), reversing the original "real
+improvement" conclusion. Oracle mode (unaffected by the leak) still
+confirms lineup-awareness carries real signal in principle -- the
+deployable minutes-share estimation mechanism just doesn't capture it net
+of its own noise. All the RAPM-lite/lineup-adjustment machinery
+(`rapm_lite.py`, `lineup_rating.py`, `active_roster.py`) is left in place,
+tested, and available -- flip `INCLUDE_LINEUP_ADJUSTMENT` back on only
+after a genuinely improved minutes-projection mechanism is built and
+re-validated, not by reverting this decision on its own.
 """
 
 import sys
@@ -64,6 +66,10 @@ from src.pipeline.active_roster import (
 )
 from src.pipeline.refresh_data import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
+
+INCLUDE_LINEUP_ADJUSTMENT = False  # disabled 2026-08-01 -- see module docstring and
+# MODEL_DOCUMENTATION.md Sec28.2: the dev/holdout result that justified adopting this had a real
+# hindsight leak in its own validation; fixed and re-run, Phase 2 now shows a real regression.
 
 
 def _fit_latest_player_ratings(current_season: int, before_date: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -177,12 +183,18 @@ def run(game_date: str) -> pd.DataFrame:
     team_history, team_side = build_team_history(team_log[team_log["season"] == target_season])
     current_roster = load_current_roster_player_ids(target_season)
 
-    player_ratings, player_minutes = _fit_latest_player_ratings(target_season, before_date=game_date)
-    have_lineup_adjustment = not player_ratings.empty
-    if not have_lineup_adjustment:
-        print("WARNING: no RAPM-lite player-rating snapshot available yet (stints not built for "
-              "any cached season) -- falling back to team-strength-only (Phase 1) projections "
-              "for this call", flush=True)
+    if INCLUDE_LINEUP_ADJUSTMENT:
+        player_ratings, player_minutes = _fit_latest_player_ratings(target_season, before_date=game_date)
+        have_lineup_adjustment = not player_ratings.empty
+        if not have_lineup_adjustment:
+            print("WARNING: no RAPM-lite player-rating snapshot available yet (stints not built for "
+                  "any cached season) -- falling back to team-strength-only (Phase 1) projections "
+                  "for this call", flush=True)
+    else:
+        # Phase 2 disabled (see module docstring/Sec28.2) -- skip the RAPM-lite fit entirely
+        # rather than computing it and then discarding it.
+        player_ratings, player_minutes = pd.DataFrame(), pd.DataFrame()
+        have_lineup_adjustment = False
 
     # Score-distribution variance/correlation is fit from the DEV-RANGE-ONLY historical backtest
     # (`build_dev_predictions` stops at DEV_MAX_SEASON - 1) -- recomputed on every call for v1

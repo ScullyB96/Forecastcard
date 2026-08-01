@@ -30,10 +30,13 @@ from src.models.validate_predictive_lineup_adjustment import LOOKBACK_GAMES
 from src.models.validate_rapm_lineup_adjustment import _build_team_history
 from src.models.validate_team_strength_baseline import _to_wide_games
 
-INCLUDE_LINEUP_ADJUSTMENT = True  # predictive-minutes mode dev-adopted 2026-07-25: real improvement
-# on total_mae (-0.0206, CI excludes zero) and margin_mae (-0.0336, CI excludes zero), matching
-# oracle mode's ceiling almost exactly -- see validate_predictive_lineup_adjustment.py / MODEL_
-# DOCUMENTATION.md Sec7/Sec9.
+INCLUDE_LINEUP_ADJUSTMENT = False  # REVERTED 2026-08-01 -- predictive-minutes mode was dev-adopted
+# 2026-07-25 on a hindsight-leaked validation (its active-player-set selection used the real
+# historical game's own actual attendance instead of the honest trailing-rotation-union the live
+# pipeline actually has to work with). Fixed and re-run: under the corrected methodology, predictive
+# mode shows a REAL REGRESSION on margin_mae on both dev (+0.0146) and holdout (+0.0181) vs Phase 1
+# alone -- see validate_predictive_lineup_adjustment.py / MODEL_DOCUMENTATION.md Sec28.2. Only flip
+# this back on after a genuinely improved minutes-projection mechanism is built and validated.
 
 
 def _full_range_long_log() -> pd.DataFrame:

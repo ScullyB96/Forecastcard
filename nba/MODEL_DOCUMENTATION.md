@@ -243,9 +243,9 @@ medium-severity findings along the way (a dormant-but-real Student-t variance bu
 false-failing data-coverage check, a player-name-collision risk, and multiple stale docstrings). 44
 regression tests (123 assertions) passing. See Sec27 for full detail.
 
-**MAJOR FINDING (Sec28.2, 2026-08-01): Phase 2's predictive-mode RAPM lineup adjustment -- CURRENTLY
-LIVE IN PRODUCTION -- no longer holds up once a hindsight leak in its own validation is fixed.** The
-backtest that "confirmed" Phase 2 (Sec9.1/9.3/9.4) computed its active-player set from the real
+**MAJOR FINDING, AND REVERTED (Sec28.2/28.3, 2026-08-01): Phase 2's predictive-mode RAPM lineup
+adjustment no longer held up once a hindsight leak in its own validation was fixed -- DISABLED.**
+The backtest that "confirmed" Phase 2 (Sec9.1/9.3/9.4) computed its active-player set from the real
 historical game's own actual attendance (perfect hindsight on who plays), a materially easier
 problem than what the live pipeline actually has to solve. Fixed to use the same trailing-rotation-
 union mechanism the live pipeline genuinely uses, then re-ran both the dev-only check and a fresh
@@ -253,9 +253,13 @@ holdout-only isolation check: under the honest methodology, Phase 2 shows a REAL
 margin_mae on BOTH dev (+0.0146) and holdout (+0.0181), and no real help on total_mae or SU either --
 completely reversing the previously-adopted conclusion. Oracle mode (which never had this leak)
 still confirms lineup-awareness carries real signal in principle; the deployable estimation
-mechanism just isn't capturing it. **Flagged for the user rather than acted on unilaterally**: Phase
-2 is live in both `generate_predictions.py` and `generate_props.py` right now. See Sec28 for full
-detail and options.
+mechanism just isn't capturing it net of its own noise. **Flagged for the user rather than acted on
+unilaterally, then disabled per their decision**: `generate_predictions.py`'s
+`INCLUDE_LINEUP_ADJUSTMENT = False` (both live pipelines revert to Phase 1 team-strength alone;
+`generate_props.py` had no independent Phase 2 logic of its own, so it inherits the reverted totals
+automatically). All the RAPM-lite/lineup-adjustment machinery is left in place, tested, and
+available -- re-enable only after a genuinely improved minutes-projection mechanism is built and
+validated. See Sec28 for full detail.
 
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
@@ -2319,3 +2323,34 @@ user rather than made unilaterally here. 2 new regression tests added
 (`test_predictive_minutes_shares_has_no_hindsight_leak`,
 `test_resolve_active_lineup_excludes_departed_players`) -- 46 regression tests (129 assertions)
 passing.
+
+### 28.3 Decision: Phase 2 disabled
+
+Given the choice between disabling Phase 2 now, keeping it live while investigating a better
+minutes-projection mechanism, or accepting the risk as-is, the user chose to disable it immediately
+-- reverting to the configuration with a currently-valid confirmatory result (Phase 1 alone) rather
+than continuing to run a configuration whose own adoption evidence had just been shown unreliable.
+
+**Implementation**: `generate_predictions.py` gets a new module-level `INCLUDE_LINEUP_ADJUSTMENT =
+False` constant. When `False`, `_fit_latest_player_ratings` is skipped entirely (no wasted RAPM fit
+computation every call) and `have_lineup_adjustment` is forced `False`, so every game falls through
+the ALREADY-EXISTING "team-strength only" code path (no new branch needed -- this path has existed
+since before Phase 2 was ever wired in, and is exactly what oracle mode's ceiling test and Sec9.4's
+original isolation check both compared against). `generate_props.py` has no independent RAPM
+adjustment of its own -- it only ever reused `generate_predictions.py`'s output as its points macro-
+anchor, so disabling Phase 2 there automatically and correctly propagates; the props module
+docstring was updated so it doesn't misleadingly claim "already-RAPM-adjusted" regardless of the
+live flag's state. `run_final_holdout_check.py`'s own `INCLUDE_LINEUP_ADJUSTMENT` flag flipped to
+`False` to match, with an updated comment recording why.
+
+**Verified live**: re-ran the 2025-01-15 spot-check on both pipelines. `generate_predictions.py` now
+shows `[no lineup adjustment (team-strength only)]` for every game (previously showed a lineup
+source tag and RotoWire exclusion count for each side); `generate_props.py` still runs cleanly
+(its own `resolve_active_lineup` calls are for MINUTES-SHARE/rotation purposes only, unrelated to
+Phase 2's RAPM skill adjustment, so its output shape is unaffected by this change).
+
+**Nothing is deleted.** `rapm_lite.py`, `lineup_rating.py`, and `active_roster.py`'s RAPM-adjacent
+machinery all remain in place, fully tested, and importable -- re-enabling Phase 2 later is a
+one-line flag flip, but should only be done after a genuinely improved minutes-projection mechanism
+(not just re-trusting the old, hindsight-leaked one) is built and validated through this project's
+standard dev-then-holdout discipline.
