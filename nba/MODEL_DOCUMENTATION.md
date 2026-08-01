@@ -2457,3 +2457,26 @@ result on two levels: it confirms detrend-then-retrend still isn't the right too
 regime-change-diagnosis case it was actually built for, and it's a concrete example of this
 project's own discipline (check the premise against real data before trusting a lever's stated
 rationale) catching a plausible-sounding assumption that didn't actually hold up.
+
+## 32. Back-to-back adjustment: a genuinely real diagnostic that still doesn't survive adoption
+
+A domain-signal lever with an interesting starting point: `rest_schedule.py`'s residual-correlation
+diagnostic found the B2B effect REAL early in this project (p=8.0e-7 on a real dev-range check), but
+a repo-wide grep confirms `fit_b2b_adjustment`/`add_rest_days` were never actually wired into
+`team_strength.py` or either live pipeline -- a confirmed-real signal that sat completely unused.
+Built a proper walk-forward-safe adoption test (`validate_b2b_adjustment.py`): an expanding-mean B2B
+correction using only strictly-prior B2B-game residuals (explicit sequential loop, not a vectorized
+shift, specifically to avoid the same-game leak trap this project has hit before), applied as an
+additive delta to whichever side is on a back-to-back.
+
+**Result: a real, but MIXED and non-adoptable effect.** On the recent-dev slice: total_mae shows a
+tiny REAL IMPROVEMENT (-0.0061) but margin_mae shows a tiny REAL REGRESSION (+0.0086) -- both
+effects are an order of magnitude smaller than the original residual-correlation diagnostic's
+"-1.02pt" headline number. Swept the shrinkage prior (10/50/200/500/1000 games) to rule out an
+under-shrunk noisy estimate as the cause: the mixed pattern is remarkably STABLE across the entire
+range, ruling that out. Mechanistically similar to Sec24's finding for the league-average target:
+correcting the SCALE (total) can net out to a small real gain while adding noise to the specific
+RELATIVE comparison (margin) that a difference metric is more exposed to. **Not adopted** -- a real
+diagnostic correlation is confirmed NOT to translate cleanly into an adopted correction here,
+consistent with this project's now well-established distinction between "a residual correlates with
+X" and "adding a correction for X actually helps out-of-sample, net of the noise it introduces."
