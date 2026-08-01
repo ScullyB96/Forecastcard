@@ -91,7 +91,7 @@ from src.models.prop_distribution import CATEGORY_FAMILY, fit_continuous_family,
 from src.models.team_stat_rates import ADOPTED_CATEGORIES, add_team_stat_ratings, build_team_stat_game_log, project_team_stat
 from src.models.team_strength import add_team_ratings, build_team_game_log
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta, raw_projected_points
-from src.pipeline.active_roster import build_team_history, games_on_date, resolve_active_lineup
+from src.pipeline.active_roster import build_team_history, games_on_date, load_current_roster_player_ids, resolve_active_lineup
 from src.pipeline.generate_predictions import _fit_latest_player_ratings, run as generate_game_predictions
 from src.pipeline.refresh_data import refresh_all_data
 from src.utils.paths import DATA_PROCESSED
@@ -522,6 +522,7 @@ def run(game_date: str) -> pd.DataFrame:
     # therefore players, from the PRIOR season, inflating the resolved active roster with players
     # no longer on the team and diluting every real player's projected share).
     team_history, team_side = build_team_history(team_log[team_log["season"] == current_season])
+    current_roster = load_current_roster_player_ids(current_season)
 
     scoring_log, rebounding_log, playmaking_log, defensive_log = _build_rate_logs(current_season, game_date)
     distribution_fits = _fit_prop_distributions(scoring_log, rebounding_log, playmaking_log, defensive_log)
@@ -539,9 +540,11 @@ def run(game_date: str) -> pd.DataFrame:
             continue
 
         home_shares, home_tag = resolve_active_lineup(
-            row.homeAbbrev, team_history.get(home_id, []), player_minutes_stints, team_side.get(home_id, {}), injury_report)
+            row.homeAbbrev, team_history.get(home_id, []), player_minutes_stints, team_side.get(home_id, {}), injury_report,
+            current_roster_ids=current_roster.get(home_id))
         away_shares, away_tag = resolve_active_lineup(
-            row.awayAbbrev, team_history.get(away_id, []), player_minutes_stints, team_side.get(away_id, {}), injury_report)
+            row.awayAbbrev, team_history.get(away_id, []), player_minutes_stints, team_side.get(away_id, {}), injury_report,
+            current_roster_ids=current_roster.get(away_id))
         # {} (not a per-category crash) when either team has no team-stat history yet -- see
         # `_team_stat_totals`'s own fallback docstring.
         game_stat_totals = _team_stat_totals(latest_team_stat, home_id, away_id)

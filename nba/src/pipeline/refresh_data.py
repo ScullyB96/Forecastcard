@@ -66,7 +66,13 @@ def refresh_all_data() -> int:
     fetch_playbyplay_season(current)
     fetch_traditional_season(current)
     fetch_player_track_season(current)
-    fetch_rosters_season(current)
+    # force=True: unlike every other fetch above, `fetch_rosters_season`'s cache marks a team
+    # "done" forever once fetched once -- correct for a COMPLETE historical season (roster is
+    # static after the fact), but wrong for the CURRENT season, where a mid-season trade/waiver
+    # needs the snapshot to genuinely stay current. Forced every call (same as the schedule
+    # above) so `active_roster.load_current_roster_player_ids` can actually detect a departed
+    # player -- see the real bug that motivated this in `active_roster.resolve_active_lineup`.
+    fetch_rosters_season(current, force=True)
     # BoxScoreMatchupsV3/BoxScoreDefensiveV2 only exist from the 2017-18 season onward (confirmed
     # live during the original props-subsystem build) -- `current` is always the real current
     # season here (never a historical backfill year), so this guard is a defensive no-op today,

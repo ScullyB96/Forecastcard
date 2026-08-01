@@ -63,24 +63,33 @@ def predictive_minutes_shares(player_minutes: pd.DataFrame, game_id: str, team_s
                                team_game_ids_before: list[str], team_side_by_game: dict[str, str],
                                lookback_games: int = DEFAULT_LOOKBACK_GAMES) -> pd.Series:
     """Backtest counterpart to `oracle_minutes_shares`: the PREDICTIVE input
-    described in this module's docstring. Uses the SAME active-player set
-    as the real historical game (who actually appeared -- a fair backtest
-    proxy for "who was on the active/available roster", since an NBA
-    team's roster minus same-day injury scratches is knowable pre-game in
-    real life too, just as the live pipeline's own RotoWire-based exclusion
-    is), but each player's MINUTES value is their own trailing average over
-    the team's last `lookback_games` games (strictly prior to this game,
-    via `team_game_ids_before`) -- NOT the real minutes they happened to
-    play that specific night. That substitution is what makes this
-    PREDICTIVE rather than ORACLE: minutes distribution (who gets extra run
-    in a blowout, who's in foul trouble) is exactly the in-game information
-    a real pre-game system doesn't have. Renormalized to sum to 1.0 over
-    the active set; a player with no recent minutes history at all (e.g.
-    just activated) gets 0 share rather than crashing renormalization."""
-    active_players = list(oracle_minutes_shares(player_minutes, game_id, team_side).index)
-    if not active_players:
-        return pd.Series(dtype=float)
+    described in this module's docstring. Each player's MINUTES value is
+    their own trailing average over the team's last `lookback_games` games
+    (strictly prior to this game, via `team_game_ids_before`) -- NOT the
+    real minutes they happened to play that specific night. That
+    substitution is what makes this PREDICTIVE rather than ORACLE: minutes
+    distribution (who gets extra run in a blowout, who's in foul trouble)
+    is exactly the in-game information a real pre-game system doesn't
+    have. Renormalized to sum to 1.0 over the active set.
 
+    REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): the active-
+    player SET used to be `oracle_minutes_shares(...).index` -- literally
+    the real historical game's own actual attendance, i.e. PERFECT
+    HINDSIGHT on who ends up playing that night. The live mechanism this
+    claimed to mirror (`active_roster.resolve_active_lineup`) does NOT
+    know who ends up playing -- it takes the trailing-`lookback_games`
+    UNION of anyone who's recently appeared, then excludes only players an
+    injury report flags. A healthy scratch/DNP-CD/unflagged load-management
+    night is a scenario the live system structurally cannot exclude in
+    advance, but the old backtest's oracle-derived active set silently
+    excluded such players anyway (since they show 0 real minutes that
+    exact game) -- measuring an easier selection problem than the live
+    pipeline actually solves. Fixed: the active-player set is now ALSO
+    derived purely from the trailing-window union (no reference to this
+    game's own real outcome at all) -- the honest, walk-forward-safe
+    analog of what `resolve_active_lineup` actually does, mechanism-
+    matched rather than hindsight-shortcut. See MODEL_DOCUMENTATION.md for
+    the re-validation this required."""
     recent_game_ids = team_game_ids_before[-lookback_games:]
     if not recent_game_ids:
         return pd.Series(dtype=float)
@@ -96,11 +105,10 @@ def predictive_minutes_shares(player_minutes: pd.DataFrame, game_id: str, team_s
     combined = pd.concat(rows, ignore_index=True)
     trailing_avg = combined.groupby("playerId")["minutes"].mean()
 
-    shares = trailing_avg.reindex(active_players).fillna(0.0)
-    total = shares.sum()
+    total = trailing_avg.sum()
     if total <= 0:
         return pd.Series(dtype=float)
-    return shares / total
+    return trailing_avg / total
 
 
 def team_recent_roster_rapm(player_minutes: pd.DataFrame, player_ratings_as_of: pd.DataFrame,

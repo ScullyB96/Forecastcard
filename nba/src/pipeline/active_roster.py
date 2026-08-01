@@ -18,8 +18,10 @@ row is tagged with which tier produced it.
 import pandas as pd
 from nba_api.stats.endpoints import scoreboardv3
 
+from src.ingest.fetch_schedule import season_str
 from src.ingest.player_name_crosswalk import player_id_for_name
 from src.ingest.team_codes import ABBREV_TO_TEAM_ID
+from src.utils.paths import DATA_RAW
 
 MINUTES_LOOKBACK_GAMES = 10
 
@@ -63,14 +65,45 @@ def build_team_history(team_log: pd.DataFrame) -> tuple[dict, dict]:
     return team_history, team_side
 
 
+def load_current_roster_player_ids(season: int) -> dict[int, set]:
+    """teamId -> set of playerIds currently on that team's roster, from
+    `CommonTeamRoster`'s cached snapshot for `season`. Same WALL-CLOCK-ONLY
+    limitation as RotoWire's injury report (see
+    `fetch_rotowire_lineups.warn_if_stale_for_backtest`): `CommonTeamRoster`
+    returns "as of whenever last fetched", not a point-in-time archive, so
+    this is only trustworthy for a genuinely live "tonight" call -- not a
+    historical backtest re-query, which will see today's roster applied to
+    a past date (the same class of contamination the injury-report warning
+    already covers, generalized to also mention this source)."""
+    path = DATA_RAW / f"team_rosters_{season_str(season)}.parquet"
+    if not path.exists():
+        return {}
+    df = pd.read_parquet(path)
+    return {int(team_id): set(g["PLAYER_ID"]) for team_id, g in df.groupby("TeamID")}
+
+
 def resolve_active_lineup(team_abbrev: str, team_prior_game_ids: list, player_minutes: pd.DataFrame,
-                           team_side_lookup: dict, injury_report: list[dict]) -> tuple[pd.Series, str]:
+                           team_side_lookup: dict, injury_report: list[dict],
+                           current_roster_ids: set | None = None) -> tuple[pd.Series, str]:
     """Returns (minutes_shares renormalized to 1.0, source_tag). Players
     RotoWire flags Out/Doubtful are excluded by player ID (via
     `player_name_crosswalk.player_id_for_name`) before minutes shares are
     computed -- a name with no crosswalk match (recent rookie/two-way player
     not yet in `nba_api`'s static list) can't be excluded by ID and is
-    logged, not silently ignored."""
+    logged, not silently ignored.
+
+    REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): the trailing-
+    minutes lookback had no check against actual CURRENT roster membership
+    at all -- Sec22 fixed the cross-SEASON version of this (a team's "last
+    N games" reaching into a PRIOR season's roster), but a player traded or
+    waived MID-season kept contributing his real trailing minutes (and a
+    nonzero share of tonight's projection) for up to
+    `MINUTES_LOOKBACK_GAMES` games after he left, diluting every
+    actually-rostered player's share and generating a full phantom prop row
+    for someone who isn't on the team and won't play. `current_roster_ids`
+    (from `load_current_roster_player_ids`, default `None` -- preserving
+    the exact original behavior when not supplied) additionally excludes
+    any player NOT on that set, same as the existing RotoWire exclusion."""
     out_names = [r["player"] for r in injury_report if r["team"] == team_abbrev and r["likely_out"]]
     out_ids = set()
     for name in out_names:
@@ -97,8 +130,16 @@ def resolve_active_lineup(team_abbrev: str, team_prior_game_ids: list, player_mi
     avg_minutes = combined.groupby("playerId")["minutes"].mean()
     avg_minutes = avg_minutes.drop(index=[pid for pid in out_ids if pid in avg_minutes.index])
 
+    departed_count = 0
+    if current_roster_ids is not None:
+        departed = [pid for pid in avg_minutes.index if pid not in current_roster_ids]
+        if departed:
+            avg_minutes = avg_minutes.drop(index=departed)
+            departed_count = len(departed)
+
     total = avg_minutes.sum()
     if total <= 0:
         return pd.Series(dtype=float), "no positive minutes in lookback window after exclusions"
-    tag = f"predictive (trailing {MINUTES_LOOKBACK_GAMES}-game minutes, {len(out_ids)} player(s) excluded via RotoWire)"
+    tag = (f"predictive (trailing {MINUTES_LOOKBACK_GAMES}-game minutes, {len(out_ids)} player(s) "
+           f"excluded via RotoWire, {departed_count} excluded as no longer on the roster)")
     return avg_minutes / total, tag

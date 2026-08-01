@@ -13,7 +13,7 @@ import pandas as pd
 from src.ingest.build_stints import _get_starters, _normalize_name, _prep_pbp_timeline, _roster_lookup
 from src.ingest.fetch_schedule import season_for_date
 from src.ingest.player_name_crosswalk import _build_name_index
-from src.pipeline.active_roster import build_team_history
+from src.pipeline.active_roster import build_team_history, resolve_active_lineup
 from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, bootstrap_compare
 from src.models.garbage_time import add_garbage_time_weight
 from src.models.home_court import _baseline_log_ratios
@@ -33,6 +33,7 @@ from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_fam
 from src.models.score_distribution import _t_scale
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta
+from src.models.lineup_rating import predictive_minutes_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
 from src.models.team_stat_rates import ADOPTED_CATEGORIES, STAT_COLUMNS, build_team_stat_game_log, project_team_stat
 from src.models.team_strength import PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings
@@ -711,6 +712,67 @@ def test_anchor_preserving_missing_does_not_mask_genuinely_missing_players():
           unanchored["A"] == 10.0 and unanchored["C"] == 6.0)
 
 
+def test_predictive_minutes_shares_has_no_hindsight_leak():
+    """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): the active-player SET used to be
+    `oracle_minutes_shares(...).index` -- literally this exact historical game's real attendance
+    (perfect hindsight on who ends up playing), a materially more-informed selection than the live
+    pipeline's own `resolve_active_lineup` (a trailing-window union, no knowledge of who plays
+    tonight). This test confirms the fix with a player who's normally in the trailing rotation but
+    did NOT play in the specific game being projected (a healthy scratch/DNP-CD, which the live
+    system structurally cannot know about in advance) -- the corrected function must still include
+    him (trailing-window-based selection), where the old oracle-based selection would have
+    excluded him."""
+    player_minutes = pd.DataFrame([
+        # trailing games g1/g2: both players 1 and 2 get real minutes -> both are "in the rotation"
+        {"gameId": "g1", "playerId": 1, "team_side": "home", "minutes": 30.0},
+        {"gameId": "g1", "playerId": 2, "team_side": "home", "minutes": 15.0},
+        {"gameId": "g2", "playerId": 1, "team_side": "home", "minutes": 28.0},
+        {"gameId": "g2", "playerId": 2, "team_side": "home", "minutes": 18.0},
+        # the game being projected (g3): player 2 was a healthy scratch, recorded 0 real minutes --
+        # NOT in player_minutes at all for g3 (no row = didn't play), mirroring a real box score.
+        {"gameId": "g3", "playerId": 1, "team_side": "home", "minutes": 34.0},
+    ])
+    shares = predictive_minutes_shares(
+        player_minutes, game_id="g3", team_side="home",
+        team_game_ids_before=["g1", "g2"], team_side_by_game={"g1": "home", "g2": "home"})
+    check("player 2 (a real, recent rotation player who happened to be scratched THIS game) is "
+          "still included -- the live system has no way to know this in advance either",
+          2 in shares.index, f"got {set(shares.index)}")
+    check("shares renormalize to exactly 1.0", abs(shares.sum() - 1.0) < 1e-9)
+
+
+def test_resolve_active_lineup_excludes_departed_players():
+    """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): `resolve_active_lineup`'s trailing-
+    minutes lookback had no check against actual CURRENT roster membership at all -- Sec22 fixed
+    only the cross-SEASON version of this (a lookback reaching into a PRIOR season's roster); a
+    player traded or waived MID-season kept contributing his real trailing minutes (and a nonzero
+    share of tonight's projection) for up to MINUTES_LOOKBACK_GAMES games after he left, diluting
+    every actually-rostered player's share. This test confirms the new `current_roster_ids` param:
+    (1) default None preserves the exact original behavior (no roster-based exclusion); (2) a
+    departed player (not in current_roster_ids) is excluded and the remaining shares correctly
+    renormalize to 1.0."""
+    player_minutes = pd.DataFrame([
+        {"gameId": "g1", "playerId": 1, "team_side": "home", "minutes": 30.0},
+        {"gameId": "g1", "playerId": 2, "team_side": "home", "minutes": 20.0},
+        {"gameId": "g2", "playerId": 1, "team_side": "home", "minutes": 30.0},
+        {"gameId": "g2", "playerId": 2, "team_side": "home", "minutes": 20.0},
+    ])
+    team_side_lookup = {"g1": "home", "g2": "home"}
+    prior_game_ids = ["g1", "g2"]
+
+    default_shares, default_tag = resolve_active_lineup("TST", prior_game_ids, player_minutes, team_side_lookup, [])
+    check("default (current_roster_ids=None) includes both players -- exact original behavior",
+          set(default_shares.index) == {1, 2}, f"got {set(default_shares.index)}")
+
+    filtered_shares, filtered_tag = resolve_active_lineup(
+        "TST", prior_game_ids, player_minutes, team_side_lookup, [], current_roster_ids={1})
+    check("player 2 (not on current_roster_ids) is excluded",
+          set(filtered_shares.index) == {1}, f"got {set(filtered_shares.index)}")
+    check("remaining share renormalizes to exactly 1.0", abs(filtered_shares.sum() - 1.0) < 1e-9)
+    check("the source tag reports the departed-player exclusion count", "1 excluded as no longer on the roster" in filtered_tag,
+          f"got {filtered_tag}")
+
+
 def test_name_index_prefers_active_player_and_flags_genuine_ambiguity():
     """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): the player-name-to-ID crosswalk used
     to keep whichever of two same-named players happened to appear LAST in `nba_api`'s unsorted
@@ -1271,6 +1333,8 @@ if __name__ == "__main__":
     test_latest_snapshot_carries_forward_across_ewma_season_reset()
     test_t_scale_produces_correctly_matched_variance()
     test_name_index_prefers_active_player_and_flags_genuine_ambiguity()
+    test_resolve_active_lineup_excludes_departed_players()
+    test_predictive_minutes_shares_has_no_hindsight_leak()
 
     print()
     if FAILURES:

@@ -243,6 +243,20 @@ medium-severity findings along the way (a dormant-but-real Student-t variance bu
 false-failing data-coverage check, a player-name-collision risk, and multiple stale docstrings). 44
 regression tests (123 assertions) passing. See Sec27 for full detail.
 
+**MAJOR FINDING (Sec28.2, 2026-08-01): Phase 2's predictive-mode RAPM lineup adjustment -- CURRENTLY
+LIVE IN PRODUCTION -- no longer holds up once a hindsight leak in its own validation is fixed.** The
+backtest that "confirmed" Phase 2 (Sec9.1/9.3/9.4) computed its active-player set from the real
+historical game's own actual attendance (perfect hindsight on who plays), a materially easier
+problem than what the live pipeline actually has to solve. Fixed to use the same trailing-rotation-
+union mechanism the live pipeline genuinely uses, then re-ran both the dev-only check and a fresh
+holdout-only isolation check: under the honest methodology, Phase 2 shows a REAL REGRESSION on
+margin_mae on BOTH dev (+0.0146) and holdout (+0.0181), and no real help on total_mae or SU either --
+completely reversing the previously-adopted conclusion. Oracle mode (which never had this leak)
+still confirms lineup-awareness carries real signal in principle; the deployable estimation
+mechanism just isn't capturing it. **Flagged for the user rather than acted on unilaterally**: Phase
+2 is live in both `generate_predictions.py` and `generate_props.py` right now. See Sec28 for full
+detail and options.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -2210,3 +2224,98 @@ version of this); and `predictive_minutes_shares`' backtest methodology uses a m
 active-player-set selection than the live pipeline can replicate (a real gap between the validated
 ~95%/96% ceiling-capture figure and live-achievable accuracy). Both are real, but neither is a
 quick, isolated fix -- left as documented, flagged follow-up work rather than rushed.
+
+## 28. The last 2 medium findings, fixed (2026-08-01)
+
+### 28.1 Real bug: mid-season trade/waiver contamination in `resolve_active_lineup`
+
+Sec22 fixed the cross-SEASON version of a roster-membership bug (a trailing lookback reaching into
+the PRIOR season's roster). This left the MID-season version untouched: `resolve_active_lineup`'s
+trailing-minutes lookback had no check against actual CURRENT roster membership at all -- a player
+traded or waived kept contributing his real trailing minutes (and a nonzero share of tonight's
+projection) for up to `MINUTES_LOOKBACK_GAMES` games after he left, diluting every actually-rostered
+player's share and generating a full phantom prop row for someone who isn't on the team.
+
+**Fixed**: added `active_roster.load_current_roster_player_ids(season)` (teamId -> set of
+playerIds, from `CommonTeamRoster`'s cached snapshot) and a new `current_roster_ids` param on
+`resolve_active_lineup` (default `None`, preserving exact original behavior) that additionally
+excludes any player not on that set. Both live pipelines now pass it. Also fixed a related,
+previously-invisible problem this surfaced: `fetch_rosters_season` marks a team "done" forever once
+fetched once per season -- correct for a COMPLETE historical season, but wrong for the CURRENT one,
+where the snapshot needs to genuinely stay current through mid-season trades. `refresh_data.py` now
+force-refreshes rosters every call, mirroring the schedule's own already-forced refresh.
+
+This new signal has the SAME wall-clock-only limitation as RotoWire's injury report (`CommonTeamRoster`
+reflects "as of whenever last fetched", not a point-in-time archive) -- generalized the existing
+`warn_if_stale_for_backtest` warning to cover both sources with one message, rather than adding a
+second, redundant warning. Confirmed live on the 2025-01-15 spot-check: many players are now
+(correctly, expectedly) flagged "excluded as no longer on the roster" -- since this run compares a
+January 2025 date against TODAY's (2026-08-01) real roster snapshot, exactly the documented
+limitation, not a new bug. A genuine live "tonight" call has no such mismatch. New regression test
+`test_resolve_active_lineup_excludes_departed_players` confirms the default preserves original
+behavior and the new param correctly excludes and renormalizes.
+
+### 28.2 Real bug: `predictive_minutes_shares`' hindsight leak in the backtest active-player-set selection
+
+The backtest's active-player SET was `oracle_minutes_shares(...).index` -- literally this exact
+historical game's real attendance (perfect hindsight on who ends up playing). The live mechanism
+this claimed to mirror, `resolve_active_lineup`, does NOT know who ends up playing -- it takes the
+trailing-window UNION of anyone who's recently appeared, excluding only players an injury report
+flags. A healthy scratch, DNP-CD, or unflagged load-management night is a scenario the live system
+structurally cannot exclude in advance; the old backtest's oracle-derived set silently excluded such
+players anyway (since they show 0 real minutes that exact game), measuring a strictly easier
+selection problem than what's actually deployed.
+
+**Fixed**: the active-player set is now ALSO derived purely from the trailing-window union, with no
+reference to the specific game's own real outcome at all -- mechanism-matched to
+`resolve_active_lineup` rather than a hindsight shortcut. New regression test
+`test_predictive_minutes_shares_has_no_hindsight_leak` confirms a player who's genuinely in the
+recent rotation but was scratched for the specific game being projected is still included (exactly
+the case the old, oracle-based selection would have wrongly excluded).
+
+This is a genuine methodology change to the input `validate_predictive_lineup_adjustment.py` and
+`run_final_holdout_check.py` both depend on -- re-ran both under the corrected mechanism per this
+project's standing discipline (never silently change a validated methodology without re-confirming
+the numbers it produced), plus a fresh direct Phase1-alone-vs-Phase1+2 isolation check (mirroring
+Sec9.4's original methodology exactly) since the dev-only result below was decisive enough to
+demand the actual decision-relevant holdout comparison, not just a dev/holdout gap check:
+
+| check | metric | ORIGINAL (hindsight-leaked) | RE-VALIDATED (fixed, honest) | still holds? |
+|---|---|---|---|---|
+| Sec9.1 predictive-mode vs Phase 1, DEV | total_mae | -0.0206 REAL IMPROVEMENT | **+0.0086 REAL REGRESSION** | **NO** |
+| | margin_mae | -0.0336 REAL IMPROVEMENT | **+0.0146 REAL REGRESSION** | **NO** |
+| | su | NOISE | NOISE | n/a |
+| Isolation check, HOLDOUT ONLY (n=2407) | total_mae | (not separately run before) | +0.0004, NOISE | -- |
+| | margin_mae | (not separately run before) | **+0.0181 REAL REGRESSION** | **NO** |
+| | su | (not separately run before) | +0.0004, NOISE | -- |
+
+**This overturns the previously-adopted Sec9.1/9.3/9.4 conclusion.** Under the honest methodology
+(no more oracle-derived active-player set), Phase 2's predictive-mode lineup adjustment does NOT
+help -- it makes MARGIN predictions genuinely WORSE, consistently on both dev and holdout, and
+doesn't meaningfully help total_mae or SU either. The confirmatory-veto protocol's core premise
+(spend one honest holdout read, let it settle the question) worked exactly as designed here: the
+answer it gave is uncomfortable, but that's the point of running it rather than trusting the
+dev-only number that motivated adopting Phase 2 in the first place.
+
+**Important nuance, not a reason to dismiss the finding**: oracle mode (real, already-known minutes
+-- Sec7's ceiling test, which never used `predictive_minutes_shares` and is UNAFFECTED by this fix)
+still shows a real improvement (total_mae -0.0205, margin_mae -0.0358, both CI excludes zero,
+reconfirmed in Sec27.5's re-validation). So lineup-awareness AS A CONCEPT genuinely carries real
+signal -- the problem is specifically that the deployable, predictive minutes-share ESTIMATION
+mechanism doesn't capture that signal well enough to net out ahead of its own noise. And this fixed
+backtest is itself not a perfect proxy for live conditions either: it now has ZERO injury
+information (RotoWire has no historical archive to backtest against, Sec27.6), while the ACTUAL
+live pipeline (`resolve_active_lineup`) DOES have real, if partial, injury exclusion via RotoWire's
+Out/Doubtful feed. That means this fixed backtest is likely a pessimistic lower bound on live
+performance, not a precise estimate of it -- the true live-deployed accuracy of Phase 2 is somewhere
+between the old (provably too-optimistic) and new (provably information-starved) numbers. What both
+extremes now agree on: the ORIGINAL "confirmed, real improvement" claim was built on a flawed test
+and cannot be trusted as-is.
+
+**This is currently live in production** (`generate_predictions.py`/`generate_props.py` both apply
+Phase 2's adjustment on every call) -- a consequential decision (disable Phase 2 pending a better
+minutes-share mechanism, keep it while investigating further, or something else) is flagged for the
+user rather than made unilaterally here. 2 new regression tests added
+(`test_predictive_minutes_shares_has_no_hindsight_leak`,
+`test_resolve_active_lineup_excludes_departed_players`) -- 46 regression tests (129 assertions)
+passing.

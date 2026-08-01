@@ -59,7 +59,9 @@ from src.models.score_distribution import (
 from src.models.home_court import fit_home_court_walk_forward
 from src.models.team_strength import add_team_ratings, build_team_game_log, project_game
 from src.models.validate_team_strength_baseline import _to_wide_games
-from src.pipeline.active_roster import MINUTES_LOOKBACK_GAMES, build_team_history, games_on_date, resolve_active_lineup
+from src.pipeline.active_roster import (
+    MINUTES_LOOKBACK_GAMES, build_team_history, games_on_date, load_current_roster_player_ids, resolve_active_lineup,
+)
 from src.pipeline.refresh_data import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
@@ -173,6 +175,7 @@ def run(game_date: str) -> pd.DataFrame:
     # with players no longer even on the team -- confirmed directly (DAL's trailing 10 games as of
     # 2023-11-08 included 3 games from 2022-23). See MODEL_DOCUMENTATION.md for the full writeup.
     team_history, team_side = build_team_history(team_log[team_log["season"] == target_season])
+    current_roster = load_current_roster_player_ids(target_season)
 
     player_ratings, player_minutes = _fit_latest_player_ratings(target_season, before_date=game_date)
     have_lineup_adjustment = not player_ratings.empty
@@ -224,9 +227,11 @@ def run(game_date: str) -> pd.DataFrame:
                 player_minutes, player_ratings, away_prior, team_side.get(row.awayTeamId, {}), MINUTES_LOOKBACK_GAMES)
 
             home_shares, home_tag = resolve_active_lineup(
-                row.homeAbbrev, home_prior, player_minutes, team_side.get(row.homeTeamId, {}), injury_report)
+                row.homeAbbrev, home_prior, player_minutes, team_side.get(row.homeTeamId, {}), injury_report,
+                current_roster_ids=current_roster.get(row.homeTeamId))
             away_shares, away_tag = resolve_active_lineup(
-                row.awayAbbrev, away_prior, player_minutes, team_side.get(row.awayTeamId, {}), injury_report)
+                row.awayAbbrev, away_prior, player_minutes, team_side.get(row.awayTeamId, {}), injury_report,
+                current_roster_ids=current_roster.get(row.awayTeamId))
 
             if not home_shares.empty and not away_shares.empty:
                 home_off_adj, home_def_adj = project_lineup_adjustment(

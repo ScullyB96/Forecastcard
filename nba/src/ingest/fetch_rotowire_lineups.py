@@ -66,7 +66,12 @@ def warn_if_stale_for_backtest(game_date: str) -> None:
     and can't have one (RotoWire has no historical archive at all, see
     this module's own docstring), so both live pipelines silently apply
     TODAY's Out/Doubtful list to whatever historical `game_date` they were
-    asked to run for.
+    asked to run for. The same limitation applies to
+    `active_roster.load_current_roster_player_ids` (`CommonTeamRoster`
+    also only ever reflects "as of whenever last fetched", not a
+    point-in-time archive) -- one warning covers both, since they're the
+    same underlying problem: a wall-clock-only signal with no historical
+    archive to backfill from.
 
     REAL GAP FOUND (2026-08-01, full-model audit): every one of this
     project's own historical spot-checks (2018-01-15, 2023-11-08,
@@ -81,11 +86,12 @@ def warn_if_stale_for_backtest(game_date: str) -> None:
     unresolvable caveat (e.g. the COVID-season edge case documented in
     `season_for_date`)."""
     if game_date != date.today().isoformat():
-        print(f"  WARNING: RotoWire's injury report has NO historical archive -- it always reflects "
-              f"REAL WALL-CLOCK TODAY ({date.today().isoformat()}), not {game_date}. Active-lineup "
-              f"resolution for this historical/backtest call is using TODAY's Out/Doubtful list, "
-              f"which may incorrectly include or exclude players relative to the real situation on "
-              f"{game_date}.", flush=True)
+        print(f"  WARNING: RotoWire's injury report and the cached team-roster snapshot both have "
+              f"NO historical archive -- they always reflect REAL WALL-CLOCK TODAY "
+              f"({date.today().isoformat()}), not {game_date}. Active-lineup "
+              f"resolution for this historical/backtest call is using TODAY's Out/Doubtful list and "
+              f"roster snapshot, which may incorrectly include or exclude players relative to the "
+              f"real situation on {game_date}.", flush=True)
 
 
 if __name__ == "__main__":
