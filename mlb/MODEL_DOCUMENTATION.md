@@ -4041,6 +4041,61 @@ bugs (task #160), not from finding a new architectural lever — which,
 after this research pass, looks like the correct place for this project's
 effort to have gone.
 
+## 11.36 Task #162: the deferred reliever-tier-selection prop-calibration
+test, finally run — task #144 closed for good (2026-08-01)
+
+Sec 11.23/props.py's own docstring explicitly deferred one question:
+game-level SU/Brier for tier-selection was a confirmed null, but its own
+specific claim (reliever-inning attribution improving PROP-level
+calibration — K props, saves/holds) was never checked. Ran it.
+
+**Method**: `build_reliever_tier_log` already gives every real relief PA
+(2023-2025) its season-long usage tercile (mopup/middle/leverage — a
+descriptive construct, appropriate for this measurement, not a live
+predictive mechanism per its own docstring) plus whether it's a real save
+situation. Attached each relief PA's real K outcome to compute (1) real
+K-rate by tier, (2) the tier MIX a situation-blind, usage-weighted baseline
+sampler would draw vs. the REAL tier mix actually observed in save
+situations specifically.
+
+**Result — real, but small, confirming sec 11.23's own post-hoc
+prediction**:
+- Real K-rate gap between tiers is genuinely large: mopup 17.8%, middle
+  21.3%, leverage 24.4% (all relief PAs) — a real 6.6-point spread, so
+  WHICH tier pitches a given inning does matter for that pitcher's own K
+  probability.
+- But real save-situation usage (85.4% leverage/13.2% middle/1.4% mopup)
+  isn't as different from the OVERALL, situation-blind usage mix (70.4%/
+  23.5%/6.1%) as the raw tier-share gap might suggest — because recency-
+  usage weighting (already the baseline's own selection mechanism) is
+  ALREADY leverage-correlated, exactly as sec 11.23's reviewer reasoning
+  predicted.
+- Net: a situation-blind baseline's IMPLIED average K-rate in real save
+  situations is 25.56%; the REAL observed average is 26.09% — a **0.53
+  percentage-point gap**. That's the entire remaining prop-calibration
+  value tier-selection could recover, and it's tiny — similar order of
+  magnitude to effects this project has repeatedly judged not worth
+  deploying elsewhere.
+- One more reason the remaining gap is this small: the highest-stakes,
+  most binary sub-case (closer identification for save props specifically)
+  already has its OWN dedicated, already-deployed mechanism
+  (`CLOSER_INNING9_RATE=0.56`, task #31, `bullpen.py`'s `sample_bullpen_plan`)
+  — tier-selection's closer-handling is largely redundant with a feature
+  that's already live. Tier-selection's only genuinely incremental
+  contribution is the broader leverage/middle/mopup distinction (setup men,
+  7th/8th-inning roles), which is exactly the ~0.5pp effect quantified
+  above.
+
+**Decision**: reliever tier-selection stays dormant/off-by-default.
+Task #144 is now closed on every lens this project checked it against —
+game-level SU/Brier (sec 11.23, null), starter-outs distribution-realism
+(sec 11.25, REAL win, shipped — that's the hook mechanism, already live),
+and now reliever-inning prop calibration (this section, real-but-immaterial
+null). No open threads remain on this mechanism; a future session doesn't
+need to re-litigate it. The underlying policy tables (hook-timing,
+tier-share) remain valid, correctly-fit descriptions of real managerial
+behavior — this is a downstream-value null, not evidence the fits are wrong.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):
