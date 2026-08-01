@@ -261,6 +261,19 @@ automatically). All the RAPM-lite/lineup-adjustment machinery is left in place, 
 available -- re-enable only after a genuinely improved minutes-projection mechanism is built and
 validated. See Sec28 for full detail.
 
+**Phase 1's long-open margin/scoring-era-drift regression -- FINALLY RESOLVED (Sec29, 2026-08-01),
+via a lever from the audit's own research pass.** Sec24 (recency-weighted league-average target
+alone) and Sec26 (reduced shrinkage strength alone) each failed/tied on their own, but each one's own
+cost sat on the metric the OTHER was good at fixing -- neither investigation had tried them
+TOGETHER. Swept a joint grid, found a genuine net win on the dev-only gates, then confirmed on real
+holdout (vs. the OLD config): total_mae -0.2605 REAL IMPROVEMENT, margin_mae -0.0194 REAL
+IMPROVEMENT, su NOISE (no harm) -- the first configuration across this entire investigation to clear
+BOTH metrics with no tradeoff. Adopted as the new production default:
+`team_strength.PRIOR_GAMES_RATING` 15.0 -> 12.0, new `LEAGUE_AVG_HALFLIFE_GAMES_RATING = 2000.0`.
+Both the live pipeline and `validate_team_strength_baseline.py` pick this up automatically (no
+explicit overrides needed); re-confirmed the new config still clearly beats naive
+(margin_mae -0.8180, an even wider gap than the original Sec1 result). See Sec29 for full detail.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -2354,3 +2367,57 @@ machinery all remain in place, fully tested, and importable -- re-enabling Phase
 one-line flag flip, but should only be done after a genuinely improved minutes-projection mechanism
 (not just re-trusting the old, hindsight-leaked one) is built and validated through this project's
 standard dev-then-holdout discipline.
+
+## 29. Phase 1's long-open margin/scoring-era-drift regression -- FINALLY RESOLVED, via a lever from the audit's own research pass (2026-08-01)
+
+The full-model audit's "untried synthesis" research angle flagged something neither Sec24 nor Sec26
+had tried: `team_strength.add_team_ratings` already accepts BOTH `league_avg_halflife_games`
+(Sec24's recency-weighted target) AND `prior_games_rating` (Sec26's shrinkage strength) as
+independent kwargs on the SAME function call -- but each investigation swept its own lever while
+leaving the other at its stock default. Sec24 (target alone) showed a real REGRESSION on margin_mae
+at every halflife tried; Sec26 (strength alone) showed a real margin_mae IMPROVEMENT but a real
+total_mae REGRESSION of larger magnitude -- each lever's own cost sat on the metric the OTHER lever
+was good at fixing, a strong hint a joint configuration might net both out at once.
+
+**Built `validate_joint_margin_fix.py`**: a 3x4 grid sweep (`prior_games_rating` in {8,10,12} x
+`league_avg_halflife_games` in {1000,2000,5000,10000}) on the recent-dev slice (fit on the full dev
+range, same Stage-1-screen discipline as every prior attempt), requiring a genuine NET WIN (no real
+regression on either metric, real improvement on at least one) to advance. Result: 9 of 12 grid
+cells cleared the bar outright; `prior_games_rating=12.0, halflife=2000.0` was the strongest (best
+combined delta), and passed Stage 2 (full dev range) cleanly too: total_mae -0.0766 REAL
+IMPROVEMENT, margin_mae -0.0113 REAL IMPROVEMENT, su NOISE.
+
+**One-time confirmatory holdout read** (`run_joint_margin_fix_holdout_check.py`), the decision-
+relevant comparison (new config vs. the OLD prior_games=15/flat-target config, holdout games only):
+
+| metric | delta | verdict |
+|---|---|---|
+| total_mae | -0.2605 | REAL IMPROVEMENT |
+| margin_mae | -0.0194 | REAL IMPROVEMENT |
+| su | +0.0000 | NOISE (no harm) |
+
+**The first configuration in this entire investigation (Sec24, Sec26, this) to clear BOTH metrics
+on real holdout data with no tradeoff.** One honest caveat: the new candidate's OWN dev-vs-holdout
+GAP on margin_mae is still a real widening (dev=10.4608 -> holdout=11.3312) -- the underlying
+scoring-era-drift phenomenon is real and not eliminated by this fix. But that's a different question
+from "does this beat what's currently deployed", which the holdout-only comparison answers
+unambiguously yes: the new config copes with that same real difficulty measurably better than the
+old one did.
+
+**Adopted as the new production default**: `team_strength.py`'s `PRIOR_GAMES_RATING` changed
+15.0 -> 12.0; new constant `LEAGUE_AVG_HALFLIFE_GAMES_RATING = 2000.0` added, and
+`add_team_ratings`'s `league_avg_halflife_games` default changed from `None` (flat/infinite-memory)
+to this constant -- `None` remains available as an explicit override for any caller that specifically
+wants the original pre-Sec29 behavior. Since neither the live pipeline nor
+`validate_team_strength_baseline.py` pass explicit overrides, both automatically pick up the new,
+validated defaults with no further code changes needed. Re-ran the naive-floor comparison to confirm
+the new config still clearly beats naive (total_mae -0.2506, margin_mae -0.8180, su +0.0686, all
+REAL IMPROVEMENT -- an even larger margin_mae gap over naive than the original Sec1 result, since
+naive doesn't benefit from either lever at all). Live spot-check (2025-01-15) confirms updated
+predictions flow through automatically.
+
+This closes out a genuinely long-running open problem (first diagnosed Sec9.5, worked on across
+Sec16-19, Sec24, Sec26) -- not through a cleverer new mechanism, but by finally testing the
+COMBINATION of two already-built, already-tested levers together, which is exactly the kind of gap
+a dedicated audit/research pass is suited to catch that iterative in-the-moment investigation can
+miss.

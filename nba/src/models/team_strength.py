@@ -14,8 +14,25 @@ from src.ingest.fetch_schedule import FIRST_DEV_SEASON, season_str
 from src.models.shrinkage import add_walk_forward_mean, add_walk_forward_rate
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
-PRIOR_GAMES_RATING = 15.0  # placeholder, un-calibrated -- see MODEL_DOCUMENTATION.md
+PRIOR_GAMES_RATING = 12.0  # ADOPTED 2026-08-01 (was 15.0) -- see LEAGUE_AVG_HALFLIFE_GAMES_RATING's
+# docstring below for the full joint-fix writeup; MODEL_DOCUMENTATION.md Sec29.
 PRIOR_GAMES_PACE = 15.0
+
+LEAGUE_AVG_HALFLIFE_GAMES_RATING = 2000.0  # ADOPTED 2026-08-01 (was flat/infinite-memory, i.e. no
+# EWMA at all) -- the first configuration to genuinely resolve Phase 1's long-open margin/scoring-
+# era-drift regression (Sec9.5). Two levers were tried INDEPENDENTLY first and neither alone was a
+# clean win: Sec24 (recency-weighted league-average target alone) showed a REAL REGRESSION on
+# margin_mae at every halflife tested; Sec26 (reduced shrinkage strength alone) showed a REAL
+# margin_mae IMPROVEMENT but a REAL total_mae REGRESSION of larger magnitude -- a tradeoff, not a
+# win. Testing them TOGETHER (prior_games_rating=12.0 + this halflife) for the first time (a
+# full-model-audit research-pass lever, 2026-08-01) gave a genuine net win on BOTH metrics, on REAL
+# HOLDOUT data: total_mae -0.2605 (REAL IMPROVEMENT), margin_mae -0.0194 (REAL IMPROVEMENT), su
+# NOISE (no harm) -- the first result in this entire investigation (Sec24/26/this) to clear both
+# metrics at once. The candidate's OWN dev-vs-holdout GAP on margin_mae still shows a real widening
+# (the underlying scoring-era-drift phenomenon is real and not eliminated) -- but it copes with that
+# same real difficulty measurably BETTER than the prior (flat-cumulative, prior_games=15) config
+# did, which is the actual decision-relevant comparison. See run_joint_margin_fix_holdout_check.py /
+# validate_joint_margin_fix.py for the full sweep and one-time confirmatory read.
 
 
 def build_team_game_log(start_year: int, end_year: int) -> pd.DataFrame:
@@ -65,31 +82,26 @@ def build_team_game_log(start_year: int, end_year: int) -> pd.DataFrame:
 
 
 def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = 0.0,
-                      league_avg_halflife_games: float | None = None,
+                      league_avg_halflife_games: float | None = LEAGUE_AVG_HALFLIFE_GAMES_RATING,
                       prior_games_rating: float = PRIOR_GAMES_RATING,
                       prior_games_pace: float = PRIOR_GAMES_PACE) -> pd.DataFrame:
     """Adds walk-forward shrunk pace_shrunk_mean, rtg_attack_rate (OFF),
     rtg_defense_rate (DEF), and their league-average companions.
 
-    `league_avg_halflife_games` (default None, i.e. the original flat
-    infinite-memory league average): passed straight through to
-    `shrinkage.py`'s primitives -- see their docstrings for the
-    scoring-era-drift motivation (Sec9.5/Sec24). None preserves the
-    exact original, already-validated Phase 1 behavior.
+    `league_avg_halflife_games` (default `LEAGUE_AVG_HALFLIFE_GAMES_RATING`,
+    ADOPTED 2026-08-01 -- see that constant's own docstring for the full
+    joint-fix writeup): passed straight through to `shrinkage.py`'s
+    primitives. Pass `None` explicitly to get the ORIGINAL flat infinite-
+    memory league average instead (kept available, e.g. for a script that
+    specifically wants to reproduce a pre-Sec29 historical result).
 
     `prior_games_rating`/`prior_games_pace` (default the module-level
-    constants, i.e. exactly the original behavior): overridable shrinkage-
-    STRENGTH knobs, distinct from `league_avg_halflife_games` (which
-    changes what the blending TARGET tracks, not how strongly a team's
-    own rating is pulled toward it). Added to test whether a real,
-    confirmed widening of cross-team quality spread in the holdout era
-    (Sec25/26 -- margin-spread std rose from ~4-5 in most of dev to
-    5.6-6.2 in 2023-2025) means the fixed prior_games=15 (calibrated
-    implicitly against the dev era's typical spread) now over-shrinks
-    relative to the TRUE current spread, worsening margin calibration
-    specifically (a fixed shrinkage weight pulls teams too close to
-    average when real differentiation has genuinely grown) -- see
-    `validate_shrinkage_strength_fix.py`."""
+    constants -- `PRIOR_GAMES_RATING` is also 2026-08-01-adopted, see its
+    own docstring): overridable shrinkage-STRENGTH knobs, distinct from
+    `league_avg_halflife_games` (which changes what the blending TARGET
+    tracks, not how strongly a team's own rating is pulled toward it).
+    Neither lever alone was a clean win (Sec24 target-only, Sec26
+    strength-only) -- both were needed together (Sec29)."""
     log = add_walk_forward_mean(log, "pace", prior_games_pace, prefix="pace",
                                  cross_season_weight=cross_season_weight,
                                  league_avg_halflife_games=league_avg_halflife_games)
