@@ -1678,6 +1678,54 @@ game/player is bug-free, but it's real, positive evidence for the specific chain
 (share engines → pass-rate/game-script adjustment → volume → per-touch rate engines →
 yards/receptions/TD probability), not just an assertion that the code "looks right."
 
+**Re-audited 2026-07** after rounds 3-4 changed the calibration mechanism (auto-refit linear,
+§9.4) and the game simulator (recentering, half-boundary modeling, §9.5) — same discipline,
+not just re-reading the code. Traced KC (home) vs. DEN, `our_margin`/`our_total` =
+market-implied (3.0/42.5, no active CB/QB-swap flags): Rashee Rice's `td_probability=0.430`
+back-solved cleanly through the live `TD_PROB_CALIB_A/B=(0.042, 0.820)` auto-refit values to
+`raw_td_prob≈0.473` → `proj_rec_tds≈0.641` at a ≈5.6%-per-target rate, plausible for a
+high-usage WR1 given `rec_td` EB `prior_weight≈269`. Game-level: `sim_margin_std=14.46`
+(real historical range confirmed ~13-14, §9.5), `sim_total_std=12.17` (plausible for real
+NFL total-points dispersion), `our_home_pts + our_away_pts` exactly equals `our_total`.
+Clean again — the calibration and simulator changes since the last audit didn't introduce a
+new scale/sign issue in this chain.
+
+Two minor, non-bug findings from this pass, worth recording rather than fixing:
+- `our_home_pts`/`our_away_pts` are each independently rounded to 1 decimal from the
+  underlying `our_margin`/`our_total`, so `our_home_pts − our_away_pts` can disagree with the
+  displayed `our_margin` by up to ~0.1 point after double-rounding (confirmed: 2.90 vs. 3.00
+  on this exact game). Pre-existing since Phase 0, purely cosmetic, far too small to affect
+  any real decision — not worth the code churn to fix.
+- `DriveOutcomeSampler.sample_end_of_half()` would raise (empty-pool `rng.integers(0, 0)`) if
+  ever constructed without real `end_of_half_drives` data — currently unreachable (the sole
+  call site, `build_simulator_for_season_range`, always supplies real data, and the dataset
+  has 4,077 real end-of-half drives), but a latent fragility if a future caller ever
+  constructs `DriveOutcomeSampler` directly against a small/filtered dataset.
+
+### 12.1.2 Injury-flow rehearsal (2026-07, ahead of the season — no real 2026 injury data exists yet)
+
+Two checks, one real, one synthetic (real 2026 injury-report data still 404s from
+`nfl_data_py` as of this writing, so a live end-to-end rehearsal isn't possible yet):
+
+- **Real**: the manual-override mechanism (§6.2, `known_outs_2026.json`) already has a real,
+  verified entry (Zach Charbonnet, SEA RB, PUP list) sitting in production right now.
+  Confirmed directly against the live `props_2026_wk1.parquet`: Charbonnet renders with
+  `status_note="OUT"`, `proj_carries=0`, and his workload is correctly reallocated among
+  SEA's remaining backs (Emanuel Wilson 12.2 carries, Jadarian Price 17.5 via the
+  draft-capital/Clay rookie fallback, etc.) — the whole `out_player_ids_for_team` →
+  `reallocate_shares` chain is confirmed working on real, live data, not a hypothetical.
+- **Synthetic** (no real CB-out flag exists yet): injected an away-team CB-out flag for a
+  real game (KC/DEN, market_spread=3.0) and traced the full downstream chain by hand.
+  `apply_joint_adjustment` correctly produced `+2.428` (`-0.018 + 2.446×(1-0)`, exactly
+  matching the current production coefficient), `our_margin` correctly moved 3.00→5.43, and
+  the recentered game-simulator win-probability/moneyline correctly followed
+  (58.3%/−140 → 67.3%/−206) — confirming the CB-flag → margin-adjustment → recentered-
+  simulator chain is wired correctly end-to-end, not just each piece in isolation.
+
+Recommend repeating the synthetic check (or, better, confirming directly) once real 2026
+injury-report data actually starts publishing — this rehearsal is real verification of the
+mechanism, not a substitute for watching it fire on a genuine first case.
+
 ### 12.2 The `np.polyfit(...)[::-1]` slope/intercept swap — now fixed via `src/utils/stats.py`
 `np.polyfit(x, y, 1)` returns `[slope, intercept]` (highest degree first). A `[::-1]`
 reversal, if the receiving variable names aren't *also* swapped to match, silently produces
@@ -1735,6 +1783,16 @@ stat prior weights (`qb_passing_stats.py`: `YARDS_PRIOR_WEIGHT`/`TD_PRIOR_WEIGHT
 `INT_PRIOR_WEIGHT`, all still swept constants) have no downstream calibration correction
 depending on them, so there's no analogous coupling risk there — unlike `TD_PROB_CALIB`,
 nothing would silently go stale if these were later re-fit via empirical-Bayes.
+
+**Re-swept 2026-07** across everything rounds 3-4 touched (margin/total recentering, the
+explicit half-boundary drive model, the auto-refit-linear TD calibrator, CLV
+snapshot/reconciliation): all clean, no analogous bug found. `JOINT_COEFS_FORWARD`/
+`SWAP_B_MARKET` are *deliberately* frozen rather than auto-refit (see the constant's own
+comment in `injury_adjustment.py`/`weekly_update.py`) — a considered exception to this
+project's "recompute fresh every run" convention, not an oversight, given how much scrutiny
+that specific coefficient required to arrive at. One dormant robustness gap found (not a live
+bug, see §12.1.1's re-audit): `DriveOutcomeSampler.sample_end_of_half()` would crash on an
+empty end-of-half pool, unreachable via the current single call site.
 
 ### 12.3 Walk-forward, no-lookahead discipline, everywhere
 Every engine's `predict()` is called *before* `update()` for a given row, and every
