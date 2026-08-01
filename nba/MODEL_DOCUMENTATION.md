@@ -2421,3 +2421,16 @@ Sec16-19, Sec24, Sec26) -- not through a cleverer new mechanism, but by finally 
 COMBINATION of two already-built, already-tested levers together, which is exactly the kind of gap
 a dedicated audit/research pass is suited to catch that iterative in-the-moment investigation can
 miss.
+
+## 30. OREB shrinkage-strength lever, fully exhausted (2026-08-01)
+
+A second audit lever: Sec26 tested REDUCING OREB's shrinkage strength (`PRIOR_GAMES['oreb']`,
+current 20.0) down to 5/8/10/12/15 -- all monotonically WORSE, closing in on but never beating the
+current default. The untried direction the audit flagged: nobody had tried MORE shrinkage (the
+monotonic pattern pointed that way). Swept 25/30/40/60/100 on the recent-dev slice: 25/30/40 are
+NOISE (no real difference from the current default), 60/100 are REAL REGRESSION. **`PRIOR_GAMES['oreb']=20.0`
+sits at a genuine local optimum in BOTH directions now tested** -- this specific lever (shrinkage
+strength) is fully exhausted for OREB. Combined with Sec26's earlier finding that the recency-
+weighted league average moved OREB from a clear holdout loss to a statistical tie (real progress,
+but insufficient to adopt), OREB team-level anchoring's tractable levers are now genuinely spent;
+it remains unanchored (bottom-up player-sum only) per Sec23's original decision.
