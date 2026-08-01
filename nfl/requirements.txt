@@ -10,3 +10,4 @@ appdirs==1.4.4
 requests==2.34.2
 pdfplumber==0.11.10
 kaggle==2.2.3
+psycopg2-binary==2.9.12
