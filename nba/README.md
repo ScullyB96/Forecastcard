@@ -56,8 +56,12 @@ pip install -r requirements.txt
     rate-category models (minutes; 2PT/3PT/FT attempts+makes; OREB/DREB; AST/TOV; STL/BLK)
   - `matchup_difficulty.py` — the 3-level defender/team-scheme difficulty hierarchy, wired into
     the live props pipeline (see `MODEL_DOCUMENTATION.md`)
-  - `usage_allocation.py` — the macro-anchor + micro-reallocation composition rule (points
-    anchored to the game-score model's own team total; REB/AST/TOV/STL/BLK left unanchored, v1)
+  - `team_stat_rates.py` — team-level walk-forward DREB/AST/TOV/STL/BLK/OREB totals (mirrors
+    `team_strength.py`'s pace x rating architecture); `ADOPTED_CATEGORIES` excludes OREB, the one
+    category that failed the confirmatory holdout check (see `MODEL_DOCUMENTATION.md` Sec23)
+  - `usage_allocation.py` — the macro-anchor + micro-reallocation composition rule (points and
+    DREB/AST/TOV/STL/BLK anchored to a team total -- RAPM's for points, `team_stat_rates.py`'s for
+    the rest; OREB left unanchored)
   - `prop_distribution.py` — player-level predictive distributions (Normal/Student-t for
     high-count stats, Poisson/Negative-Binomial for low-count ones) and `over_under_prob`
   - `final_holdout_check.py`, `bootstrap_significance.py`, `metrics_ledger.py` — the shared

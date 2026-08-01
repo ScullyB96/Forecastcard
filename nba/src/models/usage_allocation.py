@@ -17,17 +17,21 @@ as two independent additive stacks on the same number:
   TOTAL. `team_total_points` is the ONLY place the team total enters --
   matchup difficulty must never also rescale it, or the same signal moves
   the number twice.
-- REB/AST/TOV/STL/BLK (UNANCHORED, v1): Phase 1 has no existing team-level
-  projection for these 5 categories -- building one is real additional
-  scope beyond the user's verbatim ask (a full rebound/assist/turnover
-  team-total model). v1 reports each player's own rate-model projection
-  (`oreb_proj`, `ast_proj`, `blk_proj`, etc.) DIRECTLY, with NO share-based
-  rescaling. This is honestly unanchored, not silently gold-plated: no
-  RAPM-conflict exists here specifically because there is no second
-  team-level signal yet to conflict with. A team-level anchor for these
-  categories is a flagged fast-follow (see MODEL_DOCUMENTATION.md), not an
-  oversight -- do not add one without first validating it the same way
-  Phase 1's team-level models were validated.
+- DREB/AST/TOV/STL/BLK (ANCHORED, Task #24): `team_stat_rates.py` builds a
+  team-level walk-forward for/against combine for all 6 of
+  OREB/DREB/AST/TOV/STL/BLK, mirroring Phase 1's pace x rating
+  architecture. 5 of the 6 cleared the one-time confirmatory holdout check
+  (see `team_stat_rates.ADOPTED_CATEGORIES` and MODEL_DOCUMENTATION.md
+  Sec23) and are anchored here via the exact same `compute_usage_shares` +
+  `allocate_team_total` mechanism as points -- these two functions were
+  already stat-agnostic in their math, just named for points originally.
+- OREB (UNANCHORED): the one category whose team-level model genuinely
+  lost to naive on real holdout data (not just a widening gap -- the
+  comparison flips sign), so it's deliberately excluded from anchoring and
+  falls back to each player's own rate-model projection (`oreb_proj`)
+  DIRECTLY, with no share-based rescaling -- honestly unanchored, not
+  silently gold-plated. Left as a flagged follow-up investigation (see
+  MODEL_DOCUMENTATION.md Sec23), not force-adopted.
 """
 
 import pandas as pd
@@ -80,10 +84,11 @@ def compute_usage_shares(adjusted_points: pd.Series) -> pd.Series:
     return clipped / total
 
 
-def allocate_team_points(usage_shares: pd.Series, team_total_points: float) -> pd.Series:
-    """The macro anchor itself: `final_points_p = usage_share_p x
-    team_total_points`. `team_total_points` must already be Phase 1+2's
-    RAPM-adjusted `team_strength.project_game` output for this team in
-    this specific game -- this function does not compute or adjust that
-    total, only distributes it."""
-    return usage_shares * team_total_points
+def allocate_team_total(usage_shares: pd.Series, team_total: float) -> pd.Series:
+    """The macro anchor itself: `final_p = usage_share_p x team_total`.
+    For points, `team_total` must already be Phase 1+2's RAPM-adjusted
+    `team_strength.project_game` output; for DREB/AST/TOV/STL/BLK, it's
+    `team_stat_rates.project_team_stat`'s output for that category -- this
+    function is stat-agnostic and does not compute or adjust the total
+    itself, only distributes whatever total it's given."""
+    return usage_shares * team_total

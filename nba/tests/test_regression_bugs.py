@@ -30,8 +30,10 @@ from src.models.player_playmaking_rates import PRIOR_TOUCHES_AST, PRIOR_TOUCHES_
 from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FTA, add_scoring_rates
 from src.models.prop_distribution import log_score, over_under_prob
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
-from src.models.usage_allocation import allocate_team_points, compute_usage_shares
+from src.models.usage_allocation import allocate_team_total, compute_usage_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
+from src.models.team_stat_rates import ADOPTED_CATEGORIES, STAT_COLUMNS, build_team_stat_game_log, project_team_stat
+from src.pipeline.generate_props import _team_stat_totals
 
 FAILURES = []
 
@@ -592,14 +594,14 @@ def test_negbin_parameterization_matches_target_mean_and_variance():
 def test_usage_shares_sum_to_team_total_not_double_counted():
     """`usage_allocation.py`'s macro-anchor + micro-reallocation rule: the
     team total must be distributed EXACTLY once. This test confirms
-    `allocate_team_points(compute_usage_shares(raw), team_total)` sums
+    `allocate_team_total(compute_usage_shares(raw), team_total)` sums
     back to exactly `team_total` for an arbitrary raw split -- the
     concrete, checkable form of "RAPM sets the total, matchup difficulty
     only reshapes shares, never both move the same number"."""
     import pandas as pd
     raw = pd.Series({"A": 20.0, "B": 10.0, "C": 5.0})
     team_total = 112.0
-    final = allocate_team_points(compute_usage_shares(raw), team_total)
+    final = allocate_team_total(compute_usage_shares(raw), team_total)
     check("allocated points sum to exactly the team total (no double-counting, no leakage)",
           abs(final.sum() - team_total) < 1e-9, f"got {final.sum()}, expected {team_total}")
     check("higher raw projection gets a proportionally higher final share",
@@ -868,6 +870,96 @@ def test_team_history_season_filter_excludes_prior_season_games():
           "g_2022_a" not in team_history[1] and "g_2022_b" not in team_history[1])
 
 
+def test_team_stat_game_log_for_against_symmetry():
+    """Task #24: `build_team_stat_game_log` merges the same team-totals
+    frame into a game TWICE (once as `_for`, once as the opponent's
+    `_against`) via two separate renamed copies -- this test locks in that
+    the merge actually produces the correct cross-team symmetry (team A's
+    `{label}_for` must equal team B's `{label}_against` for the same real
+    game, and vice versa), using one real cached season rather than a
+    synthetic log since the function reads parquet files directly (no
+    injectable log parameter)."""
+    log = build_team_stat_game_log(2023, 2023)
+    if log.empty:
+        print("[SKIP] test_team_stat_game_log_for_against_symmetry -- no 2023 data cached")
+        return
+    game_id = log["gameId"].iloc[0]
+    game = log[log["gameId"] == game_id]
+    check("exactly two team-rows per game", len(game) == 2, f"got {len(game)}")
+    a, b = game.iloc[0], game.iloc[1]
+    for label in STAT_COLUMNS:
+        check(f"{label}: team A's for == team B's against",
+              a[f"{label}_for"] == b[f"{label}_against"],
+              f"A_for={a[f'{label}_for']}, B_against={b[f'{label}_against']}")
+        check(f"{label}: team B's for == team A's against",
+              b[f"{label}_for"] == a[f"{label}_against"],
+              f"B_for={b[f'{label}_for']}, A_against={a[f'{label}_against']}")
+
+
+def test_project_team_stat_matches_ratio_idiom_formula():
+    """Pure-function check that `project_team_stat` implements the exact
+    same multiplicative-ratio idiom as `team_strength.project_game`
+    (league_avg x (attack/league_avg) x (defense/league_avg)), generalized
+    to an arbitrary for/against stat pair with no pace/100 rescaling
+    (unlike points, these stats are already whole-game totals, not
+    per-100-possession rates)."""
+    home_proj, away_proj = project_team_stat(
+        home_attack=30.0, home_defense=25.0, away_attack=28.0, away_defense=27.0, league_avg=26.0)
+    expected_home = 26.0 * (30.0 / 26.0) * (27.0 / 26.0)
+    expected_away = 26.0 * (28.0 / 26.0) * (25.0 / 26.0)
+    check("home projection matches the ratio-idiom formula exactly",
+          abs(home_proj - expected_home) < 1e-9, f"got {home_proj}, expected {expected_home}")
+    check("away projection matches the ratio-idiom formula exactly",
+          abs(away_proj - expected_away) < 1e-9, f"got {away_proj}, expected {expected_away}")
+
+
+def test_adopted_categories_excludes_oreb_holdout_failure():
+    """Real finding (2026-08-01, Task #24's one-time confirmatory holdout
+    check): OREB is the one team-stat category whose model/naive
+    comparison FLIPS SIGN on real holdout data (model loses to naive,
+    3.0661 vs 3.0401 MAE) -- a genuine veto, not just a widening dev/
+    holdout gap. `ADOPTED_CATEGORIES` must exclude it while still leaving
+    it in `STAT_COLUMNS` (so validate_team_stat_rates.py/
+    run_team_stat_holdout_check.py still check it every time, in case a
+    future fix earns it a re-look) -- the other 5 categories (which beat
+    naive in absolute terms on holdout even where the gap itself widened)
+    must all be present."""
+    check("oreb is excluded from ADOPTED_CATEGORIES", "oreb" not in ADOPTED_CATEGORIES)
+    check("oreb is still tracked in STAT_COLUMNS (validated every run, just not anchored)",
+          "oreb" in STAT_COLUMNS)
+    check("the other 5 categories are all adopted",
+          set(ADOPTED_CATEGORIES) == {"dreb", "ast", "tov", "stl", "blk"}, f"got {ADOPTED_CATEGORIES}")
+
+
+def test_team_stat_totals_falls_back_to_empty_when_team_missing():
+    """`generate_props._team_stat_totals` is the live wiring's per-game
+    combine step -- must return real per-category (home, away) totals when
+    both teams have a team-stat history row, and an honest empty dict (not
+    a crash, not a silently-zero total) when either team is missing from
+    `latest_team_stat` (e.g. a genuine first-game-of-the-season live call),
+    so the caller's own fallback-to-unanchored-bottom-up branch actually
+    triggers instead of being fed a bogus zero."""
+    latest = pd.DataFrame({
+        **{f"{label}_attack_rate": [30.0, 28.0] for label in ADOPTED_CATEGORIES},
+        **{f"{label}_defense_rate": [25.0, 27.0] for label in ADOPTED_CATEGORIES},
+        **{f"{label}_league_avg": [26.0, 26.0] for label in ADOPTED_CATEGORIES},
+    }, index=pd.Index([100, 200], name="team"))
+
+    totals = _team_stat_totals(latest, home_id=100, away_id=200)
+    check("every adopted category present in the result", set(totals) == set(ADOPTED_CATEGORIES))
+    for label in ADOPTED_CATEGORIES:
+        expected_home, expected_away = project_team_stat(
+            home_attack=30.0, home_defense=25.0, away_attack=28.0, away_defense=27.0, league_avg=26.0)
+        check(f"{label}: home total matches project_team_stat directly",
+              abs(totals[label]["home"] - expected_home) < 1e-9)
+        check(f"{label}: away total matches project_team_stat directly",
+              abs(totals[label]["away"] - expected_away) < 1e-9)
+
+    missing = _team_stat_totals(latest, home_id=100, away_id=999)
+    check("a team missing from latest_team_stat falls back to an empty dict, not a crash or a zero",
+          missing == {}, f"got {missing}")
+
+
 if __name__ == "__main__":
     test_possession_counter_uses_teamid_not_cumulative_description()
     test_score_forward_fill_ignores_placeholder_zero_on_non_scoring_rows()
@@ -901,6 +993,10 @@ if __name__ == "__main__":
     test_season_for_date_resolves_purely_from_calendar()
     test_generate_props_before_filter_excludes_on_and_after_date()
     test_team_history_season_filter_excludes_prior_season_games()
+    test_team_stat_game_log_for_against_symmetry()
+    test_project_team_stat_matches_ratio_idiom_formula()
+    test_adopted_categories_excludes_oreb_holdout_failure()
+    test_team_stat_totals_falls_back_to_empty_when_team_missing()
 
     print()
     if FAILURES:

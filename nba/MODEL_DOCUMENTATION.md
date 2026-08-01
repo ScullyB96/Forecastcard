@@ -167,6 +167,19 @@ confirming the fix is correctly scoped. 32 regression tests (67 assertions) pass
 consecutive spot-checks, two real bugs the aggregate bootstrap validation never could have caught
 -- exactly the value of testing against real outcomes.
 
+**Team-level anchoring for DREB/AST/TOV/STL/BLK, closing a long-flagged gap (Sec23, 2026-08-01):**
+built `team_stat_rates.py` (mirroring `team_strength.py`'s pace x rating architecture, no new
+ingest -- aggregates the already-cached player box scores to team level). All 6 categories beat
+naive on dev; the one-time confirmatory holdout check found AST/TOV/STL showing the SAME
+already-diagnosed era-trend/regime-change gap-widening as their player-level counterparts (Sec16-19)
+but still net-beating naive on holdout in absolute terms, so adopted anyway (same precedent as
+Sec15). OREB is a genuine, different result: it actually LOSES to naive on holdout (not just a
+smaller margin) -- a real veto, left unanchored and flagged for future investigation rather than
+force-adopted. 5 of 6 categories now wired live via the same macro-anchor + micro-reallocation rule
+points already used (`usage_allocation.allocate_team_total`, generalized from
+`allocate_team_points`). 36 regression tests (97 assertions) passing. See Sec23 for the full
+writeup.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -1624,7 +1637,7 @@ and doesn't disturb dates where this particular issue never applied. One new reg
 (`build_team_history` with a pre-season-filtered log excludes prior-season gameIds entirely, not
 just deprioritizes them). 32 regression tests (67 assertions) passing.
 
-**The pattern worth naming**: two consecutive real spot-checks each found a genuine, distinct bug
+**Pattern worth naming (before Sec23's follow-up work)**: two consecutive real spot-checks each found a genuine, distinct bug
 that months of aggregate dev/holdout bootstrap validation never would have surfaced, because both
 bugs are specifically about how the LIVE ENTRY POINTS resolve "recent/current" state when queried
 for an arbitrary date -- a concern the walk-forward-correctness bootstrap protocol was never
@@ -1634,3 +1647,77 @@ LIVE CALLER'S notion of "the last N games" is scoped correctly). Real, hands-on 
 against actual outcomes found real problems that no amount of additional aggregate statistical
 rigor would have caught -- exactly the value the user's original "test a day from last year"
 question was asking for.
+
+## 23. Team-level anchoring for OREB/DREB/AST/TOV/STL/BLK (2026-08-01) -- 5 of 6 categories adopted; OREB genuinely fails holdout
+
+After two consecutive real spot-check bugs (Sec21/22), moved to a planned improvement rather than
+more ad hoc spot-checking: closing `usage_allocation.py`'s long-flagged gap where REB/AST/TOV/
+STL/BLK had no team-level macro anchor at all (only points did, via Phase 1+2's RAPM-adjusted
+team total). Built `src/models/team_stat_rates.py`, mirroring `team_strength.py`'s pace x rating
+architecture exactly: each of the 6 categories gets a FOR (team's own total)/AGAINST (opponent's
+total that game) pair, aggregated from the ALREADY-cached `boxscore_trad_player_*.parquet` player
+box scores (grouped up to team level -- no new ingest needed), walk-forward shrunk via the SAME
+`shrinkage.add_walk_forward_rate` primitive Phase 1 already uses for OFF_RATING/DEF_RATING, then
+combined via the SAME multiplicative-ratio idiom `team_strength.project_game` uses for pace x
+rating (no pace/100 rescaling needed here, since these are already whole-game totals, not
+per-100-possession rates).
+
+**Dev-only validation (`validate_team_stat_rates.py`): clean sweep, all 6 categories beat naive.**
+Paired bootstrap (5,000 resamples) vs. each team's own naive trailing-average floor, full dev
+range (21,476 team-sides): OREB 2.9059 vs 2.9269, DREB 4.1414 vs 4.2243, AST 3.7422 vs 3.8157, TOV
+2.9518 vs 3.0200, STL 2.2458 vs 2.2811, BLK 1.8935 vs 1.9308 -- every category a REAL IMPROVEMENT,
+CI excluding zero. A materially better dev-only strike rate than the props subsystem's own
+per-player fast-follow attempts (Sec15-17, where most attempts failed), likely because team-level
+aggregates are inherently lower-variance than individual player rates.
+
+**The one-time confirmatory holdout check (`run_team_stat_holdout_check.py`) told a more nuanced
+story.** 4 of 6 categories showed a REAL (not noise) dev-vs-holdout MAE gap: OREB (+0.0899,
++0.2323), AST (+0.0698, +0.2513), TOV (+0.0313, +0.1665), STL (+0.1325, +0.2411). DREB and BLK came
+back NOISE (gap CI includes zero). At first glance this looks like 4 vetoes -- but the confirmatory-
+veto protocol's actual question is a GAP (did performance degrade from dev to holdout), which is a
+different question from "does the model still beat naive on real holdout data." Computed that
+second, decision-relevant comparison directly:
+
+| category | dev: model vs naive | holdout: model vs naive | model beats naive on holdout? |
+|---|---|---|---|
+| OREB | 2.9059 vs 2.9269 | 3.0661 vs 3.0401 | **NO -- model LOSES** |
+| AST  | 3.7422 vs 3.8157 | 3.9014 vs 3.9856 | yes |
+| TOV  | 2.9518 vs 3.0200 | 3.0503 vs 3.1423 | yes |
+| STL  | 2.2458 vs 2.2811 | 2.4322 vs 2.4475 | yes |
+| DREB | 4.1414 vs 4.2243 | 4.1276 vs 4.2467 | yes |
+| BLK  | 1.8935 vs 1.9308 | 1.8937 vs 1.9307 | yes |
+
+**AST/TOV/STL's widening gap is the same already-diagnosed phenomenon, not a new problem**: era-
+driven league-wide trend shifts (AST/TOV) and steals' known 2024-2025 regime change (Sec16-19,
+where three increasingly sophisticated historical-extrapolation fixes all failed to close this
+exact gap at the PLAYER level and the investigation was deliberately stopped) -- both propagate up
+to the team-level aggregate, which is expected since a team total is just a sum of player totals.
+Exactly like OREB/AST's player-level prior retune in Sec15 ("the gap didn't close, but absolute
+performance still held up"), these 3 categories are adopted anyway: what matters for a live
+prediction is absolute accuracy against the naive floor in the era it's actually deployed against,
+not whether the gap between two historical ranges is zero.
+
+**OREB is a genuine, different kind of result: a real veto, not just a widening gap.** The model/
+naive comparison FLIPS SIGN on holdout -- the team-level OREB model actually loses to the naive
+floor on real unseen data, not merely "improves by less than on dev." This is not treated as a bug
+to chase (per Sec16-19's hard-won lesson: don't retry the same family of historical-extrapolation
+fix a 4th time on a name-different-but-structurally-similar problem) -- it's left as a documented,
+flagged follow-up. `team_stat_rates.ADOPTED_CATEGORIES = ("dreb", "ast", "tov", "stl", "blk")`
+excludes OREB explicitly while `STAT_COLUMNS` keeps it so every future validation run still checks
+it, in case a genuinely different approach earns it a re-look later.
+
+**Wired into the live pipeline** (`generate_props.py`): `usage_allocation.compute_usage_shares` +
+the renamed `allocate_team_total` (was `allocate_team_points` -- the math was always stat-agnostic,
+just named for its first use) now anchor DREB/AST/TOV/STL/BLK the same way points was always
+anchored, with the team-level total supplied by `team_stat_rates.project_team_stat` instead of
+RAPM. Falls back to the raw bottom-up per-player projection (unanchored, flagged
+`anchored_to_team_total: False`) if either team has no team-stat history yet (e.g. a genuine
+first-game-of-season live call) -- same honest-fallback convention used everywhere else in this
+pipeline. OREB continues to report each player's own rate-model projection directly, exactly as
+before. Confirmed on the real 2025-01-15 slate: team-level sums for every anchored category land
+in realistic per-game ranges (DREB ~30-35, AST ~23-32, TOV ~12-16, STL ~7-10, BLK ~4-7 per team),
+and `anchored_to_team_total` correctly reads 1.0 for points/dreb/ast/tov/stl/blk and 0.0 for
+oreb/2pt/3pt/ft (the last three were never anchored, matchup-adjusted makes aside). 4 new
+regression tests added (for/against symmetry in `build_team_stat_game_log`, the ratio-idiom combine
+formula, `ADOPTED_CATEGORIES` correctly excluding OREB, and `_team_stat_totals`'s fallback-to-empty
+behavior when a team is missing) -- 36 regression tests (97 assertions) passing.

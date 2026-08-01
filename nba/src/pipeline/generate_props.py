@@ -16,14 +16,20 @@ today).
   OT, so this is the correct expectation for a PRE-game projection, not an
   approximation error.
 - REB/AST/TOV/STL/BLK need PROJECTED rebound-chances/touches for tonight,
-  which no dedicated model exists for (out of scope vs. the user's
-  verbatim ask -- see `usage_allocation.py`'s module docstring on the
-  unanchored categories). Approximated here via each player's own trailing
-  chances-per-minute / touches-per-minute (expanding-shrinkage, exposure =
-  minutes) x their projected minutes -- a low-leverage UNIT CONVERSION
-  step, not a second validated rate model; the category's own already-
-  validated conversion-rate model (`player_rebounding_rates.py`/
-  `player_playmaking_rates.py`) still does the actual prediction.
+  which no dedicated model exists for. Approximated here via each player's
+  own trailing chances-per-minute / touches-per-minute (expanding-
+  shrinkage, exposure = minutes) x their projected minutes -- a
+  low-leverage UNIT CONVERSION step, not a second validated rate model;
+  the category's own already-validated conversion-rate model
+  (`player_rebounding_rates.py`/`player_playmaking_rates.py`) still does
+  the actual prediction.
+- DREB/AST/TOV/STL/BLK are ANCHORED (Task #24) to `team_stat_rates.py`'s
+  team-level walk-forward total via the same macro-anchor +
+  micro-reallocation rule as points (see `usage_allocation.py`'s module
+  docstring and MODEL_DOCUMENTATION.md Sec23). OREB is the one category
+  that failed the confirmatory holdout check in absolute terms (not just
+  a widening gap) and stays UNANCHORED -- each player's own `oreb_proj`
+  is reported directly, no team-total rescaling.
 - Matchup difficulty is applied to POINTS and AST/TOV, all three via the
   FULL 3-level hierarchy (defender-specific -> position-group-vs-team ->
   league floor, Sec13/18/19) -- gated on `season >= MATCHUP_DATA_START_SEASON`
@@ -70,8 +76,9 @@ from src.models.player_playmaking_rates import add_playmaking_rates
 from src.models.player_rate_shrinkage import add_walk_forward_player_rate
 from src.models.player_rebounding_rates import add_rebounding_rates
 from src.models.player_scoring_rates import add_scoring_rates
+from src.models.team_stat_rates import ADOPTED_CATEGORIES, add_team_stat_ratings, build_team_stat_game_log, project_team_stat
 from src.models.team_strength import add_team_ratings, build_team_game_log
-from src.models.usage_allocation import allocate_team_points, compute_usage_shares, matchup_point_delta, raw_projected_points
+from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta, raw_projected_points
 from src.pipeline.active_roster import build_team_history, games_on_date, resolve_active_lineup
 from src.pipeline.generate_predictions import _fit_latest_player_ratings, run as generate_game_predictions
 from src.pipeline.refresh_data import refresh_all_data
@@ -173,6 +180,34 @@ def _project_active_roster_stats(active_player_ids: list, projected_minutes: pd.
 
         rows.append(row)
     return pd.DataFrame(rows).set_index("playerId") if rows else pd.DataFrame()
+
+
+def _latest_team_stat_ratings(team_stat_log: pd.DataFrame) -> pd.DataFrame:
+    """Each team's most recent walk-forward DREB/AST/TOV/STL/BLK/OREB
+    attack/defense/league-avg row -- same "as of before this row's own
+    game" convention as `generate_predictions._latest_team_ratings`."""
+    return team_stat_log.sort_values("gameDate").groupby("team").tail(1).set_index("team")
+
+
+def _team_stat_totals(latest_team_stat: pd.DataFrame, home_id: int, away_id: int) -> dict:
+    """Projects this specific game's team total for every ADOPTED_CATEGORIES
+    label, mirroring how `team_strength.project_game` combines two teams'
+    ratings for points. Returns {} if either team has no team-stat history
+    yet (e.g. the very first game(s) of a season) -- callers fall back to
+    the unanchored bottom-up sum in that case, same honest-fallback
+    convention as everywhere else in this pipeline."""
+    if home_id not in latest_team_stat.index or away_id not in latest_team_stat.index:
+        return {}
+    h, a = latest_team_stat.loc[home_id], latest_team_stat.loc[away_id]
+    totals = {}
+    for label in ADOPTED_CATEGORIES:
+        home_total, away_total = project_team_stat(
+            home_attack=h[f"{label}_attack_rate"], home_defense=h[f"{label}_defense_rate"],
+            away_attack=a[f"{label}_attack_rate"], away_defense=a[f"{label}_defense_rate"],
+            league_avg=h[f"{label}_league_avg"],
+        )
+        totals[label] = {"home": home_total, "away": away_total}
+    return totals
 
 
 def _build_matchup_context(current_season: int, game_date: str) -> dict | None:
@@ -333,6 +368,8 @@ def run(game_date: str) -> pd.DataFrame:
 
     team_log = add_team_ratings(build_team_game_log(FIRST_DEV_SEASON, current_season))
     team_log = _before(team_log, game_date)
+    latest_team_stat = _latest_team_stat_ratings(
+        add_team_stat_ratings(_before(build_team_stat_game_log(FIRST_DEV_SEASON, current_season), game_date)))
     # `team_history`/`team_side` must never blend across a season boundary -- see
     # generate_predictions.py's own fix for the full writeup (a real bug found via a 2023-11-08
     # early-season spot-check: the "last 10 games" lookback silently pulled in games, and
@@ -358,10 +395,13 @@ def run(game_date: str) -> pd.DataFrame:
             row.homeAbbrev, team_history.get(home_id, []), player_minutes_stints, team_side.get(home_id, {}), injury_report)
         away_shares, away_tag = resolve_active_lineup(
             row.awayAbbrev, team_history.get(away_id, []), player_minutes_stints, team_side.get(away_id, {}), injury_report)
+        # {} (not a per-category crash) when either team has no team-stat history yet -- see
+        # `_team_stat_totals`'s own fallback docstring.
+        game_stat_totals = _team_stat_totals(latest_team_stat, home_id, away_id)
 
-        for shares, tag, team_abbrev, opp_abbrev, opposing_team_id, opposing_shares, team_total in (
-            (home_shares, home_tag, row.homeAbbrev, row.awayAbbrev, away_id, away_shares, row.pred_home),
-            (away_shares, away_tag, row.awayAbbrev, row.homeAbbrev, home_id, home_shares, row.pred_away),
+        for side, shares, tag, team_abbrev, opp_abbrev, opposing_team_id, opposing_shares, team_total in (
+            ("home", home_shares, home_tag, row.homeAbbrev, row.awayAbbrev, away_id, away_shares, row.pred_home),
+            ("away", away_shares, away_tag, row.awayAbbrev, row.homeAbbrev, home_id, home_shares, row.pred_away),
         ):
             if shares.empty:
                 print(f"    {team_abbrev}: no active-roster data this call ({tag}) -- skipping props for this team", flush=True)
@@ -407,15 +447,38 @@ def run(game_date: str) -> pd.DataFrame:
                 tov_adjusted_flags[pid] = tov_adjusted
 
             usage_shares = compute_usage_shares(adjusted_points)
-            final_points = allocate_team_points(usage_shares, team_total)
+            final_points = allocate_team_total(usage_shares, team_total)
+
+            # DREB/AST/TOV/STL/BLK (Task #24): same macro-anchor + micro-reallocation rule as
+            # points, using team_stat_rates' team-level total in place of RAPM's. Each category's
+            # raw (matchup-adjusted, for ast/tov) per-player projection sets a usage share; falls
+            # back to the raw bottom-up projection (unanchored) if this game has no team-stat
+            # history yet, same honest-fallback convention as everywhere else in this pipeline.
+            final_by_category = {}
+            anchored_flags = {}
+            for label in ADOPTED_CATEGORIES:
+                col = f"{label}_proj"
+                if col not in proj.columns:
+                    continue
+                raw = proj[col].fillna(0.0)
+                side_total = game_stat_totals.get(label, {}).get(side)
+                if side_total is None:
+                    final_by_category[label] = raw
+                    anchored_flags[label] = False
+                else:
+                    final_by_category[label] = allocate_team_total(compute_usage_shares(raw), side_total)
+                    anchored_flags[label] = True
 
             for pid in proj.index:
                 stat_values = {
                     "points": final_points.get(pid), "2pt_made": proj.loc[pid].get("2pt_proj_made"),
                     "3pt_made": proj.loc[pid].get("3pt_proj_made"), "ft_made": proj.loc[pid].get("ft_proj_made"),
-                    "oreb": proj.loc[pid].get("oreb_proj"), "dreb": proj.loc[pid].get("dreb_proj"),
-                    "ast": proj.loc[pid].get("ast_proj"), "tov": proj.loc[pid].get("tov_proj"),
-                    "stl": proj.loc[pid].get("stl_proj"), "blk": proj.loc[pid].get("blk_proj"),
+                    "oreb": proj.loc[pid].get("oreb_proj"),
+                    "dreb": final_by_category["dreb"].get(pid) if "dreb" in final_by_category else proj.loc[pid].get("dreb_proj"),
+                    "ast": final_by_category["ast"].get(pid) if "ast" in final_by_category else proj.loc[pid].get("ast_proj"),
+                    "tov": final_by_category["tov"].get(pid) if "tov" in final_by_category else proj.loc[pid].get("tov_proj"),
+                    "stl": final_by_category["stl"].get(pid) if "stl" in final_by_category else proj.loc[pid].get("stl_proj"),
+                    "blk": final_by_category["blk"].get(pid) if "blk" in final_by_category else proj.loc[pid].get("blk_proj"),
                 }
                 for stat_name, mean in stat_values.items():
                     if mean is None or (isinstance(mean, float) and np.isnan(mean)):
@@ -423,7 +486,8 @@ def run(game_date: str) -> pd.DataFrame:
                     all_rows.append({
                         "gameId": row.gameId, "playerId": pid, "team": team_abbrev, "opponent": opp_abbrev,
                         "stat_name": stat_name, "proj_mean": float(mean),
-                        "minutes_tier_tag": tag, "anchored_to_team_total": stat_name == "points",
+                        "minutes_tier_tag": tag,
+                        "anchored_to_team_total": stat_name == "points" or anchored_flags.get(stat_name, False),
                         # matchup difficulty reshapes points (position-group-aware) and ast/tov
                         # (defender-level only, Sec18); every other category is never adjusted.
                         "matchup_adjusted": (
