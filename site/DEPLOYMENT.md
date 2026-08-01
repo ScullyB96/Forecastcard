@@ -13,7 +13,70 @@ worked before moving to the next.
 - The Railway CLI, optional but recommended: `brew install railway` (or
   `npm i -g @railway/cli`), then `railway login`.
 - This repo pushed to a Git remote (GitHub) that Railway can deploy from —
-  Railway's standard flow links a GitHub repo per service.
+  Railway's standard flow links a GitHub repo per service. **You don't have
+  one yet** — see 0a below.
+
+### 0a. Create the GitHub repo (one-time, needs your own GitHub login)
+
+This repo currently has no remote at all — everything so far is local-only
+commits. None of this can be done for you; a repo belongs to your GitHub
+account, so it needs your login one way or another.
+
+**Easiest path — GitHub's website, no CLI install:**
+1. Go to github.com → New repository. Name it whatever you like (e.g.
+   `sports-models`). Leave it empty — no README/.gitignore/license (this
+   repo already has all of those; adding them on GitHub's side would just
+   create a conflicting first commit).
+2. Choose **Private** unless you specifically want this public — this repo
+   contains your prediction models and (once deployed) will reference real
+   infra details.
+3. GitHub shows you a remote URL right after creation, something like
+   `https://github.com/YOUR_USERNAME/sports-models.git`.
+4. Run, from `/Users/brettscully/Desktop/sports-models`:
+   ```bash
+   git remote add origin https://github.com/YOUR_USERNAME/sports-models.git
+   git push -u origin master
+   ```
+   The first push will prompt for GitHub credentials (a browser login flow,
+   or a personal access token if you're using HTTPS — GitHub's UI explains
+   this at push time if you haven't authenticated from this machine before).
+
+**Alternative — GitHub CLI** (`gh`, not currently installed on this
+machine): `brew install gh`, then `gh auth login` (interactive, opens a
+browser to authenticate), then from the repo root:
+```bash
+gh repo create sports-models --private --source=. --remote=origin --push
+```
+This creates the repo AND sets the remote AND pushes in one step.
+
+**Verify**: `git remote -v` should show `origin` pointing at your new
+repo's URL; refreshing the repo's GitHub page should show all your commit
+history.
+
+### 0b. Auto-push is already set up, waiting on 0a
+
+A `post-commit` hook is already installed at `.git/hooks/post-commit` (one
+hook, since all 4 sport projects + `site/` share this one `.git` — it
+covers commits made from any of your concurrent Claude Code sessions, not
+just this one). Right now every commit prints:
+```
+[auto-push] no 'origin' remote configured yet -- skipping (see site/DEPLOYMENT.md for setup)
+```
+which is expected and harmless — it's not broken, there's just nothing to
+push to yet. The moment you complete 0a and `origin` exists, the very next
+commit (from any session) will auto-push with no further setup. It never
+force-pushes: if the remote has commits this branch doesn't (e.g. two
+sessions' pushes raced, or something was pushed from elsewhere), the push
+is rejected and the hook says so explicitly rather than overwriting
+anything — resolve with a normal `git pull --rebase` then push by hand
+that one time.
+
+One limitation worth knowing: `.git/hooks/` is local-only — it's never
+committed, pushed, or cloned with the repo (this is standard git behavior,
+not specific to this hook). It covers every session on THIS machine, since
+they all share this one `.git`, but if you ever clone this repo onto a
+different machine, that clone won't have the hook until you copy
+`.git/hooks/post-commit` over manually or re-create it there.
 
 ## 1. Create the project + Postgres
 
