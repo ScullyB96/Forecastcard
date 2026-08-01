@@ -1,0 +1,14 @@
+# Railway service config for the NHL daily worker (cron).
+# Root directory for this service in the Railway dashboard: nhl/
+#
+# 10:00 ET = 14:00 UTC during EDT (Mar-Nov) or 15:00 UTC during EST
+# (Nov-Mar) -- picked 14:00 UTC as a placeholder; re-check against the
+# actual current DST offset when this is actually deployed.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python -m src.pipeline.generate_predictions && python -m src.pipeline.export_to_site_db"
+cronSchedule = "0 14 * * *"
+restartPolicyType = "NEVER"

@@ -23,6 +23,15 @@ def _props_by_game_id(sport: str, slate_key: str, games: list[dict]) -> dict[str
     return {g["game_id"]: db.props_for_game(sport, slate_key, g["game_id"]) for g in games}
 
 
+@app.get("/healthz")
+def healthz():
+    # deliberately DB-free and always public (see access.py's PUBLIC_PATHS)
+    # -- Railway's healthcheck must get a 200 even when SITE_PASSWORD is
+    # set, and shouldn't fail the whole service just because Postgres is
+    # briefly unreachable.
+    return {"status": "ok"}
+
+
 @app.get("/login")
 def login_form(request: Request, next: str = "/"):
     return templates.TemplateResponse(request, "login.html", {"next": next, "error": False})

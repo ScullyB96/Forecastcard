@@ -1,0 +1,13 @@
+# Railway service config for the always-on combined-site web service.
+# Root directory for this service in the Railway dashboard: site/
+#
+# $PORT is Railway's own injected env var for the port a web service must
+# bind to -- not hardcoded, since Railway assigns it dynamically.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/healthz"
+restartPolicyType = "ON_FAILURE"

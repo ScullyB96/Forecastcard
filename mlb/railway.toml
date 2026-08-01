@@ -1,0 +1,17 @@
+# Railway service config for the MLB daily worker (cron).
+# Root directory for this service in the Railway dashboard: mlb/
+#
+# Cron times are UTC on Railway. 10:00 ET (pregame lineups are usually out
+# by mid-morning) is 14:00 UTC during EDT (Mar-Nov) or 15:00 UTC during EST
+# (Nov-Mar) -- picked 14:00 UTC as a placeholder; re-check against the
+# actual current DST offset when this is actually deployed (flagged in the
+# combined-site plan itself, not solved here since it depends on the real
+# deploy date).
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python -m src.pipeline.generate_daily_props && python -m src.pipeline.export_to_site_db"
+cronSchedule = "0 14 * * *"
+restartPolicyType = "NEVER"

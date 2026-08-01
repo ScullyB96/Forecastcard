@@ -1,0 +1,19 @@
+# Railway service config for the NFL Tuesday worker (cron).
+# Root directory for this service in the Railway dashboard: nfl/
+# Config file path for this service: nfl/railway.tuesday.toml (Railway's
+# "Config-as-code path" setting -- NOT the default railway.toml, since NFL
+# needs 2 separate cron schedules from the same directory; see
+# railway.sunday.toml for the other one).
+#
+# Tuesday 9:21am ET (per the original weekly_update.py plan) = 13:21 UTC
+# during EDT (Mar-Nov) or 14:21 UTC during EST (Nov-Mar) -- picked 13:21
+# UTC as a placeholder; re-check against the actual current DST offset
+# when this is actually deployed.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python -m src.pipeline.weekly_update && python -m src.pipeline.export_to_site_db"
+cronSchedule = "21 13 * * 2"
+restartPolicyType = "NEVER"
