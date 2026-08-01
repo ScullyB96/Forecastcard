@@ -215,6 +215,19 @@ Poisson/NegBin, live-refit fresh every call, and every output row carries `proj_
 `family_param` -- the actual sportsbook-style deliverable the plan always intended. 38 regression
 tests (103 assertions) passing.
 
+**A second lever tried for both remaining open problems (Sec26, 2026-08-01): shrinkage STRENGTH,
+not just the blending target.** Motivated by a confirmed real widening of cross-team quality spread
+in the holdout era (margin-spread std: ~4.0-5.15 through most of dev, 5.56/6.00/6.24 in
+2023/2024/2025). For Phase 1 margin: reducing `prior_games_rating` genuinely improves margin_mae on
+real holdout (11.3506 -> 11.3079) but REGRESSES total_mae by a larger absolute amount (+0.1264) --
+a real tradeoff, not adopted. For OREB team-level anchoring: the SAME reduced-shrinkage hypothesis
+made things monotonically WORSE (opposite of margin's result, ruling it out for OREB specifically);
+the recency-weighted league average (already ruled out for margin) instead moved OREB from a clear
+holdout LOSS to naive (Sec23) to a statistical TIE -- real progress, but a tie doesn't justify the
+added complexity, so still not adopted. Both problems remain open; both now have two independently-
+tested, ruled-out (or insufficient) mechanisms on record, narrowing what a future fix would need to
+look like. 39 regression tests (106 assertions) passing.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -1900,3 +1913,69 @@ NB2 dispersion is a population-level parameter), and a spot-checked `over_under_
 test added (`test_prop_distribution_variance_floor_is_player_scale_not_team_scale`, 3 assertions:
 the floor value itself, its scale relative to `score_distribution.MIN_VARIANCE`, and a realistic
 low-exposure fit staying well under the old floor) -- 38 regression tests (103 assertions) passing.
+
+## 26. A second lever tried for both open problems: shrinkage STRENGTH, not just the blending target -- one real (if partial) win, one real (if mixed) tradeoff, neither adopted outright
+
+Continued pushing on both of Sec24/23's open findings (Phase 1's margin regression; OREB's
+team-level anchoring failure) with a genuinely different mechanism from what was already ruled
+out: not WHAT the league-average blending target tracks (Sec24's already-failed recency-weighting
+attempt), but HOW STRONGLY a team's own rating is pulled toward it (`prior_games`, the shrinkage
+weight itself). Motivated by a real, confirmed data pattern: cross-team quality SPREAD (std dev
+across teams of each team's own average point differential) rose from mostly 4.0-5.15 across most
+of the dev range to 5.56/6.00/6.24 in 2023/2024/2025 -- a FIXED shrinkage weight calibrated
+implicitly against the dev era's typical spread would over-shrink relative to a genuinely wider
+TRUE spread, understating real margins.
+
+**Phase 1 margin -- a real, confirmed tradeoff, not a clean win.** Added overridable
+`prior_games_rating`/`prior_games_pace` params to `team_strength.add_team_ratings` (default-
+preserving, regression-tested). `validate_shrinkage_strength_fix.py` swept less-shrinkage values
+{3,5,8,10,12} vs the current 15.0 on the recent-dev slice (fit on the full dev range so the
+staleness effect actually has time to accumulate, matching Sec24's methodology) -- prior_games=10.0
+was the best candidate, REAL IMPROVEMENT on margin_mae at both the recent slice (-0.0202) and full
+dev range (-0.0163), earning a genuinely new one-time holdout read
+(`run_shrinkage_strength_holdout_check.py`). Real holdout result: margin_mae DOES genuinely improve
+(11.3506 -> 11.3079, CI excludes zero) -- but total_mae, previously fine (NOISE) on holdout, now
+shows a REAL REGRESSION of larger absolute magnitude (+0.1264 vs margin's -0.0428 improvement).
+**Not adopted**: fixing one metric by making a previously-healthy one worse by a larger margin
+isn't a net win, it's a reshuffling of where the error shows up. Phase 1's margin issue remains
+open -- two independent, structurally different mechanisms (recency-weighted target, reduced
+shrinkage strength) have now been tried and ruled out; a future fix likely needs something that
+addresses the widened spread WITHOUT also destabilizing the overall scale (e.g. a spread-adaptive
+shrinkage weight that responds to real-time team-quality dispersion specifically, rather than a
+single fixed or globally-recency-weighted knob) -- flagged as a harder problem than a calibration
+tweak, not pursued further this cycle.
+
+**OREB team-level anchoring -- decisively rules out one hypothesis, finds a real (if
+insufficient) improvement from the other.** First, diagnosed WHERE OREB's holdout error was
+concentrated: split by games-into-season, dev-vs-holdout gap came out similar in magnitude both
+early (games-before<15: dev 2.97 -> holdout 3.06) and late (dev 2.90 -> holdout 3.09) -- ruling out
+a stale-early-season-shrinkage-only mechanism (that would predict a MUCH worse early-season gap
+than late). Then tested the SAME reduced-shrinkage hypothesis that helped margin: it made OREB
+MONOTONICALLY WORSE at every value tried (5,8,10,12,15 all REAL REGRESSION vs current 20, closing
+in on zero as prior approaches 20 but never crossing to improvement) -- the opposite of Phase 1's
+result, decisively ruling out "over-shrinking" for OREB specifically. Finally tested the recency-
+weighted league average (Sec24's already-failed-for-margin mechanism, never tried for OREB
+specifically) -- this one showed real, consistent improvement across every halflife tested
+(100/300/600/1000, best at 300: recent-slice delta -0.0077, full-dev-range delta -0.0023, both REAL
+IMPROVEMENT), earning a one-time holdout read (`run_oreb_adaptive_holdout_check.py`). Result: the
+candidate's OWN dev-vs-holdout gap is still a REAL REGRESSION (VETO by the gap-only criterion), but
+the actually decision-relevant comparison -- vs naive, holdout only -- moved from a clear LOSS
+(Sec23: 3.0661 vs 3.0401) to a statistical TIE (3.0354 vs 3.0401, NOISE, CI includes zero). **Not
+adopted**: a tie with the simple naive floor doesn't justify the added complexity of the full
+team-level combine, per this project's standing "don't add complexity that isn't earning its keep"
+discipline -- OREB stays unanchored (bottom-up player-sum only). But this is real, useful progress,
+not a null result: it identifies the adaptive league average specifically (not shrinkage strength)
+as the more promising direction if OREB is revisited, and narrows the gap from a clear loss to a
+coin-flip against naive.
+
+**The broader pattern worth naming**: the SAME two candidate mechanisms (recency-weighted target,
+reduced shrinkage strength), tested independently on two different problems, gave OPPOSITE partial
+results -- reduced shrinkage helped margin's tradeoff but hurt OREB; the adaptive target helped
+OREB's tie but had already failed margin. Neither mechanism generalizes across problems, and
+neither fully solves the problem it helped with -- reinforcing this project's now well-established
+finding (Sec16-19, Sec24) that era-driven miscalibration doesn't have one universal fix; each
+symptom needs its own independently-tested remedy, and sometimes (as here, twice) the best
+available remedy still isn't good enough to adopt. 1 new regression test added
+(`test_add_team_ratings_new_prior_games_params_default_preserving`, 3 assertions confirming the
+new overridable shrinkage-strength params reproduce the exact original Phase 1 behavior at their
+defaults) -- 39 regression tests (106 assertions) passing.

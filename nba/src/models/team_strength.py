@@ -65,7 +65,9 @@ def build_team_game_log(start_year: int, end_year: int) -> pd.DataFrame:
 
 
 def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = 0.0,
-                      league_avg_halflife_games: float | None = None) -> pd.DataFrame:
+                      league_avg_halflife_games: float | None = None,
+                      prior_games_rating: float = PRIOR_GAMES_RATING,
+                      prior_games_pace: float = PRIOR_GAMES_PACE) -> pd.DataFrame:
     """Adds walk-forward shrunk pace_shrunk_mean, rtg_attack_rate (OFF),
     rtg_defense_rate (DEF), and their league-average companions.
 
@@ -73,11 +75,25 @@ def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = 0.0,
     infinite-memory league average): passed straight through to
     `shrinkage.py`'s primitives -- see their docstrings for the
     scoring-era-drift motivation (Sec9.5/Sec24). None preserves the
-    exact original, already-validated Phase 1 behavior."""
-    log = add_walk_forward_mean(log, "pace", PRIOR_GAMES_PACE, prefix="pace",
+    exact original, already-validated Phase 1 behavior.
+
+    `prior_games_rating`/`prior_games_pace` (default the module-level
+    constants, i.e. exactly the original behavior): overridable shrinkage-
+    STRENGTH knobs, distinct from `league_avg_halflife_games` (which
+    changes what the blending TARGET tracks, not how strongly a team's
+    own rating is pulled toward it). Added to test whether a real,
+    confirmed widening of cross-team quality spread in the holdout era
+    (Sec25/26 -- margin-spread std rose from ~4-5 in most of dev to
+    5.6-6.2 in 2023-2025) means the fixed prior_games=15 (calibrated
+    implicitly against the dev era's typical spread) now over-shrinks
+    relative to the TRUE current spread, worsening margin calibration
+    specifically (a fixed shrinkage weight pulls teams too close to
+    average when real differentiation has genuinely grown) -- see
+    `validate_shrinkage_strength_fix.py`."""
+    log = add_walk_forward_mean(log, "pace", prior_games_pace, prefix="pace",
                                  cross_season_weight=cross_season_weight,
                                  league_avg_halflife_games=league_avg_halflife_games)
-    log = add_walk_forward_rate(log, "offRtg", "defRtg", PRIOR_GAMES_RATING, prefix="rtg",
+    log = add_walk_forward_rate(log, "offRtg", "defRtg", prior_games_rating, prefix="rtg",
                                  cross_season_weight=cross_season_weight,
                                  league_avg_halflife_games=league_avg_halflife_games)
     return log

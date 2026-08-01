@@ -33,6 +33,7 @@ from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_c
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
 from src.models.team_stat_rates import ADOPTED_CATEGORIES, STAT_COLUMNS, build_team_stat_game_log, project_team_stat
+from src.models.team_strength import PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings
 from src.pipeline.generate_props import _team_stat_totals
 
 FAILURES = []
@@ -591,6 +592,32 @@ def test_negbin_parameterization_matches_target_mean_and_variance():
           abs(dist.var() - expected_var) < 1e-9, f"got {dist.var()}, expected {expected_var}")
 
 
+def test_add_team_ratings_new_prior_games_params_default_preserving():
+    """`team_strength.add_team_ratings`'s new `prior_games_rating`/
+    `prior_games_pace` overridable params (added to test
+    `validate_shrinkage_strength_fix.py`'s reduced-shrinkage hypothesis
+    for Phase 1's still-open margin regression) must reproduce the exact
+    original, already-validated Phase 1 output when left at their
+    defaults -- confirms the mere existence of this override capability
+    doesn't silently change any currently-deployed behavior."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "X", "opponent": "Y",
+         "is_home": True, "pace": 100.0, "offRtg": 110.0, "defRtg": 105.0, "actualScore": 112.0},
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "Y", "opponent": "X",
+         "is_home": False, "pace": 100.0, "offRtg": 105.0, "defRtg": 110.0, "actualScore": 108.0},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-05"), "season": 2020, "team": "X", "opponent": "Y",
+         "is_home": False, "pace": 98.0, "offRtg": 108.0, "defRtg": 107.0, "actualScore": 105.0},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-05"), "season": 2020, "team": "Y", "opponent": "X",
+         "is_home": True, "pace": 98.0, "offRtg": 107.0, "defRtg": 108.0, "actualScore": 110.0},
+    ])
+    default_out = add_team_ratings(log.copy())
+    explicit_out = add_team_ratings(log.copy(), prior_games_rating=PRIOR_GAMES_RATING, prior_games_pace=PRIOR_GAMES_PACE)
+    for col in ["pace_shrunk_mean", "rtg_attack_rate", "rtg_defense_rate"]:
+        check(f"{col}: default params reproduce the explicit-constant call exactly",
+              (default_out[col].reset_index(drop=True).fillna(-999)
+               == explicit_out[col].reset_index(drop=True).fillna(-999)).all())
+
+
 def test_prop_distribution_variance_floor_is_player_scale_not_team_scale():
     """REAL BUG (2026-08-01, found by inspecting real live `generate_props.py`
     output): `prop_distribution.py` originally imported and called
@@ -1090,6 +1117,7 @@ if __name__ == "__main__":
     test_team_stat_totals_falls_back_to_empty_when_team_missing()
     test_team_level_adaptive_league_average_default_preserving_and_responsive()
     test_prop_distribution_variance_floor_is_player_scale_not_team_scale()
+    test_add_team_ratings_new_prior_games_params_default_preserving()
 
     print()
     if FAILURES:
