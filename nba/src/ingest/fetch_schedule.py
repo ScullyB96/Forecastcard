@@ -35,6 +35,29 @@ def season_str(start_year: int) -> str:
     return f"{start_year}-{str((start_year + 1) % 100).zfill(2)}"
 
 
+def season_for_date(date_str: str) -> int:
+    """Pure calendar-based season lookup for an ARBITRARY date (past,
+    present, or a genuine live "tonight") -- unlike `current_nba_season`,
+    this makes no live API call and doesn't depend on wall-clock "now", so
+    it's safe to use for historical backtesting. August is used as the
+    cutoff month (not October, the actual season start) as a deliberately
+    safe buffer -- the real season never starts before October or extends
+    past July, so any date in August or later of year Y belongs to the
+    season labeled Y-(Y+1); any date before August belongs to the season
+    that started the PRIOR calendar year.
+
+    KNOWN EDGE CASE, not handled: the COVID-disrupted 2019-20 season
+    actually ran into October 2020 (Finals concluded October 11, 2020), so
+    a date in the ~10-day window between this function's August 1 cutoff
+    and that season's real end would be misclassified as 2020-21. A
+    narrow, known, single-season historical anomaly -- not worth a
+    schedule-aware lookup for one 10-day window; a caller who genuinely
+    needs to backtest a date in that specific window should hardcode
+    `start_year=2019` for that call instead of using this function."""
+    d = pd.Timestamp(date_str)
+    return d.year if d.month >= 8 else d.year - 1
+
+
 def _fetch_with_retry(start_year: int, season_type: str) -> pd.DataFrame:
     last_err = None
     for attempt in range(MAX_FETCH_RETRIES):

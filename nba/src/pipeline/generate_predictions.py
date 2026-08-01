@@ -50,7 +50,7 @@ import pandas as pd
 
 from src.ingest.build_stints import build_season_stints
 from src.ingest.fetch_rotowire_lineups import fetch_current_injury_report
-from src.ingest.fetch_schedule import FIRST_DEV_SEASON, season_str
+from src.ingest.fetch_schedule import FIRST_DEV_SEASON, season_for_date, season_str
 from src.models.lineup_rating import player_minutes_from_stints, project_lineup_adjustment, team_recent_roster_rapm
 from src.models.rapm_lite import fit_rapm, prepare_stints
 from src.models.score_distribution import (
@@ -62,14 +62,23 @@ from src.pipeline.refresh_data import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
 
-def _fit_latest_player_ratings(current_season: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _fit_latest_player_ratings(current_season: int, before_date: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Returns (player_ratings, player_minutes) using every cached season's
     stints through `current_season` -- a single fresh RAPM-lite fit "as of
-    right now", not the periodic backtest series. Seasons whose stints
-    haven't been built yet (or whose raw data isn't cached) are skipped,
-    not fatal -- an early-season call with less history just fits on
-    whatever's available, same as any other walk-forward fit in this
-    project."""
+    right now" (or as of `before_date`, if given -- see module docstring's
+    note on historical backtesting), not the periodic backtest series.
+    Seasons whose stints haven't been built yet (or whose raw data isn't
+    cached) are skipped, not fatal -- an early-season call with less
+    history just fits on whatever's available, same as any other walk-
+    forward fit in this project.
+
+    `before_date`: when set, the schedule (and therefore every stint merged
+    against it) is filtered to `gameDate < before_date` BEFORE fitting --
+    critical for a trustworthy historical backtest, since without this the
+    "current" RAPM/minutes snapshot silently reaches past the target date
+    into whatever's most recent as of the real wall-clock today (see
+    MODEL_DOCUMENTATION.md's writeup of this exact bug, found via a real
+    2025-01-15 spot-check)."""
     frames = []
     for y in range(FIRST_DEV_SEASON, current_season + 1):
         sched_path = DATA_RAW / f"schedule_{season_str(y)}.parquet"
@@ -79,7 +88,12 @@ def _fit_latest_player_ratings(current_season: int) -> tuple[pd.DataFrame, pd.Da
         if stints.empty:
             continue
         schedule = pd.read_parquet(sched_path)
-        frames.append(prepare_stints(stints, schedule[schedule["seasonType"] == "Regular Season"]))
+        schedule = schedule[schedule["seasonType"] == "Regular Season"]
+        if before_date is not None:
+            schedule = schedule[pd.to_datetime(schedule["gameDate"]) < pd.Timestamp(before_date)]
+            if schedule.empty:
+                continue
+        frames.append(prepare_stints(stints, schedule))
     if not frames:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -97,7 +111,15 @@ def _latest_team_ratings(team_log: pd.DataFrame) -> pd.DataFrame:
 
 
 def run(game_date: str) -> pd.DataFrame:
-    current_season = refresh_all_data()
+    refresh_all_data()  # ensure real-time data is backfilled; season logic below uses game_date, not "today"
+    # `target_season` is derived PURELY from `game_date` (see `season_for_date`'s docstring), never
+    # from wall-clock "now" -- critical for a trustworthy historical backtest. A real bug was found
+    # here (2026-08-01, via a real 2025-01-15 spot-check): using the LIVE "current season" for a
+    # historical `game_date` silently pulled trailing minutes/ratings from whatever's most recent
+    # as of the real today, not as of `game_date` -- e.g. projecting a star player for ~11 minutes
+    # instead of their true ~38-minute trailing average, because the "trailing 10 games" reached
+    # into a much later, unrelated season. See MODEL_DOCUMENTATION.md for the full writeup.
+    target_season = season_for_date(game_date)
 
     todays_games = games_on_date(game_date)
     if todays_games.empty:
@@ -105,11 +127,12 @@ def run(game_date: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     injury_report = fetch_current_injury_report()
-    team_log = add_team_ratings(build_team_game_log(2015, current_season))
+    team_log = add_team_ratings(build_team_game_log(2015, target_season))
+    team_log = team_log[pd.to_datetime(team_log["gameDate"]) < pd.Timestamp(game_date)]
     latest = _latest_team_ratings(team_log)
     team_history, team_side = build_team_history(team_log)
 
-    player_ratings, player_minutes = _fit_latest_player_ratings(current_season)
+    player_ratings, player_minutes = _fit_latest_player_ratings(target_season, before_date=game_date)
     have_lineup_adjustment = not player_ratings.empty
     if not have_lineup_adjustment:
         print("WARNING: no RAPM-lite player-rating snapshot available yet (stints not built for "

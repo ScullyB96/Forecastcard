@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.ingest.build_stints import _get_starters, _normalize_name, _prep_pbp_timeline, _roster_lookup
+from src.ingest.fetch_schedule import season_for_date
 from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, bootstrap_compare
 from src.models.garbage_time import add_garbage_time_weight
 from src.models.home_court import _baseline_log_ratios
@@ -796,6 +797,48 @@ def test_position_group_expanding_variant_pools_by_team_posgroup():
           f"got {g2_row['tov_pg_difficulty_rate']}, expected {expected_league_avg}")
 
 
+def test_season_for_date_resolves_purely_from_calendar():
+    """`season_for_date` (2026-08-01, found via a real 2025-01-15 spot-check
+    that exposed a serious bug -- see MODEL_DOCUMENTATION.md) must resolve
+    an arbitrary date's season using ONLY the calendar date, never a live
+    API call or wall-clock "now" -- that's the whole point: unlike
+    `current_nba_season`, it has to be safe to call for a historical
+    backtest. Checks the August cutoff boundary specifically (the season
+    never starts before October, so August is a deliberately safe buffer)."""
+    check("a January date belongs to the season that started the PREVIOUS calendar year",
+          season_for_date("2025-01-15") == 2024, f"got {season_for_date('2025-01-15')}")
+    check("an October date belongs to the season starting that SAME calendar year",
+          season_for_date("2024-10-25") == 2024, f"got {season_for_date('2024-10-25')}")
+    check("a July date still belongs to the PRIOR season (playoffs can run into July)",
+          season_for_date("2025-07-15") == 2024, f"got {season_for_date('2025-07-15')}")
+    check("an August date already belongs to the NEW season (safe buffer before the real October start)",
+          season_for_date("2025-08-01") == 2025, f"got {season_for_date('2025-08-01')}")
+
+
+def test_generate_props_before_filter_excludes_on_and_after_date():
+    """`generate_props._before` (2026-08-01) is the fix for the real bug
+    found via a 2025-01-15 spot-check: a star player's trailing-minutes
+    projection was silently computed using games from a much LATER,
+    unrelated season (reaching into "today", not "as of `game_date`"),
+    producing an absurd ~11-minute projection for a player who'd actually
+    been averaging ~38 minutes -- see MODEL_DOCUMENTATION.md for the full
+    diagnosis. This test confirms the filter's boundary is correct: a row
+    dated EXACTLY on `game_date` must be excluded (strictly before, not
+    on-or-before), matching every other walk-forward leak guard in this
+    project."""
+    from src.pipeline.generate_props import _before
+    log = pd.DataFrame({
+        "gameDate": [pd.Timestamp("2025-01-10"), pd.Timestamp("2025-01-15"), pd.Timestamp("2025-01-20")],
+        "value": [1, 2, 3],
+    })
+    out = _before(log, "2025-01-15")
+    check("a row strictly before game_date is kept", 1 in out["value"].tolist())
+    check("a row dated EXACTLY on game_date is excluded (strictly-before, not on-or-before)",
+          2 not in out["value"].tolist())
+    check("a row after game_date is excluded", 3 not in out["value"].tolist())
+    check("exactly one row survives the filter", len(out) == 1, f"got {len(out)}")
+
+
 if __name__ == "__main__":
     test_possession_counter_uses_teamid_not_cumulative_description()
     test_score_forward_fill_ignores_placeholder_zero_on_non_scoring_rows()
@@ -826,6 +869,8 @@ if __name__ == "__main__":
     test_defender_stat_difficulty_rate_generalizes_points_unchanged()
     test_defender_total_minutes_asof_excludes_future_games()
     test_position_group_expanding_variant_pools_by_team_posgroup()
+    test_season_for_date_resolves_purely_from_calendar()
+    test_generate_props_before_filter_excludes_on_and_after_date()
 
     print()
     if FAILURES:

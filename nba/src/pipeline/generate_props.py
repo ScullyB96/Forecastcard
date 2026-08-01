@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 
 from src.ingest.fetch_rotowire_lineups import fetch_current_injury_report
-from src.ingest.fetch_schedule import FIRST_DEV_SEASON
+from src.ingest.fetch_schedule import FIRST_DEV_SEASON, season_for_date
 from src.models.matchup_difficulty import (
     MATCHUP_DATA_START_SEASON,
     MIN_MATCHUP_MINUTES_TO_TRUST,
@@ -92,6 +92,20 @@ def _latest_snapshot(log: pd.DataFrame, cols: list, group_col: str = "playerId")
     accepted live-pipeline approximation for "current rate" used
     throughout this project's live entry points."""
     return log.sort_values("gameDate").groupby(group_col)[cols].last()
+
+
+def _before(log: pd.DataFrame, game_date: str) -> pd.DataFrame:
+    """Filters a log to `gameDate < game_date` -- applied to every log
+    BEFORE `_latest_snapshot` extracts "the most recent row per group".
+    Without this, "most recent" silently means "most recent as of the real
+    wall-clock today", not "as of `game_date`" -- a real bug found via a
+    2025-01-15 spot-check (a star player's own trailing-minutes projection
+    reached into a much later, unrelated season and came out ~11 minutes
+    instead of his true ~38-minute trailing average). See
+    MODEL_DOCUMENTATION.md for the full writeup. Harmless for a genuine
+    live "tonight" call -- there are no cached rows on or after today
+    anyway, so this is a no-op in that case."""
+    return log[pd.to_datetime(log["gameDate"]) < pd.Timestamp(game_date)]
 
 
 def _project_active_roster_stats(active_player_ids: list, projected_minutes: pd.Series,
@@ -169,17 +183,18 @@ def _build_matchup_context(current_season: int, game_date: str) -> dict | None:
     if current_season < MATCHUP_DATA_START_SEASON:
         return None
 
-    raw_defender_log = build_defender_game_log(MATCHUP_DATA_START_SEASON, current_season)
+    raw_defender_log = _before(build_defender_game_log(MATCHUP_DATA_START_SEASON, current_season), game_date)
 
     defender_log = add_defender_difficulty_rate(raw_defender_log.copy())
     defender_ratings = _latest_snapshot(defender_log, ["difficulty_rate"])["difficulty_rate"]
 
-    posgroup_rated = add_position_group_difficulty_rate(build_position_group_matchup_log(MATCHUP_DATA_START_SEASON, current_season))
+    posgroup_rated = add_position_group_difficulty_rate(
+        _before(build_position_group_matchup_log(MATCHUP_DATA_START_SEASON, current_season), game_date))
     posgroup_latest = (posgroup_rated.sort_values("gameDate")
                         .groupby(["team", "position_group"])["posgroup_difficulty_rate"].last())
     league_avg_by_posgroup = posgroup_latest.groupby(level="position_group").mean().to_dict()
 
-    defender_posgroup_log = build_defender_position_group_minutes(MATCHUP_DATA_START_SEASON, current_season)
+    defender_posgroup_log = _before(build_defender_position_group_minutes(MATCHUP_DATA_START_SEASON, current_season), game_date)
     minutes_by_posgroup = {pg: defender_position_group_minutes_asof(defender_posgroup_log, pg, game_date)
                             for pg in POSITION_GROUPS}
 
@@ -197,7 +212,7 @@ def _build_matchup_context(current_season: int, game_date: str) -> dict | None:
 
     # Level-2 (position-group-vs-team). AST uses EWMA (matches points); TOV uses expanding-shrinkage
     # (does NOT match points -- confirmed empirically, see matchup_difficulty.py's module docstring).
-    posgroup_matchup_log = build_position_group_matchup_log(MATCHUP_DATA_START_SEASON, current_season)
+    posgroup_matchup_log = _before(build_position_group_matchup_log(MATCHUP_DATA_START_SEASON, current_season), game_date)
     ast_posgroup_rated = add_position_group_stat_difficulty_rate(
         posgroup_matchup_log.copy(), "ast_allowed", POSGROUP_HALFLIFE_GAMES_AST, prefix="ast_posgroup")
     ast_posgroup_latest = (ast_posgroup_rated.sort_values("gameDate")
@@ -279,18 +294,21 @@ def _ast_tov_matchup_delta(stat: str, pid: int, offense_season: int, opposing_te
     return matchup_point_delta(rate_delta, projected_minutes_for_pid), True
 
 
-def _build_rate_logs(current_season: int) -> tuple:
+def _build_rate_logs(current_season: int, game_date: str) -> tuple:
     """One shared `build_player_game_log` call, reused for every category
     that doesn't need player-tracking data (scoring, defensive events),
     plus one `attach_player_track` pass for the two that do (rebounding,
-    playmaking) -- avoids rebuilding the same expensive merge three times."""
+    playmaking) -- avoids rebuilding the same expensive merge three times.
+    Each returned log is filtered to `gameDate < game_date` (see `_before`)
+    so every downstream `_latest_snapshot` call reflects "as of game_date",
+    not "as of the real wall-clock today"."""
     base_log = build_player_game_log(FIRST_DEV_SEASON, current_season)
-    scoring_log = add_scoring_rates(base_log.copy())
-    defensive_log = add_defensive_event_rates(base_log.copy())
+    scoring_log = _before(add_scoring_rates(base_log.copy()), game_date)
+    defensive_log = _before(add_defensive_event_rates(base_log.copy()), game_date)
 
     tracked = attach_player_track(base_log.copy(), FIRST_DEV_SEASON, current_season)
-    rebounding_log = add_rebounding_rates(tracked.dropna(subset=["reboundChancesOffensive", "reboundChancesDefensive"]).copy())
-    playmaking_log = add_playmaking_rates(tracked.dropna(subset=["touches"]).copy())
+    rebounding_log = _before(add_rebounding_rates(tracked.dropna(subset=["reboundChancesOffensive", "reboundChancesDefensive"]).copy()), game_date)
+    playmaking_log = _before(add_playmaking_rates(tracked.dropna(subset=["touches"]).copy()), game_date)
     return scoring_log, rebounding_log, playmaking_log, defensive_log
 
 
@@ -299,7 +317,11 @@ def run(game_date: str) -> pd.DataFrame:
     if game_preds.empty:
         return pd.DataFrame()
 
-    current_season = refresh_all_data()
+    refresh_all_data()  # ensure real-time data is backfilled; season logic below uses game_date, not "today"
+    # `current_season` derived PURELY from `game_date` (see `season_for_date`) -- see `_before`'s
+    # docstring and MODEL_DOCUMENTATION.md for the real bug this fixes (a star player's trailing-
+    # minutes projection silently reaching into a much later, unrelated season).
+    current_season = season_for_date(game_date)
     todays_games = games_on_date(game_date)
     team_id_by_abbrev = {}
     for r in todays_games.itertuples(index=False):
@@ -307,12 +329,13 @@ def run(game_date: str) -> pd.DataFrame:
         team_id_by_abbrev[r.awayAbbrev] = r.awayTeamId
 
     injury_report = fetch_current_injury_report()
-    _, player_minutes_stints = _fit_latest_player_ratings(current_season)
+    _, player_minutes_stints = _fit_latest_player_ratings(current_season, before_date=game_date)
 
     team_log = add_team_ratings(build_team_game_log(FIRST_DEV_SEASON, current_season))
+    team_log = _before(team_log, game_date)
     team_history, team_side = build_team_history(team_log)
 
-    scoring_log, rebounding_log, playmaking_log, defensive_log = _build_rate_logs(current_season)
+    scoring_log, rebounding_log, playmaking_log, defensive_log = _build_rate_logs(current_season, game_date)
     matchup_ctx = _build_matchup_context(current_season, game_date)
     if matchup_ctx is None:
         print(f"  NOTE: season {current_season} predates matchup data (starts {MATCHUP_DATA_START_SEASON}) "

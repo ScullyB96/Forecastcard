@@ -134,6 +134,25 @@ ALL cached data on every call, so the ACTUALLY DEPLOYED model has already walk-f
 already does (keep updating on real games), not a cleverer historical extrapolation. Stopping
 further attempts at this specific gap. 26 regression tests (53 assertions) passing.
 
+**Matchup difficulty extended to AST/TOV, full 3-level hierarchy (Sec18/19)**: both categories
+confirmed real improvements over naive at the defender AND position-group levels (with family
+choice re-checked independently at each -- TOV needed the opposite family from points/AST at the
+position-group tier). OREB/STL/BLK investigated for the same treatment (Sec20) -- one real lead
+found (BLK's `matchupBlocks` field) and tested rigorously, but it didn't clear the bar; none of the
+three currently have a viable path with available data.
+
+**A real, serious historical-backtest bug found and fixed via an actual spot-check (Sec21)**: a
+2025-01-15 comparison against real box scores caught the live pipeline's "trailing history"
+silently reaching past the target date into whatever's most recent as of the real wall-clock today
+(e.g. projecting a star for ~11 minutes instead of his true ~38-minute trailing average). Not a
+model defect -- every rate model and the walk-forward math were unaffected -- but a real gap in how
+`generate_predictions.py`/`generate_props.py` resolve "tonight." Fixed with a new
+`season_for_date` helper and a strict `gameDate < game_date` cutoff threaded through every trailing-
+data lookup in both pipelines; harmless for genuine live use. Re-ran the corrected comparison:
+slate-wide points MAE improved from 6.34 to 5.03, and a properly-designed check (comparing the
+model's OWN pre-game top pick against its outcome, not the ex-post actual top scorer -- a known
+selection-effect trap) found no evidence of a further systematic bias.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -1409,3 +1428,134 @@ variant's own leak-guard/pooling signature). 29 regression tests (57 assertions)
 **Remaining honestly-flagged gap**: OREB/STL/BLK still have no clean matchup-difficulty proxy in
 the available data (unchanged from Sec18) -- would need different data or a materially more
 contorted metric, not pursued further without a clearer signal that it's worth the complexity.
+
+## 20. Investigated the OREB/STL/BLK matchup-difficulty gap (2026-08-01) -- one real lead found and tested, none currently viable
+
+Sec18/19 flagged this gap without a deep look at what data might close it. Investigated properly
+rather than leaving the earlier assessment unchecked.
+
+**BLK: a real data field exists that was missed earlier, tested, and doesn't clear this project's
+bar.** `BoxScoreMatchupsV3` (already ingested) carries `matchupBlocks` -- blocks by a specific
+defender against a specific offensive player, confirmed live and populated (7,889 of 243,002 rows
+nonzero on real 2022-23 data, ~3.2%, matching how rare blocks are per individual pairing).
+Re-framed the right way for BLK specifically (unlike points/AST/TOV, block PREDICTION is about the
+DEFENDER's own stat, not something the offense "allows" -- so the natural adjustment is "how
+blockable is tonight's opponent," an OFFENSE-side signal, not a defender-difficulty one): built
+each offensive player's own "times blocked per matchup-minute," collapsing `matchupBlocks` by
+`personIdOff` instead of `personIdDef` (175,187 rows, 25% nonzero -- much richer once aggregated
+across every defender a player faced in a game). Swept the usual smoothing candidates (expanding-
+shrinkage priors 30-800, EWMA halflives 10-80) against a naive floor, the same gate every other
+category passed -- **the naive floor won outright here** (MAE 0.4134), beating every shrinkage
+variant tested (best expanding 0.4144, best EWMA 0.4161). Unlike points-allowed/AST-allowed/
+TOV-forced (all of which showed a clear, real shrinkage-beats-naive signal), "how blockable is this
+specific offensive player" does not show enough game-to-game persistence to reward ANY smoothing --
+the data field is real, but the underlying signal is apparently dominated by noise at this level of
+aggregation. Not built further; a real, checked negative result, not an assumption.
+
+**STL: no clean pairwise field exists.** Neither `BoxScoreDefensiveV2` nor `BoxScoreMatchupsV3`
+has a steal-specific matchup field -- `matchupTurnovers` is the closest (steals ARE a subset of
+turnovers), but conflates every turnover type, not steals specifically, and re-deriving a
+steal-specific rate from that would be too noisy a proxy to trust without direct evidence.
+
+**OREB: confirmed no pairwise field exists in ANY currently-ingested endpoint, checked a genuinely
+new data source (`BoxScoreHustleV2`) for completeness.** A rebound isn't a 1-on-1 assigned event
+the way a made shot, assist, turnover, or (per the BLK finding above) even a block can be -- it's a
+loose-ball/positioning event involving everyone on the floor, and no endpoint attributes a specific
+rebound to a specific defensive matchup. `BoxScoreHustleV2` (a genuinely new, not-yet-ingested
+endpoint) DOES carry `offensiveBoxOuts`/`defensiveBoxOuts`/`boxOutPlayerRebounds` -- confirmed live,
+same Second Spectrum-era coverage boundary as the other matchup endpoints (zero box-out data across
+a 10-game sample in 2016-17; real nonzero data by 2017-18). But it's PER-PLAYER, not opponent-
+specific -- it could only refine the EXISTING player-level OREB rate model itself (a different,
+separate research question -- does box-out volume improve on `reboundChancesOffensive`'s already-
+validated conversion-rate model), not add matchup-awareness. Not pursued here; flagged as a
+distinct, tangential idea if OREB's own rate model is ever revisited, not a matchup-difficulty fix.
+
+**STL, checked a second, more creative path -- also closed.** Considered whether already-ingested
+`PlayByPlayV3` could supply steal-specific DEFENDER attribution (a steal event's description
+sometimes names the stealing player in other NBA data feeds). Checked directly: `PlayByPlayV3` has
+NO separate "Steal" `actionType` at all -- steals are folded entirely into `Turnover` events (14
+distinct subtypes: "Bad Pass", "Lost Ball", "Offensive Foul Turnover", etc.), and neither the
+structured fields nor the free-text `description` column carries any defender/stealer attribution
+for those events (confirmed against real 2022-23 data: `Turnover` rows only ever name the
+OFFENSIVE player who lost the ball, e.g. "Brown Bad Pass Turnover (P1.T1)", never the defender who
+took it). This isn't a text-parsing difficulty to work around -- the underlying data genuinely
+doesn't carry this attribution in this feed. Confirms STL has no viable path with any currently-
+ingested data source, not just the two matchup endpoints already checked.
+
+**Net conclusion**: none of OREB/STL/BLK have a currently-viable matchup-difficulty path, checked
+across every data source already ingested (`BoxScoreDefensiveV2`, `BoxScoreMatchupsV3`,
+`PlayByPlayV3`) plus one genuinely new one (`BoxScoreHustleV2`). This isn't an assumption carried
+over from Sec18 -- it's a checked result, including one genuinely promising lead (BLK's
+`matchupBlocks`) that was found, built, tested rigorously, and didn't clear the bar. Closing this
+investigation here -- the remaining option would be a materially different NBA data source outside
+`nba_api` entirely (e.g. licensed Second Spectrum tracking with box-out/deflection attribution),
+which is a different scope of effort than a same-session research pass. No code changes this
+section (a pure research/diagnostic pass); no regression count change.
+
+## 21. Real 2025-01-15 spot-check surfaces and fixes a serious historical-backtest bug (2026-08-01)
+
+Ran a genuine end-to-end sanity check the modeling work hadn't done yet: picked a real date from
+last season (2025-01-15, an 11-game slate) and compared `generate_predictions.py`/
+`generate_props.py`'s output against the REAL final box scores -- not another aggregate MAE
+number, an actual look at "what did it say vs. what happened."
+
+**Game-score side looked reasonable for an 11-game sample**: 6/11 straight-up (54.5%, within
+normal binomial variance of the validated ~64% at this sample size), mean total error 15.7 (close
+to the validated ~15.08), mean margin error 16.41 (elevated, but mostly driven by one extreme
+outlier -- an actual 126-67 blowout no model would predict).
+
+**Props side surfaced a real, serious bug**: nearly every high-minute star was drastically
+under-projected in points (Anthony Edwards 11.6 vs actual 28; LeBron James 4.5 vs actual 22;
+Stephen Curry 18.4 vs actual 31). Diagnosed rather than dismissed as noise: checked Anthony
+Edwards's TRUE trailing-10-game minutes average as of 2025-01-15 directly against real box scores
+-- 38.06 minutes, matching his actual 40.9 that night almost exactly. But the live pipeline had
+projected him for only 10.7 minutes. Traced the cause: `resolve_active_lineup`'s "trailing 10
+games" always means "the 10 most recent team games as of the REAL wall-clock today" -- correct and
+intended for genuine live use, but when backtesting a PAST date, it silently reached past
+2025-01-15 into much later, unrelated games (confirmed directly: the stint data pulled had gameIds
+from the 2025-26 season), picking up whatever unrelated recent stretch Edwards happened to have as
+of TODAY rather than his real form heading into that specific game.
+
+**This was not a bug in the model itself** -- every rate model, RAPM fit, matchup-difficulty
+layer, and the usage-allocation macro-anchor all remained exactly as validated (the walk-forward
+dev/holdout bootstrap checks test each row using only data strictly before that row's own game,
+regardless of which date the model is later re-queried for). It was specifically a gap in how the
+LIVE entry points resolve "tonight's active roster" and "the current rating snapshot" -- both
+designed around "most recent as of right now," which is exactly correct for genuine live use and
+silently wrong for testing a date from the past.
+
+**Fixed properly, not just noted**: added `fetch_schedule.season_for_date` (a pure calendar
+lookup, no live API call, safe for backtesting -- with an honestly-documented single-season edge
+case: the COVID-disrupted 2019-20 season ran into October 2020, outside this function's August
+safety-buffer cutoff). Threaded a strict `gameDate < game_date` filter through every place either
+live pipeline resolves "trailing" data: `generate_predictions.run`'s team ratings and
+`_fit_latest_player_ratings`'s RAPM/minutes fit (now takes an optional `before_date`), and
+`generate_props.py`'s six rate-model snapshots and matchup-difficulty context (via a new `_before`
+helper). Harmless for genuine live use (`game_date` is today; there are no cached rows on or after
+today anyway) -- this is a pure bugfix for historical backtesting, not a behavior change for
+production. 31 regression tests (65 assertions) passing, including new tests for `season_for_date`'s
+calendar logic and `_before`'s strict-inequality boundary.
+
+**Re-ran the corrected comparison**: Anthony Edwards now projects 30.76 points (actual 28, from a
+correct 38-minute trailing projection matching his real ~38.06-minute history). Slate-wide points
+MAE improved from 6.34 to 5.03, with far more players correctly matched to the active roster (122
+-> 269, since the roster resolution itself is no longer contaminated by an unrelated future
+season). Several other stars still showed real misses (Curry 15.0 vs 31, Herro 21.2 vs 34) --
+checked directly whether this was a NEW systematic bias or ordinary variance: their OWN trailing
+minutes were fine (Curry projected 33.3 vs real 37.33 that night), so these are genuine points-rate
+misses, not a minutes-projection problem. Tested for a systematic share-concentration bias properly
+(comparing the MODEL'S OWN pre-game top-projected scorer against their own outcome, not the ex-post
+actual top scorer -- comparing against the actual top scorer is a well-known selection-effect trap,
+since picking the real max after the fact will show apparent underprojection for almost ANY model,
+well-calibrated or not). Result: mean signed error -1.85 points, errors bidirectional across the
+slate (both over- and under-projections) -- no evidence of a systematic bias, consistent with
+ordinary game-to-game shooting variance the aggregate bootstrap validation already accounts for,
+not a new problem requiring a fix.
+
+**This is exactly what a real spot-check is for**: caught a genuine, serious bug the aggregate
+statistics alone hadn't surfaced (a systematic issue in a specific real scenario, historical
+backtesting, that the dev/holdout bootstrap protocol was never designed to catch, since it validates
+walk-forward CORRECTNESS at the row level, not the LIVE PIPELINE'S date-handling when re-queried
+for an arbitrary date) -- fixed it properly rather than working around the specific symptom, and
+then correctly distinguished a real remaining pattern (Curry/Herro's misses) from a statistical
+illusion (the naive top-scorer-share check) before concluding anything further was wrong.
