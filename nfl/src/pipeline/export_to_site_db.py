@@ -166,14 +166,32 @@ def export(season: int, week: int, database_url: str) -> None:
         conn.close()
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 3:
+def _latest_season_week() -> tuple[int, int]:
+    """Auto-detect (season, week) from weekly_update.py's own most
+    recently-written predictions_{season}_wk{week}.parquet filename --
+    NOT a re-implementation of weekly_update.py's current_nfl_season()/
+    find_next_week() (which need real schedule data); this only reads a
+    filename weekly_update.py already wrote. Lets a cron command chain
+    `weekly_update.py && export_to_site_db.py` with no args, since the
+    cron job has no other way to know what season/week the first command
+    just used."""
+    candidates = []
+    for path in DATA_PROCESSED.glob("predictions_*_wk*.parquet"):
+        stem = path.stem  # "predictions_2026_wk1"
+        _, season_str, wk_str = stem.split("_")
+        candidates.append((int(season_str), int(wk_str.removeprefix("wk"))))
+    if not candidates:
         raise SystemExit(
-            "usage: python -m src.pipeline.export_to_site_db SEASON WEEK -- "
-            "pass the same season/week weekly_update.py just predicted (its own "
-            "current_nfl_season()/find_next_week() logic needs real schedule data "
-            "this script has no reason to duplicate)"
+            "no predictions_{season}_wk{week}.parquet found -- run weekly_update.py first, "
+            "or pass SEASON WEEK explicitly"
         )
-    season, week = int(sys.argv[1]), int(sys.argv[2])
+    return max(candidates)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 3:
+        season, week = int(sys.argv[1]), int(sys.argv[2])
+    else:
+        season, week = _latest_season_week()
     database_url = os.environ["DATABASE_URL"]
     export(season, week, database_url)
