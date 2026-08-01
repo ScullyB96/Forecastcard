@@ -60,8 +60,10 @@ def run_predictive_lineup_backtest() -> pd.DataFrame:
         ratings_snapshot = player_ratings[player_ratings["asOfDate"] == as_of]
 
         home_id, away_id = row.team_home, row.team_away
-        home_prior_games = [gid for gdate, gid in team_history.get(home_id, []) if gdate < row.gameDate]
-        away_prior_games = [gid for gdate, gid in team_history.get(away_id, []) if gdate < row.gameDate]
+        home_prior_games = [gid for gdate, gseason, gid in team_history.get(home_id, [])
+                             if gdate < row.gameDate and gseason == row.season]
+        away_prior_games = [gid for gdate, gseason, gid in team_history.get(away_id, [])
+                             if gdate < row.gameDate and gseason == row.season]
 
         home_recent_off, home_recent_def = team_recent_roster_rapm(
             player_minutes, ratings_snapshot, home_prior_games, team_side[home_id])

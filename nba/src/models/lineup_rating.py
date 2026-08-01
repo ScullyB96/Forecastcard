@@ -112,8 +112,28 @@ def team_recent_roster_rapm(player_minutes: pd.DataFrame, player_ratings_as_of: 
     been recently. `player_ratings_as_of` must already be the correct
     walk-forward snapshot (the checkpoint valid for the date being
     projected) -- see `rapm_lite.compute_walkforward_player_ratings`.
-    Falls back to (0.0, 0.0) -- i.e. no adjustment at all -- if there's no
-    lookback history yet (very start of the dataset)."""
+
+    STALE DOCSTRING FIXED (2026-08-01, full-model audit): this used to
+    describe the `(0.0, 0.0)` no-lookback-history fallback as "no
+    adjustment at all". That's only true of THIS function's own return
+    value -- but `project_lineup_adjustment` uses it as
+    `team_recent_avg_off`/`team_recent_avg_def` in
+    `off_adj += share * (off_r - team_recent_avg_off)`, which at (0.0, 0.0)
+    reduces to `off_adj += share * off_r` -- the full, un-baselined RAPM
+    rating of every active rated player, weighted by minutes share. This
+    is zero only by coincidence (the roster's weighted-average RAPM
+    happening to equal exactly league-average); for any real roster it's a
+    materially NON-zero adjustment. This fallback is not a rare startup-only
+    edge case either: Sec22's fix (scoping `team_history` to the current
+    season) means it fires at EVERY team's season opener, every season, in
+    the live pipeline -- `team_game_ids_before` is genuinely empty then,
+    while RAPM's own player-skill fit (deliberately left cross-season, see
+    Sec22) still has real ratings available to feed in. Not treated as a
+    bug to fix here (a real fallback value is defensible -- a team's
+    opening-night adjustment being driven by its rated players' own skill,
+    absent any other roster-composite signal yet, is a reasonable default,
+    arguably better than a hard zero) -- fixed only the docstring's false
+    description of what actually happens."""
     recent_game_ids = team_game_ids_before[-lookback_games:]
     if not recent_game_ids or player_ratings_as_of.empty:
         return 0.0, 0.0

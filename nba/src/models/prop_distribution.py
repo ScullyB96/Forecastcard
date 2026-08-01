@@ -3,31 +3,34 @@ rate-model point projection (a mean) into a full predictive distribution,
 enabling over/under probabilities the same way `score_distribution.py`
 does for game totals/margins -- the actual sportsbook-style deliverable.
 
-HIGH-COUNT stats (points, minutes, 2PM/3PM/FTM) -> Normal or Student-t,
-REUSING `score_distribution.fit_residual_variance_model`/`fit_student_t_df`
-directly (not reimplemented) -- refit on player residuals against the
-player's own projected EXPOSURE (minutes or attempts) as the variance-
-scaling regressor, in place of game-level `score_distribution.py`'s "pace"
-(more exposure -> more aggregated variance, the identical logic, just at
-player scale). `predict_variance` itself is a LOCAL reimplementation, not
-reused directly -- see `MIN_PLAYER_VARIANCE`'s docstring for why
-`score_distribution.py`'s own version can't be shared as-is.
+STALE DOCSTRING FIXED (2026-08-01, full-model audit): this used to
+describe the plan's ORIGINAL a priori split (points/2PM/3PM/FTM as
+"HIGH-COUNT... Normal or Student-t", OREB/STL/BLK/AST/TOV as "LOW-COUNT...
+Poisson or Negative-Binomial") -- directly contradicted by `CATEGORY_FAMILY`
+below in this SAME file, where every one of the 10 categories has
+`family_type: "count"`. See `CATEGORY_FAMILY`'s own docstring for the full
+story: Sec25 found that a genuine calibration check (not just log-score)
+showed points/2PT/3PT/FT-made are dramatically BETTER calibrated as count
+categories too -- the plan's CLT-based domain reasoning holds for a TEAM's
+aggregate points (already correctly continuous in `score_distribution.py`)
+but not for an individual player's own shot-based makes in one game, which
+never see enough volume for that approximation to hold. Every category
+below picks its family from a genuine, data-driven decision
+(`validate_prop_distribution.py`), never assumed.
 
-LOW-COUNT stats (OREB, STL, BLK, low-usage AST/TOV) -> Poisson or
-Negative-Binomial, picked via a variance-to-mean overdispersion check --
-the same "fit both, let data decide" discipline `score_distribution.py`
-already uses for Normal-vs-Student-t, extended to a NEW family axis
-(discrete vs. continuous) that game-level totals never needed: an
-individual player's low-count stat in a single game genuinely IS a
-discrete count (a player either blocks 0, 1, 2... shots), unlike a
-~100-possession-aggregated team score where a continuous approximation is
-well justified by the central limit theorem.
+`fit_continuous_family`/local `predict_variance`/the "continuous"
+`family_type` branch are kept as tested, available primitives (REUSING
+`score_distribution.fit_residual_variance_model`/`fit_student_t_df`
+directly, not reimplemented -- `predict_variance` itself is a LOCAL
+reimplementation, see `MIN_PLAYER_VARIANCE`'s docstring for why) in case a
+future category genuinely needs them -- not reachable for any
+currently-adopted category.
 """
 
 import numpy as np
 from scipy import stats
 
-from src.models.score_distribution import fit_residual_variance_model, fit_student_t_df
+from src.models.score_distribution import _t_scale, fit_residual_variance_model, fit_student_t_df
 
 # Floor on a CONTINUOUS category's predicted variance. NOT `score_distribution.MIN_VARIANCE`
 # (=4.0) -- that constant is sized for TEAM-SCORE variance (a ~100-point game's variance is
@@ -157,7 +160,7 @@ def over_under_prob(line: float, mean: float, family: str, params: dict) -> floa
     if family == "normal":
         return float(stats.norm.sf(line, loc=mean, scale=np.sqrt(params["variance"])))
     if family == "t":
-        return float(stats.t.sf(line, df=params["df"], loc=mean, scale=np.sqrt(params["variance"])))
+        return float(stats.t.sf(line, df=params["df"], loc=mean, scale=_t_scale(params["variance"], params["df"])))
     if family == "poisson":
         return float(stats.poisson.sf(line, mu=max(mean, MIN_COUNT_MEAN)))
     if family == "negbin":
@@ -178,7 +181,7 @@ def log_score(actual: float, mean: float, family: str, params: dict) -> float:
     if family == "normal":
         return float(-stats.norm.logpdf(actual, loc=mean, scale=np.sqrt(params["variance"])))
     if family == "t":
-        return float(-stats.t.logpdf(actual, df=params["df"], loc=mean, scale=np.sqrt(params["variance"])))
+        return float(-stats.t.logpdf(actual, df=params["df"], loc=mean, scale=_t_scale(params["variance"], params["df"])))
     if family == "poisson":
         return float(-stats.poisson.logpmf(actual, mu=max(mean, MIN_COUNT_MEAN)))
     if family == "negbin":

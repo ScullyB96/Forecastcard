@@ -42,10 +42,14 @@ today).
   and `MIN_MATCHUP_MINUTES_TO_TRUST`; an offensive player whose position
   group can't be resolved (no roster data) gets no adjustment
   (`matchup_adjusted: False`), not a crash or a silent zero passed off as
-  "checked and found neutral". AST/TOV are UNANCHORED (per
-  `usage_allocation.py`'s v1 scope), so their matchup adjustment is a
-  direct additive delta to the player's own projection (clipped at 0), not
-  a share-reallocation the way points' adjustment is.
+  "checked and found neutral". The matchup delta is applied as a direct
+  additive nudge to the player's own raw projection BEFORE that category's
+  own anchoring step (clipped at 0 for AST/TOV) -- points' and AST/TOV's
+  matchup deltas are both pre-anchor reshaping, not a second, independent
+  adjustment layered on top of anchoring; AST/TOV are themselves ANCHORED
+  (Task #24, see `usage_allocation.py`'s module docstring and
+  MODEL_DOCUMENTATION.md Sec23) via the same team-total mechanism as
+  points, just against `team_stat_rates.py`'s total instead of RAPM's.
 """
 
 import json
@@ -55,7 +59,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from src.ingest.fetch_rotowire_lineups import fetch_current_injury_report
+from src.ingest.fetch_rotowire_lineups import fetch_current_injury_report, warn_if_stale_for_backtest
 from src.ingest.fetch_schedule import FIRST_DEV_SEASON, season_for_date
 from src.models.matchup_difficulty import (
     MATCHUP_DATA_START_SEASON,
@@ -101,12 +105,35 @@ STAT_COLUMNS = ("2pt_proj_made", "3pt_proj_made", "ft_proj_made",
 
 
 def _latest_snapshot(log: pd.DataFrame, cols: list, group_col: str = "playerId") -> pd.DataFrame:
-    """Each player's most recent walk-forward row for the given columns --
-    same convention as `generate_predictions._latest_team_ratings`: the
-    stored value already reflects "as of before that row's own game", the
-    accepted live-pipeline approximation for "current rate" used
-    throughout this project's live entry points."""
-    return log.sort_values("gameDate").groupby(group_col)[cols].last()
+    """Each player's most recent NON-NULL value per column -- same "as of
+    before that row's own game" convention as
+    `generate_predictions._latest_team_ratings`, but taking the last REAL
+    value per column independently rather than literally whichever row is
+    chronologically last (see fix below for why that distinction matters).
+
+    REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): EWMA-based
+    columns (minutes, 2PT/3PT attempt-rate, block-rate --
+    `add_walk_forward_player_mean_ewm`) reset to NaN on every player's
+    FIRST game of every season BY DESIGN (a season-boundary reset, not
+    just a rookie's literal debut) -- confirmed directly: the sibling
+    expanding-shrinkage primitive (`add_walk_forward_player_rate`, used
+    for makes/OREB/DREB/AST/TOV) instead falls back to a real league-
+    average number at zero prior exposure, never NaN, so this asymmetry is
+    specific to the EWMA family. A plain `.last()` here picked up that
+    NaN row as the "latest" snapshot for a player's SECOND game of a new
+    season -- even though a real, non-NaN value from late LAST season was
+    sitting in an earlier row of this exact log. Because
+    `generate_props.py`'s downstream `fillna(0.0)` is explicitly meant for
+    a genuine call-up with NO history at all, this silently zeroed real,
+    established veterans' points/2PT/3PT/block props (reallocating their
+    share to teammates) every single season, leaguewide, during the week
+    after opening night -- a gap none of this project's own spot-check
+    dates happened to land in. Forward-filling before taking the last row
+    carries forward last season's real estimate across the reset instead,
+    while a genuine rookie with no history at all still correctly comes
+    out NaN (there's nothing to forward-fill from)."""
+    log = log.sort_values("gameDate")
+    return log.groupby(group_col)[cols].apply(lambda g: g.ffill().iloc[-1])
 
 
 def _before(log: pd.DataFrame, game_date: str) -> pd.DataFrame:
@@ -216,6 +243,33 @@ def _team_stat_totals(latest_team_stat: pd.DataFrame, home_id: int, away_id: int
         )
         totals[label] = {"home": home_total, "away": away_total}
     return totals
+
+
+def _anchor_preserving_missing(raw_with_nan: pd.Series, side_total: float | None) -> pd.Series:
+    """Anchors `raw_with_nan` (a per-player raw category projection, which
+    may contain NaN for a player missing that category's rate-model
+    history) to `side_total` via `compute_usage_shares` + `allocate_team_total`
+    if a total is available, else passes the raw values through unchanged
+    -- but either way, restores NaN for exactly the players who were NaN
+    on input.
+
+    REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): this used to
+    be an unconditional `.fillna(0.0)` with no way to recover which
+    players were genuinely missing history (e.g. a two-way/call-up with
+    no cached rebounding/playmaking/defensive-event data) vs. genuinely
+    projected near zero -- contradicting `_project_active_roster_stats`'s
+    own documented NaN-not-zero contract, which OREB (never anchored, so
+    never hits this path) still correctly honors. A missing player would
+    get a confident-looking `proj_mean=0.0` in the final output instead of
+    being omitted, indistinguishable downstream from a real, data-backed
+    near-certainty. The 0.0 fill is still needed internally so
+    `compute_usage_shares`/`allocate_team_total` have a real number to sum
+    over, but the missing-ness must survive to the caller."""
+    missing_mask = raw_with_nan.isna()
+    raw = raw_with_nan.fillna(0.0)
+    final = raw.copy() if side_total is None else allocate_team_total(compute_usage_shares(raw), side_total)
+    final[missing_mask] = np.nan
+    return final
 
 
 def _build_matchup_context(current_season: int, game_date: str) -> dict | None:
@@ -454,6 +508,7 @@ def run(game_date: str) -> pd.DataFrame:
         team_id_by_abbrev[r.homeAbbrev] = r.homeTeamId
         team_id_by_abbrev[r.awayAbbrev] = r.awayTeamId
 
+    warn_if_stale_for_backtest(game_date)
     injury_report = fetch_current_injury_report()
     _, player_minutes_stints = _fit_latest_player_ratings(current_season, before_date=game_date)
 
@@ -520,11 +575,26 @@ def run(game_date: str) -> pd.DataFrame:
                 delta, was_adjusted = _matchup_point_delta(
                     pid, current_season, opposing_team_id, opposing_roster_ids,
                     float(projected_minutes.get(pid, 0.0)), matchup_ctx)
-                adjusted_points[pid] = raw_points[pid] + delta
+                # REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): `delta` (from
+                # `opponent_defense_adjustment`, via `matchup_point_delta`'s pure unit conversion)
+                # is POSITIVE for a TOUGHER-than-average matchup, and its own docstring is explicit
+                # that a positive value means "suppress the offensive player's projection" -- so it
+                # must be SUBTRACTED, not added. Adding it (the original code) INCREASED points
+                # against tougher defenders and DECREASED them against weaker ones -- exactly
+                # backwards. Subtracting is also the correct fix for AST/TOV below despite TOV's
+                # opposite rate polarity (higher tov_forced = tougher defense, not lower): the
+                # underlying delta = league_avg_rate - defender_rate already encodes each stat's
+                # own convention correctly, so `raw - delta` is equivalent to `raw + (defender_rate
+                # - league_avg_rate)` in every case -- a higher defender_rate always pushes the
+                # offensive stat up, whether that means "weak defender allows more points" or
+                # "tough defender forces more turnovers". See MODEL_DOCUMENTATION.md for the
+                # worked-through derivation.
+                adjusted_points[pid] = raw_points[pid] - delta
                 matchup_adjusted_flags[pid] = was_adjusted
 
-                # AST/TOV (Sec18/19): unanchored, so a direct additive delta to the player's own
-                # projection -- no team-total redistribution needed the way points has.
+                # AST/TOV (Sec18/19): the matchup delta is a direct additive nudge to the player's
+                # own RAW projection, applied BEFORE the ADOPTED_CATEGORIES anchoring loop below --
+                # ast/tov ARE anchored to team_stat_rates' team total (Task #24), same as points.
                 pid_minutes = float(projected_minutes.get(pid, 0.0))
                 ast_delta, ast_adjusted = _ast_tov_matchup_delta(
                     "ast", pid, current_season, opposing_team_id, opposing_roster_ids, pid_minutes, matchup_ctx)
@@ -532,9 +602,9 @@ def run(game_date: str) -> pd.DataFrame:
                     "tov", pid, current_season, opposing_team_id, opposing_roster_ids, pid_minutes, matchup_ctx)
                 if pid in proj.index:
                     if ast_adjusted and pd.notna(proj.loc[pid].get("ast_proj")):
-                        proj.loc[pid, "ast_proj"] = max(0.0, proj.loc[pid, "ast_proj"] + ast_delta)
+                        proj.loc[pid, "ast_proj"] = max(0.0, proj.loc[pid, "ast_proj"] - ast_delta)
                     if tov_adjusted and pd.notna(proj.loc[pid].get("tov_proj")):
-                        proj.loc[pid, "tov_proj"] = max(0.0, proj.loc[pid, "tov_proj"] + tov_delta)
+                        proj.loc[pid, "tov_proj"] = max(0.0, proj.loc[pid, "tov_proj"] - tov_delta)
                 ast_adjusted_flags[pid] = ast_adjusted
                 tov_adjusted_flags[pid] = tov_adjusted
 
@@ -552,14 +622,9 @@ def run(game_date: str) -> pd.DataFrame:
                 col = f"{label}_proj"
                 if col not in proj.columns:
                     continue
-                raw = proj[col].fillna(0.0)
                 side_total = game_stat_totals.get(label, {}).get(side)
-                if side_total is None:
-                    final_by_category[label] = raw
-                    anchored_flags[label] = False
-                else:
-                    final_by_category[label] = allocate_team_total(compute_usage_shares(raw), side_total)
-                    anchored_flags[label] = True
+                final_by_category[label] = _anchor_preserving_missing(proj[col], side_total)
+                anchored_flags[label] = side_total is not None
 
             for pid in proj.index:
                 stat_values = {

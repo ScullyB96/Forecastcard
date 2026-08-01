@@ -25,13 +25,35 @@ fetching data nothing downstream consumes anymore, while never fetching
 the traditional box scores `build_stints.py`'s actual (current) primary
 path needs, and never rebuilding the current season's stints cache at all.
 Predictive-mode lineup adjustment (Sec7) has no current-season lineup data
-to compute trailing minutes from without this fix."""
+to compute trailing minutes from without this fix.
+
+SECOND BUG FOUND AND FIXED (2026-08-01, full-model audit): this function
+still never fetched player-tracking (`BoxScorePlayerTrackV3` --
+rebound-chances/touches), matchup-difficulty (`BoxScoreMatchupsV3`/
+`BoxScoreDefensiveV2`), or team-roster (`CommonTeamRoster`) data for the
+CURRENT season at all -- confirmed by grep: `fetch_player_track_season`/
+`fetch_matchups_season`/`fetch_defensive_season`/`fetch_rosters_season`
+were called from nowhere but their own module's `__main__` block, anywhere
+in the repo. `generate_props.py` depends on all three for the current
+season (rebounding/playmaking rate models, and the full matchup-difficulty
+hierarchy) -- this was silently invisible because 2025-26's files already
+happened to exist on disk from a one-time/manual backfill, but the moment
+the NEXT season (2026-27) begins, the live props pipeline would have
+silently degraded to NaN rebounding/playmaking rates and zero matchup
+adjustment for the entire new season, with no error or warning anywhere.
+Fetching these three each run is exactly as cheap as the fetches already
+here -- each is its own already-existing done-games-cache-aware function,
+so re-running never re-fetches an already-cached game."""
 
 from src.ingest.build_stints import build_season_stints
+from src.ingest.fetch_boxscore_matchups import fetch_defensive_season, fetch_matchups_season
 from src.ingest.fetch_boxscore_traditional import fetch_traditional_season
 from src.ingest.fetch_boxscores import fetch_boxscores_season
 from src.ingest.fetch_playbyplay import fetch_playbyplay_season
+from src.ingest.fetch_player_track import fetch_player_track_season
 from src.ingest.fetch_schedule import current_nba_season, fetch_season
+from src.ingest.fetch_team_rosters import fetch_rosters_season
+from src.models.matchup_difficulty import MATCHUP_DATA_START_SEASON
 
 
 def refresh_all_data() -> int:
@@ -43,6 +65,15 @@ def refresh_all_data() -> int:
     fetch_boxscores_season(current)
     fetch_playbyplay_season(current)
     fetch_traditional_season(current)
+    fetch_player_track_season(current)
+    fetch_rosters_season(current)
+    # BoxScoreMatchupsV3/BoxScoreDefensiveV2 only exist from the 2017-18 season onward (confirmed
+    # live during the original props-subsystem build) -- `current` is always the real current
+    # season here (never a historical backfill year), so this guard is a defensive no-op today,
+    # not a live gap, but keeps this function safe to call verbatim if ever pointed at a past season.
+    if current >= MATCHUP_DATA_START_SEASON:
+        fetch_matchups_season(current)
+        fetch_defensive_season(current)
     build_season_stints(current, force=True)
     print("refresh complete", flush=True)
     return current

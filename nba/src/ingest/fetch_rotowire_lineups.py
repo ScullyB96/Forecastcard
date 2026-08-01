@@ -24,6 +24,8 @@ live-pipeline-only source (Phase 5), not part of the dev/holdout training
 data.
 """
 
+from datetime import date
+
 import requests
 
 ROTOWIRE_URL = "https://www.rotowire.com/basketball/tables/injury-report.php"
@@ -56,6 +58,34 @@ def fetch_current_injury_report() -> list[dict]:
         }
         for r in rows
     ]
+
+
+def warn_if_stale_for_backtest(game_date: str) -> None:
+    """Prints an explicit warning when `game_date` isn't real wall-clock
+    "today" -- `fetch_current_injury_report` has NO `game_date` parameter
+    and can't have one (RotoWire has no historical archive at all, see
+    this module's own docstring), so both live pipelines silently apply
+    TODAY's Out/Doubtful list to whatever historical `game_date` they were
+    asked to run for.
+
+    REAL GAP FOUND (2026-08-01, full-model audit): every one of this
+    project's own historical spot-checks (2018-01-15, 2023-11-08,
+    2024-03-05, 2025-01-15) was silently exposed to this exact
+    contamination -- a player genuinely out on the target historical date
+    but healthy today wouldn't be excluded, and a player flagged Out today
+    (for an unrelated, much later injury) would be wrongly excluded from a
+    past game he actually played real minutes in. Not fixable at the data
+    layer (there is nothing to backfill from), so the honest fix is an
+    explicit, loud warning rather than a silent, invisible distortion --
+    exactly this project's standing discipline for every other
+    unresolvable caveat (e.g. the COVID-season edge case documented in
+    `season_for_date`)."""
+    if game_date != date.today().isoformat():
+        print(f"  WARNING: RotoWire's injury report has NO historical archive -- it always reflects "
+              f"REAL WALL-CLOCK TODAY ({date.today().isoformat()}), not {game_date}. Active-lineup "
+              f"resolution for this historical/backtest call is using TODAY's Out/Doubtful list, "
+              f"which may incorrectly include or exclude players relative to the real situation on "
+              f"{game_date}.", flush=True)
 
 
 if __name__ == "__main__":

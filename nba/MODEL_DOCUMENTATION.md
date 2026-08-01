@@ -228,6 +228,21 @@ added complexity, so still not adopted. Both problems remain open; both now have
 tested, ruled-out (or insufficient) mechanisms on record, narrowing what a future fix would need to
 look like. 39 regression tests (106 assertions) passing.
 
+**Full-model audit and 7 real bug fixes (Sec27, 2026-08-01).** A 29-agent workflow audited the
+entire codebase for data gaps, calculation errors, logical fallacies, and unverified assumptions,
+adversarially re-verifying every flagged finding before counting it. Found 17 confirmed real issues
+(7 high-severity) and 26 additional-lever ideas. Fixed all 7 high-severity bugs, most notably: the
+LIVE game-score pipeline had been hardcoding `home_court_mult=1.0` since its first commit, silently
+discarding the validated home-court effect entirely; matchup difficulty was applied BACKWARDS on
+points/AST/TOV (a sign error -- tougher matchups increased projections instead of suppressing them);
+an EWMA season-boundary reset was silently zeroing real veterans' points/2PT/3PT/block props every
+season during the week after opening night; and the officially-adopted Phase 2 RAPM numbers had been
+computed on since-fixed-elsewhere roster-bleed logic, never re-validated -- re-running under the
+corrected logic reproduced the same adopted conclusion, essentially unchanged. Also fixed several
+medium-severity findings along the way (a dormant-but-real Student-t variance bug, a permanently
+false-failing data-coverage check, a player-name-collision risk, and multiple stale docstrings). 44
+regression tests (123 assertions) passing. See Sec27 for full detail.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -1979,3 +1994,219 @@ available remedy still isn't good enough to adopt. 1 new regression test added
 (`test_add_team_ratings_new_prior_games_params_default_preserving`, 3 assertions confirming the
 new overridable shrinkage-strength params reproduce the exact original Phase 1 behavior at their
 defaults) -- 39 regression tests (106 assertions) passing.
+
+## 27. Full-model audit (2026-08-01) -- 29-agent workflow, 17 confirmed real findings, 26 lever ideas; fixing the 7 high-severity bugs
+
+Ran a comprehensive audit: 8 parallel subsystem reviewers swept the entire codebase for data gaps,
+calculation errors, logical fallacies, and unverified assumptions; every flagged finding was then
+adversarially re-verified by a SECOND agent instructed to try to refute it by reading the code
+directly (not trust the first agent's claim); a separate 4-agent research pass looked for additional
+predictive levers. Result: 17 confirmed findings (7 high-severity, 10 medium) and 26 lever ideas.
+Full detail (every finding's file/line/failure-scenario, every lever's rationale/feasibility) is
+preserved in the workflow's own transcript; this section documents the fixes actually made.
+
+### 27.1 Real bug: live game-score pipeline never applied home-court advantage
+
+`generate_predictions.py`'s `run()` called `project_game(..., home_court_mult=1.0)` literally, since
+the file's first commit -- discarding the empirically-validated home-court effect (Sec4: home teams
+average 106.2 vs away 103.5 points, 58.4% home win rate) that every validation/backtest script
+(`validate_team_strength_baseline.py`, `run_final_holdout_check.py`, etc.) correctly fits and
+applies via `fit_home_court_walk_forward`. Two equally-rated teams got an IDENTICAL projected score
+regardless of who was home -- the live pipeline could not express a home-court edge at all -- and
+`win_prob_home`/`interval` (fit on residuals from `build_dev_predictions()`, which DOES include the
+correction) were applied to a systematically biased mean, corrupting the live win-probability and
+spread-interval output too. Present through Sec9.2's "confirmed against 2018-01-15's real 11-game
+slate" spot-check without the gap ever surfacing, since that check only sanity-checked plausibility,
+not the specific presence of a home-court split.
+
+**Fixed**: added `_latest_home_court_mult(team_log)`, which reshapes the SAME `team_log` the live
+call already built (already `gameDate < game_date`-filtered, so walk-forward safe) into the wide
+per-game shape via `validate_team_strength_baseline._to_wide_games`, fits
+`fit_home_court_walk_forward` on it, and takes the last (most recent) value -- falling back to 1.0
+only if there's no game history to fit from yet (an honest "no correction available", not a silent
+wrong number). Re-ran the 2025-01-15 spot-check: home teams' projected scores now correctly shift up
+and away teams' down across the board (e.g. PHI home win prob 29.2% -> 33.2%), confirming the fix
+takes effect in the right direction.
+
+### 27.2 Real bug: matchup difficulty applied backwards on points, AST, and TOV
+
+`matchup_difficulty.opponent_defense_adjustment`'s own docstring is explicit: "positive return =
+tougher-than-average matchup (suppress the offensive player's projection)". `generate_props.py`
+instead ADDED this value to the player's raw projection (`adjusted_points[pid] = raw_points[pid] +
+delta`, and the identical pattern for `ast_proj`/`tov_proj`) -- increasing a player's projection
+against tougher defenders and decreasing it against weaker ones, exactly backwards. Team-total
+reconciliation (what Sec13's validation actually checked) can't catch this, since it only verifies
+the SUM stays anchored, never the per-player direction.
+
+TOV compounds this with a real polarity question: `tov_forced` uses the OPPOSITE rate convention
+from points/ast_allowed (higher rate = tougher/better defense, not lower), so a genuinely tougher
+turnover-forcing defender produces a NEGATIVE delta under the shared `league_avg - defender_rate`
+formula. Worked through the arithmetic by hand (and confirmed via a new regression test using
+`opponent_defense_adjustment`'s REAL output, not hand-picked signs): the single fix of subtracting
+instead of adding correctly handles BOTH polarities at once -- `raw - delta` is algebraically
+equivalent to `raw + (defender_rate - league_avg_rate)`, and a higher defender_rate always pushes
+the offensive stat up, whether that means "a weak defender allows more points" or "a tough defender
+forces more turnovers". No separate TOV-specific sign-flip was needed.
+
+**Fixed**: `generate_props.py`'s three application sites (points, ast, tov) now subtract the delta
+instead of adding it. Also fixed a related, purely-documentation bug found in the same file: the
+module docstring and an inline comment self-contradicted about whether AST/TOV are anchored to a
+team total (one paragraph said yes -- correct, matching the code -- a later paragraph and inline
+comment said no, stale since Sec23 added the anchoring); both now consistently describe the actual,
+correct behavior. New regression test
+`test_matchup_delta_application_direction_suppresses_points_boosts_tov` confirms both the
+suppress-points and boost-turnovers directions using real `opponent_defense_adjustment` output, and
+explicitly confirms the ORIGINAL buggy addition would have produced the opposite (wrong) result in
+both cases -- a genuine regression test, not a tautology.
+
+### 27.3 Real bug: `generate_props.py` silently converted genuinely-missing player data into confident zero projections
+
+`_project_active_roster_stats` documents that a player missing from a category's rate log (e.g. a
+brand-new call-up) should get NaN -- "NOT silently zero -- so a downstream caller can distinguish
+genuinely projects near zero from no data available". That held for OREB/2PT/3PT/FT-made (read
+directly with no fillna), but was silently broken for the five Task #24-anchored categories
+(DREB/AST/TOV/STL/BLK): `.fillna(0.0)` ran unconditionally, BEFORE the anchoring branch was even
+decided, so both the anchored and unanchored-fallback paths already contained 0.0 instead of NaN.
+A two-way/call-up player with real projected minutes but no cached history would show up as
+`stat_name='ast', proj_mean=0.0, anchored_to_team_total=True` in the final output -- indistinguishable
+from a real, data-backed near-certainty.
+
+**Fixed**: extracted the anchoring logic into a new, directly-testable helper,
+`_anchor_preserving_missing(raw_with_nan, side_total)` -- it still needs a real 0.0 internally so
+`compute_usage_shares`/`allocate_team_total` have something to sum over, but now remembers which
+players were originally NaN and restores NaN on the FINAL output for exactly those players, in both
+the anchored and unanchored branches. New regression test
+`test_anchor_preserving_missing_does_not_mask_genuinely_missing_players` confirms both branches.
+
+### 27.4 Real bug: EWMA's per-season reset silently zeroed real veterans' props every season
+
+`add_walk_forward_player_mean_ewm` (used for minutes, 2PT/3PT attempt-rate, and block-rate) resets
+to NaN on every player's FIRST game of every season BY DESIGN -- not just a rookie's literal debut,
+every established veteran too (confirmed: the sibling expanding-shrinkage primitive,
+`add_walk_forward_player_rate`, instead falls back to a real league-average number at zero prior
+exposure, never NaN -- this asymmetry is specific to the EWMA family). `generate_props.py`'s
+`_latest_snapshot` picked the chronologically LAST row per player via a plain `.groupby(...).last()`
+-- so when projecting a player's SECOND game of a new season, the "latest" available row (their
+season-opener, already played) had this NaN, even though a real, non-NaN value from late LAST
+season was sitting in an earlier row of the exact same log. That NaN then hit
+`generate_props.py`'s `fillna(0.0)` fallback -- explicitly commented as being for "a brand-new
+call-up" -- silently zeroing the player's points/2PT/3PT/block share for that one game and
+reallocating it to teammates. Recurs every single season, leaguewide, during the week after opening
+night; none of this project's own spot-check dates (2018-01-15, 2023-11-08, 2024-03-05, 2025-01-15)
+happened to land in that exact window, which is why it was never caught.
+
+**Fixed**: `_latest_snapshot` now forward-fills each column within a player's own sorted history
+before taking the last row (`g.ffill().iloc[-1]` per group) -- carrying last season's real estimate
+forward across the reset instead of picking up the fresh NaN. A genuine rookie with no history at
+all still correctly comes out NaN (nothing to forward-fill from). New regression test
+`test_latest_snapshot_carries_forward_across_ewma_season_reset` confirms both cases directly.
+
+### 27.5 Real bug: the adopted Phase 2 RAPM numbers were computed on since-fixed-elsewhere logic
+
+Sec22 fixed a real cross-season roster-bleed bug (a team's "last N games" lookback silently blending
+in the PRIOR season's roster early in a new season, inflating the resolved active roster ~2x) for
+the two LIVE pipelines only. `validate_rapm_lineup_adjustment.py`'s `_build_team_history` --
+reused UNMODIFIED by `validate_predictive_lineup_adjustment.py` and `run_final_holdout_check.py` --
+still built each team's history from the full, unfiltered multi-season log with no season-boundary
+guard. These three scripts produced the officially-adopted Phase 2 numbers (Sec7's oracle-mode
+result, Sec9.1's predictive-mode "~95% of ceiling" result, Sec9.3/9.4's holdout verdict that "Phase
+2 stands") -- all computed on logic that Sec22 had already found and fixed everywhere else, never
+re-validated after that fix landed.
+
+**Fixed**: `_build_team_history` now also tracks each game's own `season`, and all three callers'
+per-row prior-games filter additionally requires `season == row.season`, mirroring the live fix
+exactly. Re-ran all three affected validation scripts under the corrected logic:
+
+| check | metric | ORIGINAL (stale logic) | RE-VALIDATED (fixed logic) | still holds? |
+|---|---|---|---|---|
+| Sec7 oracle-mode vs Phase 1 | total_mae | -0.0217 REAL | -0.0205 REAL | yes |
+| | margin_mae | -0.0350 REAL | -0.0358 REAL | yes |
+| | su | NOISE | NOISE | yes |
+| Sec9.1 predictive-mode vs Phase 1 | total_mae | -0.0206 REAL | -0.0185 REAL | yes |
+| | margin_mae | -0.0336 REAL | -0.0332 REAL | yes |
+| | su | NOISE | NOISE | yes |
+| Sec9.3 Phase 4 holdout (dev n=10467, holdout n=2407) | total_mae gap | NOISE | NOISE | yes |
+| | margin_mae gap | REAL REGRESSION -- VETO | REAL REGRESSION -- VETO | yes |
+| | su gap | REAL IMPROVEMENT (unusual) | REAL IMPROVEMENT (unusual) | yes |
+
+**Every previously-adopted conclusion holds under the corrected logic, numbers essentially
+unchanged.** This is a genuinely informative re-validation, not a foregone conclusion -- the bug was
+real (confirmed by the code diff and by `_build_team_history`'s own git history), and there was no
+guarantee ahead of time that fixing it wouldn't shift the verdict on a metric this close to its own
+significance boundary. It didn't. Phase 2 (RAPM-lite) remains confirmed-adopted; Phase 1's margin/
+scoring-era-drift issue remains open exactly as documented (Sec9.5, Sec24, Sec26) -- this fix and
+re-validation neither creates nor resolves that open problem, it just closes the gap between what
+was tested and what's actually deployed.
+
+### 27.6 Additional fixes made during the same pass
+
+While working through the 7 high-severity bugs, also fixed several of the medium-severity findings
+that were quick and clearly worth doing:
+
+- **`score_distribution.py`'s Student-t variance mismatch** (dormant, but real): every Student-t
+  call site passed `scale=sqrt(variance)` directly to scipy, which does NOT give the t-distribution
+  that variance -- scipy's `t.cdf`/`t.ppf`/`t.logpdf`/`t.sf` parameterize `X = loc + scale*T` where
+  `Var(T) = df/(df-2)`, not 1, silently inflating the REALIZED variance and contradicting
+  `margin_and_total_params`'s own "matched variance" docstring claim. Confirmed empirically
+  (`scipy.stats.t.rvs(df=9.5, scale=10)` has empirical variance ~126.5, matching `100*9.5/7.5`, not
+  the naive 100) -- at df=9.5 (Sec11's real fitted points df, before Sec25 moved points off the
+  continuous path entirely), that's a ~12.6% too-wide implied standard deviation. Currently dormant
+  in live production (every adopted category uses `family='normal'` or a count family, never `'t'`),
+  but this exact bug WAS present in the original Sec6/Sec11 dev-range Normal-vs-t comparisons that
+  decided those families in the first place. Fixed with a new `_t_scale(var, df)` helper (converts a
+  target variance into the correct scipy `scale`), applied at every t-family call site in both
+  `score_distribution.py` and the copy-pasted math in `prop_distribution.py`. New regression test
+  `test_t_scale_produces_correctly_matched_variance` confirms the fix via real scipy sampling (not
+  just algebra), and explicitly confirms the ORIGINAL buggy scale inflates variance well above target.
+
+- **`validate_data_coverage.py`'s permanent false FAIL**: was checking `rotation_{season}.parquet`
+  (the abandoned `GameRotation` source, Sec5) instead of `boxscore_trad_player_{season}.parquet` (what
+  `build_stints.py` actually depends on) -- reporting `OVERALL: FAIL` on every run regardless of real
+  data completeness, and never actually validating the source that matters. Fixed to check the right
+  source; re-running now surfaces a small number of genuinely real, plausible gaps (10-11 games
+  missing in a few seasons) instead of a permanent, misleading whole-season false alarm.
+
+- **RotoWire injury report has no historical archive, but neither live pipeline warned when
+  running for a non-today date**: `fetch_current_injury_report()` always reflects real wall-clock
+  today with no `game_date` awareness -- not fixable at the data layer (there's nothing to backfill
+  from), so added `warn_if_stale_for_backtest(game_date)`, called by both `generate_predictions.py`
+  and `generate_props.py`, printing an explicit warning whenever `game_date != date.today()`.  Every
+  one of this project's own historical spot-checks (2018-01-15, 2023-11-08, 2024-03-05, 2025-01-15)
+  was silently exposed to this before now; confirmed the warning fires correctly on a live re-run of
+  the 2025-01-15 spot-check.
+
+- **Player-name-to-ID crosswalk had no `is_active` tiebreak or collision detection**: `nba_api`'s
+  static player list has 37-38 groups of players sharing an exact `full_name`; the original code
+  silently kept whichever entry happened to appear last in the list's arbitrary order. One real
+  collision was live-relevant: "Brandon Williams" resolved correctly today purely by accident of list
+  ordering (not a guarantee). Fixed with `_build_name_index`, which prefers `is_active=True` on a
+  collision (a real, defensible tiebreak for a live injury report) and tracks genuinely ambiguous
+  collisions (same active-status) in a `dupes` set, returning `None` for those -- same signal as "no
+  match at all" rather than a silent wrong guess. Confirmed live: "Brandon Williams" now resolves
+  deterministically to the active player's ID, and 37 genuinely ambiguous collisions are now tracked
+  (down from being silently absorbed with zero visibility before).
+
+- **Stale docstrings** in `prop_distribution.py` and `validate_prop_distribution.py` (both still
+  described the plan's pre-Sec25 continuous/count split, contradicted by `CATEGORY_FAMILY`/
+  `CATEGORY_SPECS` a few dozen lines below in the SAME files) and in `lineup_rating.py`'s
+  `team_recent_roster_rapm` (claimed its no-history fallback means "no adjustment at all", when
+  `project_lineup_adjustment` actually applies each active player's full raw RAPM rating unweighted
+  in that case -- a real, non-zero adjustment that now fires at every team's season opener since
+  Sec22's season-scoping fix). All three corrected to describe actual current behavior; none required
+  a behavior change, only fixing what the code already does now being told accurately.
+
+39 regression tests grew to 44 (123 assertions) across this pass -- new tests:
+`test_matchup_delta_application_direction_suppresses_points_boosts_tov`,
+`test_anchor_preserving_missing_does_not_mask_genuinely_missing_players`,
+`test_latest_snapshot_carries_forward_across_ewma_season_reset`,
+`test_t_scale_produces_correctly_matched_variance`,
+`test_name_index_prefers_active_player_and_flags_genuine_ambiguity`.
+
+**Still open** (flagged by the audit, not yet fixed): the `refresh_data.py` current-season data gap
+for player-track/matchup/roster fetches (now fixed, see the module's own updated docstring) leaves
+one related, smaller gap -- `active_roster.py`'s trailing-minutes lookback still has no check
+against actual roster membership for a MID-season trade/waiver (Sec22 only fixed the cross-SEASON
+version of this); and `predictive_minutes_shares`' backtest methodology uses a more-informed
+active-player-set selection than the live pipeline can replicate (a real gap between the validated
+~95%/96% ceiling-capture figure and live-achievable accuracy). Both are real, but neither is a
+quick, isolated fix -- left as documented, flagged follow-up work rather than rushed.

@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.ingest.build_stints import _get_starters, _normalize_name, _prep_pbp_timeline, _roster_lookup
 from src.ingest.fetch_schedule import season_for_date
+from src.ingest.player_name_crosswalk import _build_name_index
 from src.pipeline.active_roster import build_team_history
 from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, bootstrap_compare
 from src.models.garbage_time import add_garbage_time_weight
@@ -29,12 +30,13 @@ from src.models.player_defensive_event_rates import add_defensive_event_rates
 from src.models.player_playmaking_rates import PRIOR_TOUCHES_AST, PRIOR_TOUCHES_TOV
 from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FTA, add_scoring_rates
 from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_family, log_score, over_under_prob, predict_variance
+from src.models.score_distribution import _t_scale
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
-from src.models.usage_allocation import allocate_team_total, compute_usage_shares
+from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta
 from src.models.rapm_lite import _career_games_played, prepare_stints
 from src.models.team_stat_rates import ADOPTED_CATEGORIES, STAT_COLUMNS, build_team_stat_game_log, project_team_stat
 from src.models.team_strength import PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings
-from src.pipeline.generate_props import _team_stat_totals
+from src.pipeline.generate_props import _anchor_preserving_missing, _latest_snapshot, _team_stat_totals
 
 FAILURES = []
 
@@ -618,6 +620,152 @@ def test_add_team_ratings_new_prior_games_params_default_preserving():
                == explicit_out[col].reset_index(drop=True).fillna(-999)).all())
 
 
+def test_matchup_delta_application_direction_suppresses_points_boosts_tov():
+    """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): `generate_props.py` ADDED the
+    matchup delta to a player's raw projection instead of SUBTRACTING it.
+    `opponent_defense_adjustment`'s own docstring is explicit that a positive return means
+    "tougher-than-average matchup, suppress the offensive player's projection" -- adding a positive
+    delta INCREASES the projection instead, exactly backwards. This also compounds into a polarity
+    bug for TOV specifically: `tov_forced` uses the OPPOSITE rate convention from points/ast_allowed
+    (higher rate = tougher defense, not lower), so a genuinely tougher turnover-forcing defender
+    produces a NEGATIVE delta under the shared formula -- meaning the single fix (subtract instead
+    of add) must correctly SUPPRESS points against a tougher points-defender AND correctly BOOST
+    turnovers against a tougher turnover-forcing defender, using the REAL opponent_defense_adjustment
+    output for both, not hand-picked signs."""
+    league_avg_points_rate = 1.0
+    tougher_points_defender_rate = 0.8  # allows FEWER points per matchup-minute than average -> tougher
+    league_avg_tov_rate = 0.15
+    tougher_tov_defender_rate = 0.22  # forces MORE turnovers per matchup-minute than average -> tougher
+
+    points_delta = opponent_defense_adjustment(
+        opposing_roster_player_ids=["D"], defender_ratings=pd.Series({"D": tougher_points_defender_rate}),
+        defender_minutes_at_posgroup=pd.Series({"D": 100.0}), posgroup_rating=None,
+        league_avg_posgroup_rating=league_avg_points_rate)
+    tov_delta = opponent_defense_adjustment(
+        opposing_roster_player_ids=["D"], defender_ratings=pd.Series({"D": tougher_tov_defender_rate}),
+        defender_minutes_at_posgroup=pd.Series({"D": 100.0}), posgroup_rating=None,
+        league_avg_posgroup_rating=league_avg_tov_rate)
+
+    check("points_delta is positive (tougher matchup, per opponent_defense_adjustment's own convention)",
+          points_delta > 0, f"got {points_delta}")
+    check("tov_delta is negative (a tougher turnover-forcing defender has a HIGHER raw rate -- "
+          "opposite polarity from points/ast)", tov_delta < 0, f"got {tov_delta}")
+
+    raw_points, raw_tov = 20.0, 3.0
+    fixed_points = raw_points - matchup_point_delta(points_delta, projected_minutes=30.0)
+    fixed_tov = raw_tov - matchup_point_delta(tov_delta, projected_minutes=30.0)
+    check("subtracting the delta SUPPRESSES points against a tougher (fewer-points-allowed) defender",
+          fixed_points < raw_points, f"got {fixed_points} vs raw {raw_points}")
+    check("subtracting the delta BOOSTS turnovers against a tougher (more-turnovers-forced) defender",
+          fixed_tov > raw_tov, f"got {fixed_tov} vs raw {raw_tov}")
+
+    buggy_points = raw_points + matchup_point_delta(points_delta, projected_minutes=30.0)
+    buggy_tov = raw_tov + matchup_point_delta(tov_delta, projected_minutes=30.0)
+    check("the ORIGINAL buggy addition would have INCREASED points against a tougher defender "
+          "(confirms this locks in a real regression, not a tautology)", buggy_points > raw_points)
+    check("the ORIGINAL buggy addition would have DECREASED turnovers against a tougher "
+          "turnover-forcing defense (the opposite of the polarity-corrected result)", buggy_tov < raw_tov)
+
+
+def test_latest_snapshot_carries_forward_across_ewma_season_reset():
+    """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): EWMA-based rate columns
+    (minutes/2PT/3PT-attempt-rate/block-rate, via `add_walk_forward_player_mean_ewm`) reset to NaN
+    on every player's FIRST game of every season by design -- so a plain `.groupby(...).last()` in
+    `_latest_snapshot` picked up that NaN row as the "latest" snapshot for a player's SECOND game of
+    a new season, even though a real value from late last season was sitting in an earlier row of
+    the same log. This test confirms the fix: a real veteran (season-boundary NaN reset, real value
+    both before and after) forward-fills correctly, while a true rookie (never has a real value)
+    still correctly comes out NaN -- confirming the fix doesn't manufacture data where none exists."""
+    log = pd.DataFrame([
+        {"playerId": "vet", "gameDate": pd.Timestamp("2023-04-01"), "x": 30.0},   # last game of season A
+        {"playerId": "vet", "gameDate": pd.Timestamp("2023-10-25"), "x": np.nan},  # season B opener: EWMA reset
+        {"playerId": "rookie", "gameDate": pd.Timestamp("2023-10-25"), "x": np.nan},  # true debut, no history at all
+    ])
+    snapshot = _latest_snapshot(log, ["x"])
+    check("a veteran's season-opener NaN forward-fills to last season's real value, not NaN",
+          snapshot.loc["vet", "x"] == 30.0, f"got {snapshot.loc['vet', 'x']}")
+    check("a true rookie with no history at all still correctly comes out NaN (not manufactured)",
+          pd.isna(snapshot.loc["rookie", "x"]))
+
+
+def test_anchor_preserving_missing_does_not_mask_genuinely_missing_players():
+    """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): the ADOPTED_CATEGORIES anchoring
+    loop in generate_props.py used to unconditionally `.fillna(0.0)` a category's raw per-player
+    projections BEFORE anchoring, so a player genuinely missing that category's rate-model history
+    (e.g. a two-way/call-up) came out as a confident-looking `proj_mean=0.0` instead of being
+    distinguishable as "no data available" -- contradicting `_project_active_roster_stats`'s own
+    documented NaN-not-zero contract. This test confirms the fix in both branches: anchored (a real
+    side_total given) and unanchored (side_total=None, the bottom-up fallback)."""
+    raw = pd.Series({"A": 10.0, "B": np.nan, "C": 6.0})
+
+    anchored = _anchor_preserving_missing(raw, side_total=32.0)
+    check("anchored: the genuinely-missing player (B) stays NaN, not 0.0",
+          pd.isna(anchored["B"]), f"got {anchored['B']}")
+    check("anchored: the real players' values are real numbers summing to the team total",
+          abs((anchored["A"] + anchored["C"]) - 32.0) < 1e-9, f"got {anchored['A']} + {anchored['C']}")
+
+    unanchored = _anchor_preserving_missing(raw, side_total=None)
+    check("unanchored (bottom-up fallback): the genuinely-missing player (B) stays NaN, not 0.0",
+          pd.isna(unanchored["B"]), f"got {unanchored['B']}")
+    check("unanchored: real players' raw values pass through unchanged",
+          unanchored["A"] == 10.0 and unanchored["C"] == 6.0)
+
+
+def test_name_index_prefers_active_player_and_flags_genuine_ambiguity():
+    """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): the player-name-to-ID crosswalk used
+    to keep whichever of two same-named players happened to appear LAST in `nba_api`'s unsorted
+    static list, with no `is_active` preference and no collision detection -- unlike this project's
+    own `build_stints._roster_lookup`, which already demonstrates the right pattern (an explicit
+    `dupes` set). This test confirms `_build_name_index`: an active/retired collision resolves
+    deterministically to the active player (not by list-order accident), while a collision between
+    two players sharing the SAME active status is genuinely ambiguous and gets flagged in `dupes`,
+    not silently resolved."""
+    active_retired_collision = [
+        {"id": 1, "full_name": "Same Name", "is_active": False},
+        {"id": 2, "full_name": "Same Name", "is_active": True},
+    ]
+    index, dupes = _build_name_index(active_retired_collision, lambda p: p["full_name"])
+    check("active/retired collision resolves to the ACTIVE player's id, not list order",
+          index["Same Name"] == 2, f"got {index['Same Name']}")
+    check("an active/retired collision is NOT flagged as ambiguous (a real, confident tiebreak)",
+          "Same Name" not in dupes)
+
+    both_active_collision = [
+        {"id": 3, "full_name": "Other Name", "is_active": True},
+        {"id": 4, "full_name": "Other Name", "is_active": True},
+    ]
+    index2, dupes2 = _build_name_index(both_active_collision, lambda p: p["full_name"])
+    check("a genuinely ambiguous collision (both active) IS flagged in dupes",
+          "Other Name" in dupes2, f"got {dupes2}")
+
+
+def test_t_scale_produces_correctly_matched_variance():
+    """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): every Student-t call site in
+    `score_distribution.py` (and the copy-pasted math in `prop_distribution.py`) used to pass
+    `scale=sqrt(var)` directly to scipy, which does NOT give the t-distribution that variance --
+    scipy's `t.cdf`/`t.ppf`/`t.logpdf`/`t.sf` parameterize `X = loc + scale*T` where
+    `Var(T) = df/(df-2)`, not 1, so the REALIZED variance was silently inflated by `df/(df-2)`,
+    contradicting `margin_and_total_params`'s own "matched variance" docstring claim. Confirms
+    `_t_scale`'s formula directly: sampling a real scipy t-distribution built with `_t_scale`'s
+    output has empirical variance matching the TARGET var, not the naive (uncorrected) one."""
+    from scipy import stats
+
+    rng = np.random.default_rng(0)
+    target_var, df = 100.0, 9.5
+    scale = _t_scale(target_var, df)
+    samples = stats.t.rvs(df=df, loc=0.0, scale=scale, size=2_000_000, random_state=rng)
+    empirical_var = float(np.var(samples))
+    check("a t-distribution built with _t_scale's output has empirical variance matching the target",
+          abs(empirical_var - target_var) / target_var < 0.02, f"got {empirical_var}, target {target_var}")
+
+    naive_scale = np.sqrt(target_var)  # the ORIGINAL buggy behavior
+    naive_samples = stats.t.rvs(df=df, loc=0.0, scale=naive_scale, size=2_000_000, random_state=rng)
+    naive_empirical_var = float(np.var(naive_samples))
+    check("the ORIGINAL buggy scale=sqrt(var) inflates the realized variance well above the target "
+          "(confirms this locks in a real fix, not a tautology)",
+          naive_empirical_var > target_var * 1.15, f"got {naive_empirical_var}, target {target_var}")
+
+
 def test_prop_distribution_variance_floor_is_player_scale_not_team_scale():
     """REAL BUG (2026-08-01, found by inspecting real live `generate_props.py`
     output): `prop_distribution.py` originally imported and called
@@ -1118,6 +1266,11 @@ if __name__ == "__main__":
     test_team_level_adaptive_league_average_default_preserving_and_responsive()
     test_prop_distribution_variance_floor_is_player_scale_not_team_scale()
     test_add_team_ratings_new_prior_games_params_default_preserving()
+    test_matchup_delta_application_direction_suppresses_points_boosts_tov()
+    test_anchor_preserving_missing_does_not_mask_genuinely_missing_players()
+    test_latest_snapshot_carries_forward_across_ewma_season_reset()
+    test_t_scale_produces_correctly_matched_variance()
+    test_name_index_prefers_active_player_and_flags_genuine_ambiguity()
 
     print()
     if FAILURES:

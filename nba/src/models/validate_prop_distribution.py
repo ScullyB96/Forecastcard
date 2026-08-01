@@ -17,13 +17,19 @@ assume a family transfers, even within the same continuous/count axis"
 discipline (e.g. blocks and steals could plausibly have different
 overdispersion despite both being count/exposure=minutes categories).
 
-Continuous-vs-count AXIS ASSIGNMENT itself is NOT re-derived here (kept as
-the plan's original domain-reasoning split: points/2PT/3PT/FT-makes
-aggregate over many shot attempts per game, genuinely continuous-like by
-CLT; OREB/DREB/AST/TOV/STL/BLK are low-count discrete events) -- only the
-SPECIFIC family WITHIN that already-assigned axis (Normal vs t; Poisson vs
-NegBin) is decided empirically per category, exactly mirroring how points
-(Normal vs t) and blocks (Poisson vs NegBin) were originally handled.
+STALE DOCSTRING FIXED (2026-08-01, full-model audit): this paragraph used
+to claim the continuous-vs-count axis assignment was "kept as the plan's
+original domain-reasoning split" and NOT re-derived -- directly
+contradicted by `CATEGORY_SPECS` below, which assigns every one of the 10
+categories `family_type="count"` (no "continuous" entries at all). The
+axis WAS re-derived (Sec25's Finding 2): a genuine calibration check
+(never done before) showed points/2PT/3PT/FT-made calibrate dramatically
+better as count categories, overturning the plan's a priori assumption.
+The `_fit_and_score_continuous` branch and its dispatch in `run_category`
+are kept generic/reachable (not deleted) in case a future category
+genuinely needs it, but are unreachable for any of the 10 categories as
+currently configured -- see `prop_distribution.CATEGORY_FAMILY`'s
+docstring for the full story and numbers.
 
 Run as `python -m src.models.validate_prop_distribution`.
 """

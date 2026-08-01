@@ -43,14 +43,29 @@ def load_dev_stints() -> pd.DataFrame:
 
 def _build_team_history(long_log: pd.DataFrame) -> tuple[dict, dict]:
     """From the long (one row per team per game) team-game log: for each
-    team, the ordered-by-date list of that team's own gameIds, plus a
-    per-team {gameId: 'home'/'away'} side lookup -- what
-    `lineup_rating.team_recent_roster_rapm` needs for its lookback."""
+    team, the ordered-by-date list of that team's own (gameDate, season,
+    gameId) tuples, plus a per-team {gameId: 'home'/'away'} side lookup --
+    what `lineup_rating.team_recent_roster_rapm` needs for its lookback.
+
+    REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): Sec22 fixed a
+    real cross-season roster-bleed bug (a team's "last N games" lookback
+    silently blending in the PRIOR season's roster early in a new season,
+    inflating the resolved roster ~2x) for the two LIVE pipelines only,
+    by restricting `team_log` to `season == target_season` before
+    building team history. This function -- reused unmodified by
+    `validate_predictive_lineup_adjustment.py` and
+    `run_final_holdout_check.py` -- produced the officially-adopted Phase
+    2 dev/holdout numbers (Sec7/Sec9.1/Sec9.3/Sec9.4) using the SAME
+    unfixed, season-blending logic, and was never re-validated after the
+    live fix landed. Now also tracks each game's own `season` so every
+    caller's per-row filter can additionally require `season ==
+    row.season`, mirroring the live fix exactly -- see
+    MODEL_DOCUMENTATION.md for the re-validation this enabled."""
     long_log = long_log.sort_values("gameDate")
     team_history: dict[int, list] = {}
     team_side: dict[int, dict] = {}
     for row in long_log.itertuples(index=False):
-        team_history.setdefault(row.team, []).append((row.gameDate, row.gameId))
+        team_history.setdefault(row.team, []).append((row.gameDate, row.season, row.gameId))
         team_side.setdefault(row.team, {})[row.gameId] = "home" if row.is_home else "away"
     return team_history, team_side
 
@@ -82,8 +97,10 @@ def run_oracle_lineup_backtest() -> pd.DataFrame:
         ratings_snapshot = player_ratings[player_ratings["asOfDate"] == as_of]
 
         home_id, away_id = row.team_home, row.team_away
-        home_prior_games = [gid for gdate, gid in team_history.get(home_id, []) if gdate < row.gameDate]
-        away_prior_games = [gid for gdate, gid in team_history.get(away_id, []) if gdate < row.gameDate]
+        home_prior_games = [gid for gdate, gseason, gid in team_history.get(home_id, [])
+                             if gdate < row.gameDate and gseason == row.season]
+        away_prior_games = [gid for gdate, gseason, gid in team_history.get(away_id, [])
+                             if gdate < row.gameDate and gseason == row.season]
 
         home_recent_off, home_recent_def = team_recent_roster_rapm(
             player_minutes, ratings_snapshot, home_prior_games, team_side[home_id])

@@ -48,6 +48,31 @@ def fit_home_away_correlation(home_residuals: np.ndarray, away_residuals: np.nda
     return float(np.corrcoef(home_residuals, away_residuals)[0, 1])
 
 
+def _t_scale(var, df: float):
+    """Converts a target VARIANCE into the scipy `scale` parameter for a
+    Student-t with `df` degrees of freedom.
+
+    REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): scipy's
+    `t.cdf`/`t.ppf`/`t.logpdf`/`t.sf` parameterize `X = loc + scale*T`
+    where T is a STANDARD Student-t with `Var(T) = df/(df-2)` for df>2 --
+    NOT 1 -- so passing `scale=sqrt(var)` directly (what every t-family
+    call site in this module, and the copy-pasted math in
+    `prop_distribution.py`, originally did) silently inflates the
+    REALIZED variance by a factor of `df/(df-2)`, contradicting this
+    module's own "matched variance -- only the tail shape differs, not
+    these first two moments" design intent (see `margin_and_total_params`'s
+    docstring). Confirmed empirically: `scipy.stats.t.rvs(df=9.5, scale=10,
+    size=3e6)` has empirical variance ~126.5, matching `100 * 9.5/7.5 ~
+    126.67`, not the naive 100. Currently dormant in live production
+    (every adopted category uses `family='normal'`), but this bug was
+    silently present in the ORIGINAL Sec6/Sec11 dev-range Normal-vs-t
+    comparisons that decided the family in the first place -- df is
+    floored at 2.001 here (variance is undefined at df<=2, though
+    `fit_student_t_df` already floors its own output at 2.5)."""
+    df = max(df, 2.001)
+    return np.sqrt(var * (df - 2) / df)
+
+
 def fit_student_t_df(standardized_residuals: np.ndarray) -> float:
     """Degrees of freedom via method-of-moments on excess kurtosis (simpler
     and more robust than full MLE for a first cut): df = 6/excess_kurtosis + 4
@@ -77,17 +102,17 @@ def margin_and_total_params(mean_home: float, mean_away: float, var_home: float,
 def win_prob_home(mean_home: float, mean_away: float, var_home: float, var_away: float,
                    corr: float, family: str = "normal", df: float = 200.0) -> float:
     params = margin_and_total_params(mean_home, mean_away, var_home, var_away, corr)
-    margin_std = np.sqrt(params["margin_var"])
     if family == "t":
-        return float(1 - stats.t.cdf(0, df=df, loc=params["margin_mean"], scale=margin_std))
-    return float(1 - stats.norm.cdf(0, loc=params["margin_mean"], scale=margin_std))
+        return float(1 - stats.t.cdf(0, df=df, loc=params["margin_mean"], scale=_t_scale(params["margin_var"], df)))
+    return float(1 - stats.norm.cdf(0, loc=params["margin_mean"], scale=np.sqrt(params["margin_var"])))
 
 
 def interval(mean: float, var: float, coverage: float, family: str = "normal", df: float = 200.0) -> tuple[float, float]:
     alpha = (1 - coverage) / 2
-    std = np.sqrt(var)
     if family == "t":
-        return float(stats.t.ppf(alpha, df=df, loc=mean, scale=std)), float(stats.t.ppf(1 - alpha, df=df, loc=mean, scale=std))
+        scale = _t_scale(var, df)
+        return float(stats.t.ppf(alpha, df=df, loc=mean, scale=scale)), float(stats.t.ppf(1 - alpha, df=df, loc=mean, scale=scale))
+    std = np.sqrt(var)
     return float(stats.norm.ppf(alpha, loc=mean, scale=std)), float(stats.norm.ppf(1 - alpha, loc=mean, scale=std))
 
 
@@ -96,10 +121,9 @@ def log_score(actual: float, mean: float, var: float, family: str = "normal", df
     that works uniformly for any parametric family, used as the primary
     Normal-vs-Student-t comparison metric instead of CRPS (which only has a
     simple closed form for Normal)."""
-    std = np.sqrt(var)
     if family == "t":
-        return float(-stats.t.logpdf(actual, df=df, loc=mean, scale=std))
-    return float(-stats.norm.logpdf(actual, loc=mean, scale=std))
+        return float(-stats.t.logpdf(actual, df=df, loc=mean, scale=_t_scale(var, df)))
+    return float(-stats.norm.logpdf(actual, loc=mean, scale=np.sqrt(var)))
 
 
 def crps_normal(actual: float, mean: float, var: float) -> float:
@@ -116,11 +140,12 @@ def empirical_coverage(actuals: np.ndarray, means: np.ndarray, variances: np.nda
     interval -- should be close to `coverage` itself for a well-calibrated
     distribution."""
     alpha = (1 - coverage) / 2
-    stds = np.sqrt(variances)
     if family == "t":
-        lo = stats.t.ppf(alpha, df=df, loc=means, scale=stds)
-        hi = stats.t.ppf(1 - alpha, df=df, loc=means, scale=stds)
+        scales = _t_scale(variances, df)
+        lo = stats.t.ppf(alpha, df=df, loc=means, scale=scales)
+        hi = stats.t.ppf(1 - alpha, df=df, loc=means, scale=scales)
     else:
+        stds = np.sqrt(variances)
         lo = stats.norm.ppf(alpha, loc=means, scale=stds)
         hi = stats.norm.ppf(1 - alpha, loc=means, scale=stds)
     return float(((actuals >= lo) & (actuals <= hi)).mean())

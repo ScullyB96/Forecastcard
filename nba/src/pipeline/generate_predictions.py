@@ -49,14 +49,16 @@ import numpy as np
 import pandas as pd
 
 from src.ingest.build_stints import build_season_stints
-from src.ingest.fetch_rotowire_lineups import fetch_current_injury_report
+from src.ingest.fetch_rotowire_lineups import fetch_current_injury_report, warn_if_stale_for_backtest
 from src.ingest.fetch_schedule import FIRST_DEV_SEASON, season_for_date, season_str
 from src.models.lineup_rating import player_minutes_from_stints, project_lineup_adjustment, team_recent_roster_rapm
 from src.models.rapm_lite import fit_rapm, prepare_stints
 from src.models.score_distribution import (
     fit_home_away_correlation, fit_residual_variance_model, interval, predict_variance, win_prob_home,
 )
+from src.models.home_court import fit_home_court_walk_forward
 from src.models.team_strength import add_team_ratings, build_team_game_log, project_game
+from src.models.validate_team_strength_baseline import _to_wide_games
 from src.pipeline.active_roster import MINUTES_LOOKBACK_GAMES, build_team_history, games_on_date, resolve_active_lineup
 from src.pipeline.refresh_data import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
@@ -110,6 +112,36 @@ def _latest_team_ratings(team_log: pd.DataFrame) -> pd.DataFrame:
     return team_log.sort_values("gameDate").groupby("team").tail(1).set_index("team")
 
 
+def _latest_home_court_mult(team_log: pd.DataFrame) -> float:
+    """The most recent walk-forward-fit home-court multiplier, computed
+    from the SAME `team_log` this call already built (already filtered to
+    `gameDate < game_date`, so this is walk-forward safe) -- NOT the
+    hardcoded 1.0 this function replaces.
+
+    REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): `run()`
+    previously called `project_game(..., home_court_mult=1.0)` literally,
+    discarding the empirically-validated home-court effect (Sec4: home
+    teams average 106.2 vs away 103.5 points, 58.4% home win rate) that
+    every validation/backtest script in this project actually fits and
+    applies. Two equally-rated teams got an IDENTICAL projected score
+    regardless of who was home -- the live pipeline could not express a
+    home-court edge at all, and `win_prob_home`/`interval` (fit on
+    residuals that DO assume the correction) were applied to a
+    systematically biased mean. `team_log` already has every column
+    `home_court.fit_home_court_walk_forward` needs (same construction
+    path as `validate_team_strength_baseline._rated_dev_log`, just spanning
+    through `target_season` instead of stopping at `DEV_MAX_SEASON - 1`)
+    once reshaped wide via that module's own `_to_wide_games` helper.
+    Falls back to 1.0 (the old behavior) only if there's no game history
+    yet to fit from -- an honest "no correction available", not a silent
+    wrong number."""
+    games = _to_wide_games(team_log)
+    if games.empty:
+        return 1.0
+    mult = fit_home_court_walk_forward(games).iloc[-1]
+    return float(mult) if pd.notna(mult) else 1.0
+
+
 def run(game_date: str) -> pd.DataFrame:
     refresh_all_data()  # ensure real-time data is backfilled; season logic below uses game_date, not "today"
     # `target_season` is derived PURELY from `game_date` (see `season_for_date`'s docstring), never
@@ -126,10 +158,12 @@ def run(game_date: str) -> pd.DataFrame:
         print(f"no games found for {game_date}", flush=True)
         return pd.DataFrame()
 
+    warn_if_stale_for_backtest(game_date)
     injury_report = fetch_current_injury_report()
     team_log = add_team_ratings(build_team_game_log(2015, target_season))
     team_log = team_log[pd.to_datetime(team_log["gameDate"]) < pd.Timestamp(game_date)]
     latest = _latest_team_ratings(team_log)
+    home_court_mult = _latest_home_court_mult(team_log)
     # `team_history`/`team_side` feed active-roster/minutes resolution and the "recent roster
     # composite" RAPM lookback -- BOTH represent "who is on this team's roster right now", which
     # must never blend across a season boundary (unlike the team-level PACE/RATING above, which
@@ -147,19 +181,17 @@ def run(game_date: str) -> pd.DataFrame:
               "any cached season) -- falling back to team-strength-only (Phase 1) projections "
               "for this call", flush=True)
 
-    # Home-court multiplier and score-distribution variance/correlation are both fit from the
-    # full historical backtest -- recomputed on every call for v1 (correctness over efficiency);
-    # caching these as persisted artifacts (instead of refitting per live invocation) is a
-    # documented follow-up, not done here.
+    # Score-distribution variance/correlation is fit from the DEV-RANGE-ONLY historical backtest
+    # (`build_dev_predictions` stops at DEV_MAX_SEASON - 1) -- recomputed on every call for v1
+    # (correctness over efficiency); caching this as a persisted artifact, and/or extending its
+    # fit range through the live game_date the way home_court_mult now does (see
+    # `_latest_home_court_mult` above), is a documented follow-up, not done here. This dev-only
+    # staleness is a separate, lower-severity, already-acknowledged tradeoff -- NOT the home-court
+    # hardcode bug fixed above (that one silently discarded a real, validated effect entirely;
+    # this one uses a real, validated fit that just doesn't extend all the way to today).
     try:
         from src.models.validate_team_strength_baseline import build_dev_predictions
         dev_preds = build_dev_predictions().dropna(subset=["pred_home", "pred_away"])
-        # NOTE: home_court_mult is left at a flat 1.0 for this live call rather than refitting
-        # `fit_home_court_walk_forward` here -- that function needs the wide (one-row-per-game,
-        # home_/away_ prefixed) shape built by validate_team_strength_baseline._to_wide_games,
-        # which doesn't apply to a single not-yet-played game. Using the dev-range's own already-
-        # walk-forward-fit multiplier (its last value) is the correct follow-up; deferred as a
-        # small wiring task, not a design gap.
         home_resid = (dev_preds["actual_home"] - dev_preds["pred_home"]).to_numpy()
         away_resid = (dev_preds["actual_away"] - dev_preds["pred_away"]).to_numpy()
         home_var_model = fit_residual_variance_model(home_resid, dev_preds["projected_pace"].to_numpy())
@@ -212,7 +244,7 @@ def run(game_date: str) -> pd.DataFrame:
             league_avg_pace=h["pace_league_avg"],
             home_oRtg=home_oRtg, home_dRtg=home_dRtg,
             away_oRtg=away_oRtg, away_dRtg=away_dRtg,
-            league_avg_rtg=h["rtg_league_avg"], home_court_mult=1.0,
+            league_avg_rtg=h["rtg_league_avg"], home_court_mult=home_court_mult,
         )
 
         line = f"  {row.awayAbbrev} @ {row.homeAbbrev}: {pred_away:.1f} - {pred_home:.1f}  [{lineup_tag}]"
