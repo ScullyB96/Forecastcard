@@ -56,6 +56,15 @@ PA_COLUMNS = [
     "home_team", "away_team", "n_thruorder_pitcher", "hc_x", "hc_y", "fielder_2",
     "estimated_ba_using_speedangle", "launch_speed_angle", "age_bat", "age_pit", "launch_angle",
     "fielder_3", "fielder_4", "fielder_5", "fielder_6", "fielder_7", "fielder_8", "fielder_9",
+    # task #161 (2026-07-26): real defensive-alignment decision for this PA
+    # (Standard/Infield shade/Strategic, Standard/Strategic/"4th outfielder")
+    # -- set BEFORE the pitch, so (like stand/p_throws/on_base state) this
+    # comes from the PA's FIRST pitch below, not the last. A causally-
+    # identified real effect (the 2023 infield shift ban raised LHB BABIP/OBP
+    # ~9 points) that the model's existing generic OAA defense-quality factor
+    # doesn't capture with this specificity -- surfaced by the deep-research
+    # pass, sec 11.35.
+    "if_fielding_alignment", "of_fielding_alignment",
 ]
 
 

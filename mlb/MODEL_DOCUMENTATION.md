@@ -3968,6 +3968,79 @@ mechanism bugs. Flagged here so they aren't silently lost:
   season — a real leak, but confined to a standalone diagnostic, not
   production code.
 
+## 11.35 The deep-research pass (2026-07-26/08-01): status verification, and
+why its two "big win" candidates didn't survive contact with our own data
+
+Following task #160's correctness audit, ran a 108-agent deep-research pass
+(adversarially verified, 25 sources fetched, 105 claims extracted, 25
+verified) explicitly asking: (a) is this architecture still consistent with
+serious modern practice, (b) how should our real 58-59% SU be benchmarked,
+(c) what published signals are we missing, (d) is there a better way to
+combine independent context factors than multiplying them.
+
+**Verdict on (a)/(b) — no pivot needed, and we're likely near the ceiling.**
+Several tempting "just use ML" claims were checked and refuted: a
+head-to-head thesis test found regularized logistic regression matched or
+beat gradient-boosted trees/random forests on Brier score; multiple
+"89-95% accuracy" ML papers turned out to leak the game's own outcome-
+linked stats as inputs (not real pre-game forecasting); no verified source
+showed neural/GBM approaches beating this model class on genuine pre-game
+MLB prediction. Our core odds-ratio/log5 combine matches Baseball
+Prospectus's own published PECOTA methodology (as of 2010) — not a dated
+choice. On benchmarking: published pre-game MLB classifiers cluster
+mid-50s to low-60s% across decades of literature (one XGBoost study tops
+out at 55.5%, its own authors concluding it couldn't beat bookmakers);
+historical betting favorites themselves win only 55.9-57%; a 155,563-game
+study found no significant exploitable inefficiency anywhere in posted
+odds. Our real, walk-forward 58-59% SU with zero market data as input is
+at or above this documented ceiling, not obviously leaving free accuracy
+on the table via more of the same signal type.
+
+**Two candidates surfaced for (c) — both investigated immediately, both
+came back null or low-value once checked against OUR OWN data, following
+this project's own "quantify before building" discipline:**
+
+- **Defensive shift/positioning** (task #161): the cited effect (2023
+  shift-ban DiD study, ~9-point LHB BABIP/OBP increase) is REAL, but it
+  measures the impact of BANNING the old, fully-illegal shift — a
+  mechanism that has never existed anywhere in our own data window.
+  `validate_game_simulator.py`'s own `TEST_SEASONS` comment already
+  correctly notes "identical 2023+ rules regime (pitch clock, **shift
+  ban**, ...)" — we were never going to be able to observe the banned
+  effect from 2023+ Statcast data, by construction. Added
+  `if_fielding_alignment`/`of_fielding_alignment` to the PA table anyway
+  (real, free, already-fetched data — cheap to check) and directly
+  measured the REMAINING legal "Infield shade" positioning's real BABIP
+  effect on our own 665,659 PAs: **negligible, and inconsistent in
+  direction** — LHB pulled-groundball BABIP is actually slightly HIGHER
+  under shade than standard (0.187 vs 0.182), RHB shows a small, real
+  suppression (0.210 vs 0.226, ~1.6pp) but nothing close to the paper's
+  9-point figure. Genuinely checked, genuinely null — not built. The two
+  new columns stay in the PA table (harmless, real data, may be useful for
+  something else later) but no live signal was built on top of them.
+- **Ballpark humidor/ball-conditioning as a distinct attribute**: real and
+  physics-grounded (net distance effect is almost entirely
+  coefficient-of-restitution, not air density), but this project's park
+  factors are purely EMPIRICAL (measured from real 3-year rolling home/road
+  outcome rates, not decomposed into causal mechanisms) — any real humidor
+  effect for a park with enough real same-venue history is ALREADY baked
+  into that park's own walk-forward factor, whether or not the mechanism
+  is explicitly labeled "humidor." Modeling it as a separate attribute
+  would only add value for a park in its FIRST humidor-adoption season
+  (a cold-start edge case, not a broad accuracy lever) — not pursued.
+
+**Research question (d) — interaction-aware combination of context
+factors — came back genuinely open** (no claims survived verification
+either way); flagged as an honest unanswered question, not evidence either
+way, should a future session want to search it specifically.
+
+**Net conclusion**: the model's real accuracy is honestly close to a
+documented, literature-wide ceiling for this class of problem without
+market data as an input. This session's actual gains came from fixing real
+bugs (task #160), not from finding a new architectural lever — which,
+after this research pass, looks like the correct place for this project's
+effort to have gone.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):
