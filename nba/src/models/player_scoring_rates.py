@@ -74,6 +74,14 @@ PRIOR_ATTEMPTS_3PM = 150.0
 PRIOR_MINUTES_FTA = 20.0
 PRIOR_ATTEMPTS_FTM = 15.0
 
+# NOT ADOPTED: `add_walk_forward_player_rate`'s new `league_avg_halflife_games` option (Sec16
+# props-Phase-4 fast-follow) looked like a real improvement for FT make-rate on a recent-dev-only
+# chronological slice (MAE 0.2939 vs 0.2943, CI excluded zero) -- but did NOT hold up at FULL
+# dev-range scale: re-validating there showed FT makes REGRESS from a real improvement (shrunk
+# 1.0425 vs naive 1.0434) to NOISE (shrunk 1.0430 vs naive 1.0434, CI includes zero). A caught,
+# reverted mistake, not a silent one -- exactly why every candidate fix gets a full-dev-range
+# re-check before adoption, not just the narrower recent-slice signal that motivated trying it.
+
 _EWMA_CATEGORIES = (
     # (label, attempt_col, make_col, prior_attempts_for_make_rate)
     ("2pt", "fgAtt2", "fgMade2", PRIOR_ATTEMPTS_2PM),

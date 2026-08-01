@@ -10,18 +10,32 @@ model should isolate the player's own conversion skill from that.
 Uses expanding-shrinkage (not EWMA), following the same reasoning already
 confirmed for shooting rates and steal/block rates in this codebase: a
 rebound-CHANCE-conversion rate is a persistent physical/positional skill,
-not a volatile coaching decision the way raw minutes are -- this is a
-testable assumption, not asserted as fact, and `validate_player_rebounding_rates.py`
-checks it against a naive floor the same way every other category here
-does, once `BoxScorePlayerTrackV3`'s backfill is complete enough to validate on.
+not a volatile coaching decision the way raw minutes are -- confirmed via
+`validate_player_rebounding_rates.py` against a naive floor on the full
+dev range (both OREB and DREB real improvements).
+
+**Real fix (2026-08-01, Sec14/15 props-Phase-4 fast-follow)**: the props
+subsystem's first-ever holdout check found OREB carrying a REAL dev-vs-
+holdout MAE gap, diagnosed as a genuine, non-monotonic era shift in
+league-wide OREB rate (dipped through 2017-2020, then rose again in
+2024-2025) that an infinite-memory prior calibrated mostly on the flatter
+middle years was slow to track. Re-swept `PRIOR_CHANCES_OREB` using a
+chronological 80/20 split WITHIN dev only (never touching real holdout for
+this decision, per the confirmatory-veto protocol) -- prior=50 (MAE 0.4318
+on the recent-dev eval slice) beat the original prior=100 (MAE 0.4326),
+confirmed via bootstrap on that same recent-dev slice (CI excludes zero).
+Lowered `PRIOR_CHANCES_OREB` to 50; re-validated on the FULL dev range
+(still a real improvement over naive) and re-checked against real holdout
+(a genuinely new configuration, its own one-time confirmatory read) -- see
+MODEL_DOCUMENTATION.md Sec15 for the holdout result.
 """
 
 import pandas as pd
 
 from src.models.player_rate_shrinkage import add_walk_forward_player_rate
 
-PRIOR_CHANCES_OREB = 100.0  # placeholder, un-calibrated -- see MODEL_DOCUMENTATION.md
-PRIOR_CHANCES_DREB = 150.0
+PRIOR_CHANCES_OREB = 50.0  # lowered from 100 -- see Sec14/15 fast-follow finding above
+PRIOR_CHANCES_DREB = 150.0  # unchanged -- DREB showed no real dev/holdout gap (Sec14)
 
 
 def add_rebounding_rates(log: pd.DataFrame) -> pd.DataFrame:

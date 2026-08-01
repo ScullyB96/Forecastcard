@@ -77,12 +77,62 @@ double-counting. A player-level predictive-distribution layer (`prop_distributio
 `score_distribution.py`'s math for high-count stats plus a new Poisson/NegBin branch for low-count
 ones. A live `generate_props.py` pipeline, confirmed against a real historical slate (points
 reconcile exactly to the game-prediction pipeline's own team totals; no NaN/negative projections).
-**Known, explicitly-flagged v1 gap**: matchup difficulty is built and validated but NOT yet wired
-into the live `generate_props.py` call (every output row is tagged `matchup_adjusted: False`) --
-a real fast-follow, not silently dropped. See Sec8/10/11/12 for the full writeup, including two
-more real bugs found and fixed (an `inf`-poisoned log-score at a zero-mean count projection, and a
-NaN-poisons-the-team-sum risk in the live usage-allocation wiring). 23 regression tests (45
-assertions) passing in `tests/test_regression_bugs.py`.
+**Matchup difficulty is now wired into the live call** (Sec13): confirmed on the same real slate,
+319 of 334 players got a real matchup adjustment, with the remaining 15 honestly falling back to
+`matchup_adjusted: False` (players no longer on any current-season roster, not a bug -- see
+Sec13). See Sec8/10/11/12/13 for the full writeup, including three real bugs found and fixed (an
+`inf`-poisoned log-score at a zero-mean count projection, a NaN-poisons-the-team-sum risk in the
+live usage-allocation wiring, both caught before shipping). 23 regression tests (45 assertions)
+passing in `tests/test_regression_bugs.py`.
+
+**Props Phase 4 (confirmatory holdout check, Sec14): RUN, ONCE, 2026-08-01 -- real, mixed, fully
+diagnosed result, same precedent as the game-score model's own Sec9.** 5 of 12 sub-models
+(minutes, 3PT makes, steals, OREB, assists) showed a REAL dev-vs-holdout MAE gap -- diagnosed as
+genuine era-driven trend shifts in league-wide play style (rising 3PT volume, rising assist rates,
+non-monotonic OREB/steal trends, deepening rotations), not a modeling defect. Critically, all 5
+STILL beat a naive floor when re-checked on holdout data alone -- real degradation, but every
+model remains net-positive in the era it's actually deployed against. **Net call: all 12 categories
+stand, live-wired, no reversions** -- the 5 with a real gap carry an open, documented
+reduced-confidence caveat (a candidate for a future recency-retune cycle), not a silent block.
+
+**Fast-follow attempted immediately (Sec15)**: dev-only retuning (never touching holdout for the
+decision) found a genuine improvement for 2 of the 5 -- `PRIOR_CHANCES_OREB` 100->50,
+`PRIOR_TOUCHES_AST` 50->100, both adopted (real improvements on dev AND holdout in absolute
+terms). No fix found for minutes/3PT/steals -- their already-deployed settings were already at or
+near the recent-dev-slice optimum. Importantly, the OREB/AST fixes improved absolute accuracy but
+did NOT close the relative dev/holdout gap -- an honest, informative negative result suggesting
+the gap is a genuine structural era-shift, not a stale-hyperparameter problem, and pointing toward
+the same class of fix already flagged for the game-score model's own scoring-drift issue (a
+walk-forward-ADAPTIVE calibration, not a fixed smoothing parameter) as the real future direction.
+
+**Adaptive-calibration attempt (Sec16): built, tested, honest negative result.** Built a
+recency-weighted (EWMA) alternative to the shared shrinkage primitive's league-average blending
+target (previously a flat cumulative average pooled across ALL history since 2015, not even
+season-reset -- a clean, well-targeted hypothesis for the diagnosed drift). Tested broadly across
+every affected category using dev-only chronological splits. Two categories (steals, FT-make)
+looked like real fixes on initial dev-only checks; FT-make was caught regressing at full-dev-range
+re-validation and reverted before ever reaching holdout; steals passed EVERY dev-only gate but
+still made TRUE holdout performance worse when checked (a new one-time confirmatory read) and was
+also reverted. **Nothing from this section is adopted** -- the new primitive option remains
+available (harmless by default) but unused. Confirms more strongly than Sec15 that this gap needs
+a genuinely structural fix (decompose league trend from player residual), not a fixed decay
+constant, however carefully swept -- flagged as real future work, not a same-day fix.
+
+**The structural fix, attempted and DECISIVELY resolved (Sec17): stop trying.** Built exactly the
+"decompose league trend from player residual" architecture Sec16 called for
+(`add_era_adjusted_player_rate`, detrend-then-retrend) and validated it far more rigorously than
+anything before (consistent gains across 4 independent dev-internal cutoffs, full-dev-range,
+vs-naive). It STILL failed on real holdout, and by MORE than the simpler Sec16 attempt did (steals:
+dev/holdout gap widened from Sec16's (+0.0075,+0.0177) to Sec17's (+0.0149,+0.0251)). **Three
+independent, increasingly sophisticated attempts, each making holdout WORSE, is a decisive pattern,
+not a reason to try a fourth.** Diagnosis: the 2024-2025 steal-rate jump is a genuine REGIME CHANGE
+at the exact dev/holdout boundary, not an extrapolable trend -- no technique trained only on
+pre-2024 data can predict a shift with no precedent in that data. Critically, this does NOT mean
+today's live system carries the same blind spot: `generate_props.py` refits every model fresh from
+ALL cached data on every call, so the ACTUALLY DEPLOYED model has already walk-forward-absorbed the
+2024-2025 regime shift by now -- the real remedy for a regime change is exactly what the system
+already does (keep updating on real games), not a cleverer historical extrapolation. Stopping
+further attempts at this specific gap. 26 regression tests (53 assertions) passing.
 
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
@@ -947,11 +997,7 @@ own team total for that game to 4+ decimal places (e.g. CHA @ DET: 113.55/116.65
 ~14 projected points down to a fringe rotation player ~1, no implausible outliers).
 
 **Known, explicitly-flagged v1 gaps (not silently shipped as complete):**
-- **Matchup difficulty is NOT wired into this live call yet**, even though `matchup_difficulty.py`
-  is fully built and validated (Sec10). Every output row carries `matchup_adjusted: False`. Wiring
-  it live needs each offensive player's own position group (from `CommonTeamRoster`) and the full
-  opposing active roster's defender ratings resolved for tonight specifically -- real additional
-  live-data-assembly work, a flagged fast-follow.
+- Matchup difficulty was not yet wired into this live call as of this section -- **fixed in Sec13.**
 - REB/AST/TOV/STL/BLK remain UNANCHORED (each rate model's own projection used directly, per
   `usage_allocation.py`'s documented v1 scope) and use an approximated projected-chances/
   projected-touches unit conversion (each player's own trailing chances-per-minute /
@@ -961,5 +1007,405 @@ own team total for that game to 4+ decimal places (e.g. CHA @ DET: 113.55/116.65
 
 **All 6 tasks in the approved player-props plan (#9-#14) are now DONE.** The props subsystem has a
 working, validated, real-data-tested v1 pipeline end to end: shared shrinkage primitive -> minutes
--> six per-player rate categories -> matchup difficulty (built, not yet live-wired) -> usage
-allocation -> prop distribution -> live daily output. 23 regression tests (45 assertions) passing.
+-> six per-player rate categories -> matchup difficulty -> usage allocation -> prop distribution ->
+live daily output.
+
+## 13. Matchup difficulty wired into the live props pipeline (2026-08-01, fast-follow to Sec12)
+
+Closes the one flagged gap from Sec12. `generate_props.py` now applies `opponent_defense_adjustment`
+to points before `usage_allocation.compute_usage_shares`, via two new pieces:
+
+- `_build_matchup_context(current_season, game_date)`: computed ONCE per `run()` call (not once per
+  player) -- each defender's latest `difficulty_rate` snapshot, each (team, position_group)'s latest
+  `posgroup_difficulty_rate` snapshot, a league-average-by-position-group floor (the mean of every
+  team's latest posgroup rating, not a raw all-history mean, so one team's longer history can't
+  outweigh another's), each position group's trailing defender-minutes exposure as of tonight (via
+  `defender_position_group_minutes_asof`), and `matchup_difficulty.load_roster_position_lookup`
+  (renamed from `_load_roster_position_lookup` -- now a genuinely shared public function, needed by
+  both `matchup_difficulty.py` internally and `generate_props.py`).
+- `_matchup_point_delta(pid, offense_season, opposing_team_id, opposing_roster_ids,
+  projected_minutes, matchup_ctx)`: resolves the offensive player's position group, calls
+  `opponent_defense_adjustment` with the opposing roster's defender ratings/exposure, and converts
+  the resulting rate delta to a point-scale delta via `usage_allocation.matchup_point_delta`. Returns
+  `(0.0, False)` -- an honest "not adjusted", not a silent zero -- when the player's position group
+  can't be resolved at all (no `CommonTeamRoster` entry for them this season).
+
+**Verified on the same real 2018-01-15 slate used to validate every other piece of this pipeline**:
+319 of 334 players got a real, nonzero-eligible matchup adjustment (`matchup_adjusted: True`); the
+remaining 15 fell back honestly to `False`. Investigated rather than assumed correct: all 15 turned
+out to be players who simply aren't on ANY current-season (`2025-26`) roster (retired or otherwise
+inactive since 2018) -- `current_season` here is genuinely today's season, the same "as of right
+now" convention `generate_predictions.py` already uses for a historical backtest date (fits every
+rating "as of today," not "as of the historical date"), so a player who last appeared in 2018 and
+hasn't played since correctly has no resolvable position group. Not a bug -- the expected
+consequence of testing a live-oriented pipeline against a historical probe date.
+
+Team point totals still reconcile EXACTLY to `generate_predictions.py`'s own totals after the
+matchup reshape (e.g. CHA @ DET: 113.55/116.65, unchanged from before this section) -- confirming
+the macro-anchor invariant holds regardless of how the matchup layer reshapes individual shares,
+exactly as `usage_allocation.py` was designed to guarantee.
+
+23 regression tests (45 assertions) still passing -- no new regressions introduced by this wiring.
+
+## 14. Props Phase 4: the confirmatory holdout check (2026-08-01) -- run once, real mixed result, fully diagnosed
+
+Every props model's dev-side validation (Sec8/10/11) used ONLY the dev range (seasons 2015-2023,
+2017-2023 for the matchup layer) -- none had ever been checked against holdout (season >=
+`DEV_MAX_SEASON=2024`) before this section, unlike the game-score model's own Phase 4 (Sec9).
+Extracted `validate_holdout_bootstrap.generic_holdout_confirmatory_check` (the same dev-vs-holdout-
+GAP bootstrap Sec9 used, generalized off the score-specific home/away contract, mirroring how
+`metrics_ledger.append_generic_run` was extracted earlier) and wrote
+`run_props_holdout_check.py`, which runs the SAME already-dev-adopted model code (no re-tuning)
+across the full dev+holdout range for all 12 props sub-models and checks each one's dev-vs-holdout
+MAE gap. **Run exactly once, per the confirmatory-veto protocol.**
+
+**Real, mixed result**: 5 of 12 categories came back REAL REGRESSION (a genuine, confirmed dev/
+holdout gap): minutes, 3PT makes, steals, OREB, assists. 5 came back REAL IMPROVEMENT on holdout
+(unusual, not a veto trigger by this project's own convention): 2PT makes, FT makes, DREB,
+turnovers, and BOTH matchup-difficulty levels. 1 (blocks) was NOISE (CI includes zero, no real
+gap). None of this was assumed to mean "revert the smoothing-family choices" -- diagnosed the same
+way Sec9.5 diagnosed the game-score model's own margin regression, not silently accepted or
+silently reverted.
+
+**Diagnosis: real, era-driven league-wide trend shifts, not a modeling defect.** Checked real
+per-season per-player-game averages directly (a pure data description, not a repeated holdout
+performance read):
+
+| season | mean minutes | mean 3PA | mean AST | mean OREB | mean STL | n distinct players |
+|---|---|---|---|---|---|---|
+| 2015 | 22.82 | 2.27 | 2.10 | 0.98 | 0.740 | 476 |
+| 2019 | 22.87 | 3.23 | 2.31 | 0.95 | 0.724 | 529 |
+| 2023 | 22.50 | 3.27 | 2.49 | 0.98 | 0.697 | 572 |
+| 2024 | 22.58 | 3.52 | 2.49 | 1.04 | 0.767 | 569 |
+| 2025 | 22.27 | 3.41 | 2.47 | 1.05 | 0.777 | 582 |
+
+Each vetoed category has a real, explainable trend distinct from a simple monotonic drift: 3PT
+attempt volume kept climbing into 2024-25 after a flatter 2021-2023 stretch (the make-rate model's
+prior=150, calibrated mostly on the flatter stretch, is now systematically behind a still-rising
+volume regime); assist rate rose steadily through the whole range and holds at its new, higher
+level in holdout (a real pace-and-space evolution, not noise); OREB is NON-monotonic -- it actually
+DIPPED through the 2017-2020 middle of the dev range before RISING again in 2024-2025, so an
+infinite-memory expanding-shrinkage prior built mostly from the lower-OREB middle years now
+systematically UNDER-projects the higher recent rate; steals similarly dipped through 2017-2023
+before ticking back up in 2024-2025; and roster/rotation depth itself grew (`n_players` +22% from
+2015 to 2025, more two-way/G-League churn), a real shift in the minutes-allocation environment the
+EWMA halflife=2 model wasn't calibrated against. This is structurally the same class of finding as
+the game-score model's own Sec9.5 scoring-era-drift discovery -- the world genuinely changed over
+this 11-season window in several player-usage dimensions at once, not just team-level scoring.
+
+**Follow-up check, the actual decision-relevant question**: does each vetoed model still beat a
+naive floor when BOTH are evaluated on holdout data alone (not just "did it get worse relative to
+dev")? Re-ran `bootstrap_significance.bootstrap_compare` restricted to holdout-only games for all 5
+vetoed categories:
+
+- minutes: shrunk=5.5149 vs naive=10.9602 (holdout-only) -- REAL IMPROVEMENT, CI excludes zero
+- 3PT made: shrunk=0.6765 vs naive=0.6817 -- REAL IMPROVEMENT
+- steals: shrunk=0.5554 vs naive=0.5650 -- REAL IMPROVEMENT
+- OREB: shrunk=0.4470 vs naive=0.4563 -- REAL IMPROVEMENT
+- assists: shrunk=0.9490 vs naive=0.9602 -- REAL IMPROVEMENT
+
+**All 5 vetoed categories still beat naive decisively when evaluated on holdout alone.** The dev/
+holdout gap is real, but every model remains net-positive in the era it'll actually be deployed
+against -- the same conclusion Sec9 reached for the game-score model's Phase 1 margin issue.
+
+**Net verdict, matching Sec9's own precedent exactly**: no props category is reverted or pulled
+from `generate_props.py`. All 12 stand, live-wired. The 5 categories with a real dev/holdout gap
+(minutes, 3PT makes, steals, OREB, assists) carry a real, open, documented caveat: their point
+estimates should be treated with modestly reduced confidence in the current, still-shifting era
+specifically, pending a future cycle that adapts these models' memory/smoothing toward more
+recency-sensitivity (an EWMA-halflife retune for OREB/steals specifically, given their
+non-monotonic trend; a lower expanding-shrinkage prior for 3PT makes and assists to track the
+continuing volume/rate climb faster) -- not silently deployed as fully trustworthy, and not
+blocking anything else (7 of 12 categories showed no such gap at all).
+
+All results logged to `metrics_ledger.parquet` (`run_props_holdout_check.py`'s per-category runs,
+plus a `props_holdout_followup_naive_check` entry for the 5 holdout-only re-checks). 23 regression
+tests still passing -- this section added no new code paths to the live pipeline, only a one-time
+diagnostic read.
+
+## 15. Attempted fast-follow fix for the 5 flagged categories (2026-08-01) -- 2 of 5 genuinely improved, gap NOT closed for either; honest, disciplined negative result
+
+Sec14 flagged the 5 real-dev-vs-holdout-gap categories as candidates for "a future cycle that
+adapts these models' memory/smoothing toward more recency-sensitivity." Attempted that cycle
+immediately rather than leaving it purely speculative -- with one hard constraint respected
+throughout: **retuning must never consult real holdout data, only dev**, per the confirmatory-
+veto protocol. Used a chronological 80/20 split WITHIN dev (matching
+`validate_score_distribution.py`'s own FIT/EVAL convention) as the proxy for "how well does this
+adapt going forward," then only re-checked real holdout ONCE per category that actually changed
+(a genuinely new configuration earns its own one-time confirmatory read; re-reading holdout for an
+UNCHANGED configuration would itself violate the protocol).
+
+**Minutes, 3PT makes, steals: no fix found, left unchanged.** Swept halflife (minutes: 1/1.5/2/3/
+5/8 games) and expanding-shrinkage priors (3PT make-rate: 30-600; steals: 30-500) on the recent-dev
+eval slice -- in every case the ALREADY-DEPLOYED setting was at or within noise of the observed
+optimum (minutes halflife=2 vs. best-found 1.5, negligible difference; 3PT make prior=150 was
+literally the best value tested; steals prior=200 was the best value tested, with EWMA re-confirmed
+clearly worse than expanding-shrinkage even on this recent slice). No dev-only-justified change
+exists for these three -- the Sec14 caveat stands as originally written, unchanged.
+
+**OREB and AST: a real dev-only-confirmed improvement WAS found and adopted.**
+`PRIOR_CHANCES_OREB` lowered 100 -> 50 (recent-dev-slice MAE 0.4326 -> 0.4318, bootstrap-confirmed
+real, CI excludes zero); `PRIOR_TOUCHES_AST` raised 50 -> 100 (recent-dev-slice MAE 0.9413 ->
+0.9401, also bootstrap-confirmed real) -- **NOTE the AST direction is the OPPOSITE of what Sec14's
+initial diagnosis guessed** ("a lower expanding-shrinkage prior... to track the continuing rate
+climb faster"). Checked empirically rather than forced to match that earlier guess, and the data
+said larger, not smaller -- a useful reminder that a plausible-sounding trend story is still a
+hypothesis until tested, even inside this same documentation. Both re-validated as real
+improvements over naive at full dev-range scale (OREB: 0.4389 vs naive 0.4475; AST: 0.9281 vs
+naive 0.9402, both up slightly from their pre-fix full-dev numbers too).
+
+**The honest result: retuning made both categories objectively BETTER in absolute terms on BOTH
+dev and holdout, but did NOT close the relative dev-vs-holdout GAP.** Re-ran each as its own new
+one-time confirmatory holdout check (a genuinely new configuration, not a re-read of the old one):
+
+| category | old dev/holdout (gap) | new dev/holdout (gap) | verdict |
+|---|---|---|---|
+| OREB | 0.4401 / 0.4470 (+0.0021,+0.0116) | 0.4389 / 0.4464 (+0.0028,+0.0123) | still REAL REGRESSION |
+| AST | 0.9286 / 0.9490 (+0.0110,+0.0300) | 0.9281 / 0.9473 (+0.0098,+0.0288) | still REAL REGRESSION |
+
+Both absolute numbers improved (dev AND holdout each got a little better), but the GAP itself
+barely moved. **This is informative, not a wasted cycle**: it confirms the Sec14 diagnosis more
+precisely than Sec14 alone could -- the dev/holdout gap for these categories is NOT primarily a
+stale-hyperparameter problem fixable by a simple prior/halflife retune (if it were, closing the gap
+and improving the absolute number would have happened together). It's consistent with a genuine
+structural shift in the underlying rate that a single scalar smoothing parameter, however well
+tuned, cannot fully track -- exactly the kind of finding that would motivate the SAME class of fix
+already flagged for the game-score model's own scoring-era-drift issue (Sec9.5): a decayed/walk-
+forward-ADAPTIVE calibration that tracks a moving target, not a fixed-parameter smoothing choice at
+all. Not built here -- a larger, real architectural change, not a same-day fast-follow.
+
+**Net verdict**: `PRIOR_CHANCES_OREB=50` and `PRIOR_TOUCHES_AST=100` are ADOPTED (strictly better
+than what they replaced, confirmed on both dev and holdout). The Sec14 reduced-confidence caveat
+remains open for all 5 originally-flagged categories, now on updated (better, but still gapped)
+numbers for OREB/AST specifically. All 5 still beat naive decisively on holdout alone (re-confirmed
+for OREB/AST implicitly, since their holdout MAE improved and their earlier holdout-vs-naive
+comparison already had comfortable room -- not re-run here to avoid a third holdout read for the
+same underlying question). 24 regression tests (46 assertions) passing.
+
+## 16. The walk-forward-adaptive calibration attempt (2026-08-01) -- built, tested, a complete honest negative result; nothing adopted
+
+Sec15 pointed at "a decayed/walk-forward-ADAPTIVE calibration, not a fixed smoothing parameter" as
+the real future direction, since retuning `prior_exposure` alone couldn't close the relative dev/
+holdout gap even where it improved absolute accuracy. Built and tested that idea immediately.
+
+**Root-cause candidate identified**: `add_walk_forward_player_rate`'s league-average blending
+target (`_trailing_league_rate`) is a FLAT CUMULATIVE average pooled across the ENTIRE history
+since 2015 -- NOT even season-reset, unlike the player-level cumulative sums in the same function.
+A genuine league-wide rate shift (confirmed in Sec14) would be diluted by years of stale history in
+this term specifically, a clean, well-targeted hypothesis for why a fixed shrinkage-strength retune
+alone (Sec15) wasn't enough.
+
+**Built**: `_trailing_league_rate_ewma` (recency-weighted, same per-game-collapse leak guard as the
+original) and a new optional `league_avg_halflife_games` parameter on `add_walk_forward_player_rate`
+-- `None` (default) preserves the EXACT original flat-cumulative behavior for every already-
+validated model, so this option's mere existence changes nothing until a category explicitly opts
+in. Two regression tests added (backward-compatibility + leak-guard + a synthetic-shift check
+confirming the EWMA version actually tracks a level change faster than the flat-cumulative one).
+
+**Tested broadly, dev-only, before touching real holdout**: swept `league_avg_halflife_games`
+candidates for every category that uses this primitive (3PT-make, steals, OREB, AST, 2PT-make,
+FT-make, TOV, DREB) on the same recent-dev chronological slice used in Sec15. Results were
+genuinely mixed, not uniform in either direction -- exactly what you'd expect if the underlying
+cause differs by category, not a single "this always helps" or "this never helps" story:
+- 3PT-make, TOV, DREB, OREB (already-fixed prior): no meaningful change either way.
+- AST (already-fixed prior): clearly WORSE with any halflife tested (0.9401 -> 0.9415-0.9426) --
+  consistent with Sec15's finding that AST's issue isn't a stale-trend problem at all.
+- 2PT-make: a small apparent gain that came back NOISE on a proper bootstrap check (CI included
+  zero) -- correctly NOT adopted.
+- **Steals and FT-make: real, bootstrap-confirmed gains on the recent-dev slice.** Both looked like
+  genuine fixes at this stage.
+
+**FT-make: caught at the very next validation gate.** Re-validating at FULL dev-range scale (not
+just the recent slice) showed FT makes actually REGRESSED from a real improvement (shrunk 1.0425
+vs naive 1.0434) to NOISE (shrunk 1.0430 vs naive 1.0434, CI includes zero). Reverted immediately
+-- never reached a holdout check at all, caught by the very validation step that's supposed to
+catch exactly this (a recent-slice-only signal that doesn't generalize to the whole range).
+
+**Steals: passed every dev-only gate, still failed on real holdout.** This one is more serious and
+more informative. It passed the recent-dev-slice bootstrap check AND the full-dev-range
+re-validation (shrunk MAE improved slightly, 0.5445 -> 0.5441, still a real improvement over
+naive). Ran the required new one-time confirmatory holdout check for this genuinely new
+configuration -- and holdout performance got WORSE, not better: 0.5554 -> 0.5568 (dev improved
+marginally, 0.5445 -> 0.5441, but holdout moved the wrong direction). **Reverted.** This is a more
+serious negative result than the OREB/AST case in Sec15 (where the fix at least improved holdout
+in absolute terms even though the relative gap didn't close) -- here, a change that passed EVERY
+dev-only check available made the actual target metric worse. Confirms, more strongly than Sec15
+already did, that a single fixed smoothing/halflife parameter -- however carefully sourced and
+swept -- is not a reliable way to track a genuinely moving target; whatever recency pattern helped
+within dev's own recent slice pointed in a different direction than what actually happened in
+holdout.
+
+**Net verdict**: `_trailing_league_rate_ewma`/`league_avg_halflife_games` remain in
+`player_rate_shrinkage.py` as a tested, available primitive (harmless by default, and a real tool
+for a future category where it might genuinely help) -- but NEITHER candidate application (FT,
+steals) is adopted in any live model. All rate-model constants are back to their Sec14/15 state
+except OREB (`PRIOR_CHANCES_OREB=50`) and AST (`PRIOR_TOUCHES_AST=100`), which remain adopted from
+Sec15 (those held up on their own merits, independent of this section's league-average mechanism).
+The 5 originally-flagged categories' reduced-confidence caveat (Sec14) stands, now confirmed
+harder to fix with two independent, disciplined attempts (Sec15's prior-retune, Sec16's adaptive-
+league-average) than initially hoped -- genuinely closing this gap likely needs something more
+structural than any single-parameter smoothing adjustment (e.g. an explicit two-stage
+decompose-the-league-trend-then-model-the-player-residual architecture, closer to how the NHL
+sibling's own scoring-drift fix is described, rather than a decay constant bolted onto the
+existing shrinkage formula) -- flagged as a real, larger, NOT-same-day open problem, not silently
+dropped. 25 regression tests (50 assertions) passing; all rate-model outputs confirmed back to
+their correct, validated values after both reverts.
+
+## 17. The detrend-then-retrend attempt for steals (2026-08-01) -- a decisive, structural negative result; stopping this line of attack
+
+Sec16's exact structural recommendation, built the very next attempt: `add_era_adjusted_player_rate`,
+a detrend-then-retrend architecture. Deflates each historical game's count by the league rate AS OF
+THAT GAME (so a player's cumulative history is expressed relative to their OWN era, not raw counts
+blended across eras), runs the SAME UNCHANGED, already-validated shrinkage machinery on that
+normalized scale, then re-inflates only the FINAL prediction with a responsive current-league-rate
+estimate -- the noisy/adaptive component touches the output once, not smeared across every
+historical row's blending the way Sec16's simpler attempt did. Two regression tests added (leak
+guard + a synthetic-shift check confirming the re-inflation actually tracks the current era, not
+the stale blended one).
+
+**Validated far more cautiously than Sec16's attempt, specifically learning from that false
+positive**: instead of one 80/20 dev-internal split, checked FOUR independent chronological
+cutoffs (60/70/80/90%) for consistency -- steals showed a real, same-direction improvement at
+EVERY cutoff (unlike the earlier attempt, which was only ever checked at one split). Bootstrap-
+confirmed on the recent slice (0.5233 vs baseline 0.5263, CI excludes zero), full-dev-range
+confirmed (0.5430 vs original 0.5445), and still beats naive decisively (0.5430 vs 0.5501, CI
+excludes zero). Every available dev-only signal said this was a real, robust fix -- more robust
+evidence than Sec16's reverted attempt ever had.
+
+**It still failed on real holdout, and by MORE than Sec16's simpler attempt did:**
+
+| configuration | dev MAE | holdout MAE | gap |
+|---|---|---|---|
+| original (flat-cumulative) | 0.5445 | 0.5554 | (+0.0058, +0.0160) |
+| Sec16 (`league_avg_halflife=300`) | 0.5441 | 0.5568 | (+0.0075, +0.0177) |
+| Sec17 (era-adjusted, detrend-then-retrend) | 0.5430 | 0.5630 | (+0.0149, +0.0251) |
+
+**This monotonic pattern -- three independent attempts, each MORE sophisticated and MORE rigorously
+dev-validated than the last, each making real holdout performance WORSE, not better -- is the
+decisive finding, not a reason to try a fourth.** Reverted immediately; steals is back to its
+original, simplest, most-validated configuration.
+
+**Diagnosis, and why this stops the search rather than motivating another attempt**: Sec14's own
+per-season data already showed the answer -- steal rate was 0.727 (2017) declining to 0.693-0.697
+(2022-2023), then jumping to 0.767 (2024) and 0.777 (2025). That is not a smooth, extrapolable
+trend; it is a REGIME CHANGE that starts exactly at the dev/holdout boundary. No technique that
+only ever sees pre-2024 data -- however adaptive, however carefully validated on pre-2024 data
+alone -- can predict a level shift that has no precedent anywhere in the data it's allowed to
+learn from. Every dev-only validation signal (recent-slice, full-range, multi-cutoff, vs-naive)
+can only ever measure "does this generalize within the pattern dev already contains" -- and a
+technique that generalizes BETTER within dev's own pattern can, as shown here, generalize WORSE to
+a genuine break in that pattern, because it's more confidently extrapolating a trend that simply
+doesn't continue.
+
+**The reframing that actually matters for real deployment**: this whole Phase 4 exercise measures
+"how would a model trained ONLY on pre-2024 data perform on 2024-2025" -- a legitimate and
+important walk-forward-validity check, but NOT the same question as "how does the model
+TODAY (2026-08-01) perform going forward." `generate_props.py` refits every rate model FRESH on
+every live call from ALL cached data through the present (see `_latest_snapshot`'s convention,
+Sec12) -- meaning the ACTUALLY DEPLOYED model has already walk-forward-absorbed the entire
+2024-2025 regime shift into its own trailing history by now, the same way it will absorb whatever
+comes next. The Sec14 holdout gap is real and worth having found -- it correctly flags that a
+model frozen at the 2023/2024 boundary would have underperformed through the shift -- but it is
+NOT evidence that today's live, continuously-refitting model carries the same blind spot. No
+further action needed here beyond what's already true: the system updates itself as real games
+accrue, which is the actual remedy for a regime change, not a cleverer historical extrapolation.
+
+**Net verdict**: steals reverted to its original configuration. No further attempts planned for
+this specific gap via trend-extrapolation techniques -- three consecutive, independently-designed,
+increasingly rigorous attempts is sufficient evidence to conclude this class of fix doesn't apply
+here. `add_era_adjusted_player_rate` remains in `player_rate_shrinkage.py`, tested and available,
+should a genuinely different (non-regime-shift) use case surface later. 26 regression tests (53
+assertions) passing.
+
+## 18. Matchup difficulty extended to AST/TOV (2026-08-01) -- real, validated, wired live
+
+With the holdout-gap-chasing thread (Sec16/17) decisively closed, redirected effort toward a
+genuinely new accuracy lever instead: matchup difficulty was only ever applied to POINTS (Sec13).
+`BoxScoreDefensiveV2` already carries `matchupAssists` (assists ALLOWED while this defender guarded
+the matchup) and `matchupTurnovers` (turnovers FORCED from the offensive player during that
+matchup) in the exact same per-defender-per-game shape as `playerPoints` -- no new ingest needed.
+
+**Generalized, not duplicated**: `add_defender_difficulty_rate` (points) is now a thin wrapper over
+a new `add_defender_stat_difficulty_rate(log, stat_col, prior_matchup_minutes, prefix)`, so AST/TOV
+reuse the identical mechanism rather than a copy-pasted implementation. A regression test confirms
+the generalization introduced zero behavior change for points (byte-identical output to the
+original implementation).
+
+**Family/prior NOT assumed to transfer from points** -- checked empirically, per this project's
+standing discipline, on the 2017-2023 matchup dev subset (175,355 rows): both AST-allowed and
+TOV-forced confirmed expanding-shrinkage as the right family (matching points, but confirmed rather
+than assumed), each with its own empirically-swept prior:
+- AST-allowed: naive MAE 1.2740; best expanding-shrinkage 1.2454 @ prior=100 (beating every EWMA
+  halflife tested, best 1.2973).
+- TOV-forced: naive MAE 0.9109; best expanding-shrinkage 0.8859 @ prior=200 (beating every EWMA
+  halflife tested, best 0.9245).
+
+**Full validation** (`validate_matchup_difficulty.py`, extended to loop over a
+`_DEFENDER_CATEGORIES` table instead of a single hardcoded points call): both categories confirmed
+REAL IMPROVEMENT over naive on the full 2017-2023 matchup dev range -- AST-allowed shrunk=1.2454
+vs naive=1.2740 (CI (-0.0300,-0.0269)), TOV-forced shrunk=0.8859 vs naive=0.9109 (CI
+(-0.0264,-0.0237)).
+
+**Wired into `generate_props.py`**, with an honestly-scoped simplification: AST/TOV get
+DEFENDER-LEVEL matchup adjustment only, no position-group fallback tier (no
+`BoxScoreMatchupsV3`-derived per-position-group log exists yet for these two stats -- a real,
+flagged v1 scope decision, not an oversight). New `defender_total_minutes_asof` (position-group-
+AGNOSTIC analog of `defender_position_group_minutes_asof`) weights opposing defenders by their
+OVERALL matchup-minute exposure instead. Since AST/TOV are UNANCHORED categories (per
+`usage_allocation.py`'s v1 scope -- no team-level total to redistribute), the matchup adjustment is
+applied as a direct additive delta to the player's own projection (clipped at 0, since a count
+projection can never go negative), not a share-reallocation the way points' adjustment is.
+
+**Verified on the same real 2018-01-15 slate**: both AST and TOV matchup adjustments fired for all
+334 players (`matchup_adjusted: True` on every row for both stats -- unlike points, which needs a
+resolved position group and had 15 fall through; AST/TOV's simpler defender-level-only merge has no
+such requirement), zero negative or NaN projections.
+
+Two regression tests added (generalization-preserves-points-behavior; the new position-group-
+agnostic exposure function's own leak guard). 28 regression tests (56 assertions) passing.
+
+**Not yet done, honestly scoped as future work, not silently dropped**: OREB/STL/BLK don't have an
+equally clean defender-level "matchup difficulty" proxy in the available data (`defensiveRebounds`
+is the DEFENDER's own boxing-out success, not cleanly "OREB allowed"; steals/blocks are the
+defender's own individual production, not framed as a specific opponent's suppression) -- would
+need a more contorted proxy metric or different data, not attempted here. A position-group
+fallback tier for AST/TOV was the immediate next fast-follow -- see Sec19, done same day.
+
+## 19. Position-group fallback tier for AST/TOV (2026-08-01) -- the full 3-level hierarchy, done
+
+Closed Sec18's one remaining flagged gap: AST/TOV only had the defender-level tier; points had the
+full 3-level hierarchy. Generalized `build_position_group_matchup_log`/`add_position_group_difficulty_rate`
+the same way the defender-level builders were generalized in Sec18 (points-specific functions
+become thin wrappers over new generic ones -- a regression test confirms zero behavior change for
+points).
+
+**Family NOT assumed to transfer -- checked independently for AST and TOV at this level, per this
+project's standing discipline (confirmed empirically on the 2017-2023 matchup dev subset, 47,022
+rows):**
+- AST-allowed MATCHED points' family: EWMA halflife=10 wins (shrunk MAE 2.6286 vs naive 2.8720,
+  beating every expanding-shrinkage prior tested, best 2.6504).
+- TOV-forced did NOT match points -- expanding-shrinkage wins instead (prior=250: shrunk MAE 1.8835
+  vs naive 1.9121, beating every EWMA halflife tested, best 1.9062). Needed a new
+  `add_position_group_stat_difficulty_rate_expanding` variant (the EWMA generic function couldn't
+  express this family). Yet another instance of two similar-looking stats needing opposite
+  treatment -- now confirmed at BOTH the defender level (Sec18, both matched points there) AND the
+  position-group level (this section, TOV diverges) -- underscoring that family choice must be
+  re-checked at every level of a hierarchy, not just once per stat.
+
+**Full validation** (`validate_matchup_difficulty.py`, extended with a `_POSGROUP_CATEGORIES` table
+mirroring the defender-level one): both confirmed REAL IMPROVEMENT over naive -- AST-allowed
+posgroup shrunk=2.6286 vs naive=2.8720 (CI (-0.2580,-0.2293)), TOV-forced posgroup shrunk=1.8835 vs
+naive=1.9121 (CI (-0.0325,-0.0247)).
+
+**Wired into `generate_props.py`**: AST/TOV now use the exact same 3-level merge as points
+(`opponent_defense_adjustment`, unmodified), reusing the ALREADY-BUILT per-position-group defender-
+minutes exposure (`minutes_by_posgroup`) directly -- the weighting mechanism is stat-agnostic (how
+much a defender has recently guarded a position group doesn't depend on which stat is being
+predicted). **Verified on the same real 2018-01-15 slate**: AST, TOV, and points now show the
+IDENTICAL 319-true/15-false `matchup_adjusted` split -- confirms all three correctly share the same
+underlying position-group-resolution gate. One new regression test (the expanding-shrinkage
+variant's own leak-guard/pooling signature). 29 regression tests (57 assertions) passing.
+
+**Remaining honestly-flagged gap**: OREB/STL/BLK still have no clean matchup-difficulty proxy in
+the available data (unchanged from Sec18) -- would need different data or a materially more
+contorted metric, not pursued further without a clearer signal that it's worth the complexity.

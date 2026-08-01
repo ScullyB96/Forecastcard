@@ -46,6 +46,86 @@ def _trailing_league_rate(log: pd.DataFrame, numerator_col: str, exposure_col: s
     return log.merge(per_game[["gameId", "_trailing_rate"]], on="gameId", how="left")["_trailing_rate"]
 
 
+def _trailing_league_rate_ewma(log: pd.DataFrame, numerator_col: str, exposure_col: str,
+                                halflife_games: float) -> pd.Series:
+    """The recency-weighted analog of `_trailing_league_rate`: instead of a
+    FLAT CUMULATIVE average pooled across the ENTIRE history since the
+    start of the range (every season blended together, no reset -- unlike
+    the player-level cumulative sums in `add_walk_forward_player_rate`,
+    which ARE season-reset), this EWMA-weights the per-game league totals
+    so a genuine league-wide RATE SHIFT (not just noise) is tracked within
+    a few dozen games instead of being diluted by years of stale history.
+
+    MOTIVATION (2026-08-01, Sec14/15 props-Phase-4 fast-follow): the
+    props subsystem's first holdout check found several categories (3PT
+    makes, OREB, assists, steals) with a REAL dev-vs-holdout MAE gap,
+    diagnosed as genuine era-driven league-wide trend shifts (rising 3PT
+    volume, rising assist rates, non-monotonic OREB/steal trends). A
+    same-day dev-only retune of `prior_exposure` alone (Sec15) fixed 2 of
+    5 in absolute terms but did NOT close the relative gap for either --
+    evidence the problem isn't the SHRINKAGE STRENGTH, it's that the
+    blending TARGET itself (the league average) is stale. This function
+    is the more targeted fix: still pooled across every player (low
+    variance, hundreds of players per game), just recency-weighted instead
+    of infinite-memory.
+
+    Same per-game collapse + `shift(1)` leak guard as `_trailing_league_rate`
+    -- EWMA is applied to the per-game POOLED numerator/exposure sums
+    separately, then divided (NOT an EWMA of the per-game RATIO itself,
+    which would over-weight low-exposure games)."""
+    per_game = log.groupby("gameId", as_index=False).agg(
+        gameDate=("gameDate", "first"), _num=(numerator_col, "sum"), _exp=(exposure_col, "sum"))
+    per_game = per_game.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
+    ewm_num = per_game["_num"].shift(1).ewm(halflife=halflife_games, min_periods=1).mean()
+    ewm_exp = per_game["_exp"].shift(1).ewm(halflife=halflife_games, min_periods=1).mean()
+    per_game["_trailing_rate_ewma"] = ewm_num / ewm_exp
+    return log.merge(per_game[["gameId", "_trailing_rate_ewma"]], on="gameId", how="left")["_trailing_rate_ewma"]
+
+
+def add_era_adjusted_player_rate(log: pd.DataFrame, numerator_col: str, exposure_col: str,
+                                  prior_exposure: float, prefix: str, group_col: str = "playerId",
+                                  current_rate_halflife_games: float = 100.0) -> pd.DataFrame:
+    """DETREND-THEN-RETREND: a structurally different attempt at the same
+    problem `league_avg_halflife_games` tried and failed to fix reliably
+    (see Sec16 -- recency-weighting the shrinkage BLENDING TARGET directly
+    passed every dev-only check for steals but still made real holdout
+    performance worse, most likely because it injects the noisy/responsive
+    league estimate into every single historical row's blending computation
+    at once).
+
+    This function never touches `add_walk_forward_player_rate`'s own
+    formula. Instead it feeds that UNCHANGED, already-validated machinery a
+    DEFLATED numerator -- each historical game's raw count divided by the
+    league rate AS OF THAT GAME (walk-forward safe: uses only info strictly
+    prior to that historical game, same leak guard as everywhere else) --
+    so a player's cumulative history is expressed in "performance relative
+    to their own era," not raw counts blended across eras with different
+    true rates. The existing shrinkage math then does exactly what it
+    always did, just on this era-normalized scale. Only at the very END is
+    a RESPONSIVE (EWMA) estimate of the CURRENT league rate multiplied back
+    in -- a single number applied once per prediction, not smeared across
+    every row's own blending the way the Sec16 attempt was.
+
+    Adds f"{prefix}_shrunk_rate" (the final era-adjusted rate, same
+    interface as `add_walk_forward_player_rate`) and
+    f"{prefix}_relative_shrunk_rate" (the intermediate "relative-to-era-
+    average" value before re-inflation, useful for diagnostics)."""
+    log = log.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
+
+    league_rate_at_time = _trailing_league_rate(log, numerator_col, exposure_col)
+    deflated_col = f"_{prefix}_deflated_numerator"
+    log[deflated_col] = log[numerator_col] / league_rate_at_time
+
+    log = add_walk_forward_player_rate(log, deflated_col, exposure_col, prior_exposure,
+                                        prefix=f"{prefix}_relative", group_col=group_col)
+    log = log.rename(columns={f"{prefix}_relative_shrunk_rate": f"{prefix}_relative_shrunk_rate"})
+
+    current_league_rate = _trailing_league_rate_ewma(log, numerator_col, exposure_col, current_rate_halflife_games)
+    log[f"{prefix}_current_league_rate"] = current_league_rate
+    log[f"{prefix}_shrunk_rate"] = log[f"{prefix}_relative_shrunk_rate"] * current_league_rate
+    return log.drop(columns=[deflated_col])
+
+
 def add_walk_forward_player_mean_ewm(log: pd.DataFrame, value_col: str, halflife_games: float,
                                       prefix: str, group_col: str = "playerId") -> pd.DataFrame:
     """Recency-weighted walk-forward projection for a single per-game VALUE
@@ -88,7 +168,8 @@ def add_walk_forward_player_mean_ewm(log: pd.DataFrame, value_col: str, halflife
 
 def add_walk_forward_player_rate(log: pd.DataFrame, numerator_col: str, exposure_col: str,
                                   prior_exposure: float, prefix: str,
-                                  group_col: str = "playerId") -> pd.DataFrame:
+                                  group_col: str = "playerId",
+                                  league_avg_halflife_games: float | None = None) -> pd.DataFrame:
     """log must have columns: gameId, gameDate, season, <group_col>,
     <numerator_col>, <exposure_col>, one row per player per game. Adds
     f"{prefix}_league_avg_rate", f"{prefix}_shrunk_rate", and
@@ -103,11 +184,23 @@ def add_walk_forward_player_rate(log: pd.DataFrame, numerator_col: str, exposure
     chances, touches, minutes) instead of games, which is what lets a
     high-volume stat (e.g. FTA) stabilize faster in real terms than a
     low-volume one (e.g. 3PA) even at the same `prior_exposure` game-count-
-    equivalent."""
+    equivalent.
+
+    `league_avg_halflife_games`: `None` (default) uses `_trailing_league_rate`,
+    the ORIGINAL flat-cumulative league average -- exact prior behavior,
+    unchanged, so every already-validated model configuration is completely
+    unaffected by this parameter's mere existence. Pass a halflife to use
+    `_trailing_league_rate_ewma` instead -- a recency-weighted league
+    average that can track a genuine era-wide rate shift instead of being
+    diluted by years of stale history (see that function's docstring for
+    the Sec14/15 finding that motivated this option)."""
     log = log.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
 
     league_avg_col = f"{prefix}_league_avg_rate"
-    log[league_avg_col] = _trailing_league_rate(log, numerator_col, exposure_col)
+    if league_avg_halflife_games is None:
+        log[league_avg_col] = _trailing_league_rate(log, numerator_col, exposure_col)
+    else:
+        log[league_avg_col] = _trailing_league_rate_ewma(log, numerator_col, exposure_col, league_avg_halflife_games)
 
     grp = log.groupby([group_col, "season"])
     games_before = grp.cumcount()

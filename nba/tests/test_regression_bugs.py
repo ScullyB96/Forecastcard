@@ -14,12 +14,20 @@ from src.ingest.build_stints import _get_starters, _normalize_name, _prep_pbp_ti
 from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, bootstrap_compare
 from src.models.garbage_time import add_garbage_time_weight
 from src.models.home_court import _baseline_log_ratios
-from src.models.player_rate_shrinkage import add_walk_forward_player_mean_ewm, add_walk_forward_player_rate
-from src.models.matchup_difficulty import opponent_defense_adjustment
+from src.models.player_rate_shrinkage import (
+    _trailing_league_rate_ewma, add_era_adjusted_player_rate, add_walk_forward_player_mean_ewm,
+    add_walk_forward_player_rate,
+)
+from src.models.matchup_difficulty import (
+    add_defender_difficulty_rate, add_defender_stat_difficulty_rate,
+    add_position_group_stat_difficulty_rate_expanding, defender_total_minutes_asof,
+    opponent_defense_adjustment,
+)
 from src.models.player_defensive_event_rates import add_defensive_event_rates
 from src.models.player_playmaking_rates import PRIOR_TOUCHES_AST, PRIOR_TOUCHES_TOV
 from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FTA, add_scoring_rates
 from src.models.prop_distribution import log_score, over_under_prob
+from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
 from src.models.usage_allocation import allocate_team_points, compute_usage_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
 
@@ -614,6 +622,180 @@ def test_usage_shares_clip_negative_and_handle_all_zero():
           abs(equal_shares["A"] - 0.5) < 1e-9 and abs(equal_shares["B"] - 0.5) < 1e-9)
 
 
+def test_generic_holdout_check_distinguishes_noise_from_real_gap():
+    """`generic_holdout_confirmatory_check` (extracted from the game-score
+    model's own `holdout_confirmatory_check` so the props subsystem's ~10
+    non-score-shaped categories could share the identical dev-vs-holdout-
+    GAP bootstrap protocol -- see Sec14) must correctly distinguish a
+    genuine regression from noise. Two synthetic checks: (1) dev and
+    holdout drawn from the IDENTICAL distribution should come back NOISE
+    (the CI should include zero); (2) holdout drawn with a clearly worse
+    (higher) mean error than dev should come back REAL REGRESSION, not
+    NOISE or an improvement."""
+    rng = np.random.default_rng(0)
+    same_dev = rng.normal(5.0, 1.0, 2000)
+    same_holdout = rng.normal(5.0, 1.0, 2000)
+    result_noise = generic_holdout_confirmatory_check(same_dev, same_holdout, "synthetic_same",
+                                                        higher_is_better=False, n_bootstrap=500)
+    check("identical-distribution dev/holdout comes back NOISE, not a false-positive regression",
+          "NOISE" in result_noise["verdict"], f"got {result_noise['verdict']}")
+
+    worse_dev = rng.normal(5.0, 1.0, 2000)
+    worse_holdout = rng.normal(7.0, 1.0, 2000)  # clearly worse (higher error, higher_is_better=False)
+    result_regression = generic_holdout_confirmatory_check(worse_dev, worse_holdout, "synthetic_worse",
+                                                             higher_is_better=False, n_bootstrap=500)
+    check("a clearly worse holdout mean comes back REAL REGRESSION, not NOISE or an improvement",
+          "REGRESSION" in result_regression["verdict"], f"got {result_regression['verdict']}")
+
+
+def test_adaptive_league_average_tracks_shift_faster_than_flat_cumulative():
+    """`add_walk_forward_player_rate`'s new `league_avg_halflife_games`
+    option (Sec15 fast-follow, motivated by the props Phase 4 finding that
+    a stale, flat-cumulative league average -- pooled across ALL history
+    since day one, not even season-reset -- can lag a genuine league-wide
+    rate shift). Three checks: (1) leaving it at the default `None`
+    reproduces the EXACT original flat-cumulative behavior, so every
+    already-validated model configuration is untouched by this option's
+    mere existence; (2) `_trailing_league_rate_ewma`'s first-ever game is
+    NaN, same leak guard as the original; (3) given a clear league-wide
+    RATE SHIFT partway through the games, the EWMA-weighted league average
+    ends up closer to the NEW (recent) rate than the flat-cumulative one
+    does -- confirming it actually behaves adaptively, not just
+    differently by coincidence."""
+    # Two "other" players carry a clear rate shift: low rate (2/10) in g1-g2, high rate (8/10) in
+    # g3-g4. Player A (the one being evaluated) has no scoring rows of their own here -- isolates
+    # the league-average term cleanly.
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "X", "made": 2, "att": 10},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "Y", "made": 2, "att": 10},
+        {"gameId": "g3", "gameDate": pd.Timestamp("2020-01-03"), "season": 2020, "playerId": "X", "made": 8, "att": 10},
+        {"gameId": "g4", "gameDate": pd.Timestamp("2020-01-04"), "season": 2020, "playerId": "Y", "made": 8, "att": 10},
+        {"gameId": "g5", "gameDate": pd.Timestamp("2020-01-05"), "season": 2020, "playerId": "A", "made": 0, "att": 0},
+    ])
+
+    default_out = add_walk_forward_player_rate(log.copy(), "made", "att", prior_exposure=10.0, prefix="fg")
+    from src.models.player_rate_shrinkage import _trailing_league_rate
+    expected_flat = _trailing_league_rate(log.copy(), "made", "att")
+    check("league_avg_halflife_games=None reproduces the exact original flat-cumulative column",
+          (default_out["fg_league_avg_rate"].reset_index(drop=True).fillna(-999)
+           == expected_flat.reset_index(drop=True).fillna(-999)).all())
+
+    ewma_series = _trailing_league_rate_ewma(log.copy(), "made", "att", halflife_games=1.0)
+    g1_val = ewma_series.iloc[0]
+    check("EWMA league rate's first-ever game is NaN (same leak guard as the original)", pd.isna(g1_val))
+
+    adaptive_out = add_walk_forward_player_rate(log.copy(), "made", "att", prior_exposure=10.0,
+                                                 prefix="fg", league_avg_halflife_games=1.0)
+    g5_flat = default_out[default_out["gameId"] == "g5"].iloc[0]["fg_league_avg_rate"]
+    g5_adaptive = adaptive_out[adaptive_out["gameId"] == "g5"].iloc[0]["fg_league_avg_rate"]
+    true_recent_rate = 0.8
+    check("the EWMA-weighted league average is closer to the NEW (recent, high) rate than the "
+          "flat-cumulative one after a clear shift",
+          abs(g5_adaptive - true_recent_rate) < abs(g5_flat - true_recent_rate),
+          f"flat={g5_flat}, adaptive={g5_adaptive}, true_recent={true_recent_rate}")
+
+
+def test_era_adjusted_rate_detrends_then_retrends_correctly():
+    """`add_era_adjusted_player_rate` (Sec17's detrend-then-retrend
+    architecture, adopted for steals after `league_avg_halflife_games`
+    -- Sec16's simpler attempt -- passed every dev-only check but still
+    failed on real holdout). Two checks: (1) leak guard -- a player's
+    first-ever game has no history, so both the relative and final shrunk
+    rate must be NaN; (2) the ERA-ADJUSTMENT actually fires -- construct a
+    clean league-wide rate shift (low rate early, high rate late) and
+    confirm a player's OWN stable underlying rate gets correctly re-scaled
+    to the CURRENT era's level, not stuck at the stale blended-era level a
+    naive expanding average would produce."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "X", "made": 2, "att": 10},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "Y", "made": 2, "att": 10},
+        {"gameId": "g3", "gameDate": pd.Timestamp("2020-01-03"), "season": 2020, "playerId": "X", "made": 8, "att": 10},
+        {"gameId": "g4", "gameDate": pd.Timestamp("2020-01-04"), "season": 2020, "playerId": "Y", "made": 8, "att": 10},
+        {"gameId": "g5", "gameDate": pd.Timestamp("2020-01-05"), "season": 2020, "playerId": "A", "made": 0, "att": 0},
+    ])
+    out = add_era_adjusted_player_rate(log, "made", "att", prior_exposure=10.0, prefix="fg",
+                                        current_rate_halflife_games=1.0)
+    g1_x = out[(out["playerId"] == "X") & (out["gameId"] == "g1")].iloc[0]
+    check("first-ever game has no prior history: relative rate is NaN",
+          pd.isna(g1_x["fg_relative_shrunk_rate"]))
+    check("first-ever game has no prior history: final era-adjusted rate is NaN",
+          pd.isna(g1_x["fg_shrunk_rate"]))
+
+    # player X's own true rate is consistently EXACTLY at whatever the league level was each time
+    # (game1: 2/10=0.2 matching league's 0.2; game3: 8/10=0.8 matching league's 0.8 by then) --
+    # a perfectly "league-average" player throughout. At g5, the current (late-era) league rate is
+    # high (~0.68-0.8 range); X's era-adjusted projection should track that CURRENT level, not the
+    # low EARLY-era level X's raw history also contained.
+    g5 = out[out["gameId"] == "g5"].iloc[0]
+    check("era-adjusted final rate lands in the CURRENT (high) era's range, not the stale early-era range",
+          g5["fg_shrunk_rate"] > 0.5, f"got {g5['fg_shrunk_rate']}")
+
+
+def test_defender_stat_difficulty_rate_generalizes_points_unchanged():
+    """`add_defender_difficulty_rate` (points) is now a thin wrapper over
+    the generalized `add_defender_stat_difficulty_rate` (Sec18, added so
+    AST-allowed/TOV-forced could reuse the exact same mechanism instead of
+    a copy-pasted points-specific implementation). This test confirms the
+    generalization introduced no behavior change for points: calling the
+    generic function directly with stat_col="points_allowed" and the
+    original prefix produces byte-identical output to the public wrapper."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "playerId": "A",
+         "team": 1, "matchup_minutes": 20.0, "points_allowed": 10, "ast_allowed": 3, "tov_forced": 2},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "playerId": "A",
+         "team": 1, "matchup_minutes": 15.0, "points_allowed": 8, "ast_allowed": 2, "tov_forced": 1},
+    ])
+    wrapper_out = add_defender_difficulty_rate(log.copy())
+    generic_out = add_defender_stat_difficulty_rate(log.copy(), "points_allowed", 50.0, prefix="difficulty")
+    check("the points wrapper and the direct generic call produce identical difficulty_rate values",
+          (wrapper_out["difficulty_rate"].fillna(-999) == generic_out["difficulty_rate"].fillna(-999)).all())
+    check("the points wrapper and the direct generic call produce identical difficulty_proj values",
+          (wrapper_out["difficulty_proj"].fillna(-999) == generic_out["difficulty_proj"].fillna(-999)).all())
+
+
+def test_defender_total_minutes_asof_excludes_future_games():
+    """`defender_total_minutes_asof` (Sec18, the position-group-agnostic
+    analog of `defender_position_group_minutes_asof`, used for AST/TOV
+    which have no position-group tier yet) must only sum matchup-minutes
+    strictly BEFORE the query date -- a defender's game happening ON or
+    AFTER the as-of date must never leak into "recent exposure" used to
+    weight tonight's merge."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "playerId": "A", "matchup_minutes": 10.0},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-05"), "playerId": "A", "matchup_minutes": 20.0},
+        {"gameId": "g3", "gameDate": pd.Timestamp("2020-01-10"), "playerId": "A", "matchup_minutes": 30.0},
+    ])
+    result = defender_total_minutes_asof(log, pd.Timestamp("2020-01-05"))
+    check("only the g1 game (strictly before the as-of date) is counted, not g2 (on) or g3 (after)",
+          abs(result.get("A", 0.0) - 10.0) < 1e-9, f"got {result.get('A')}")
+
+
+def test_position_group_expanding_variant_pools_by_team_posgroup():
+    """`add_position_group_stat_difficulty_rate_expanding` (Sec19 -- the
+    expanding-shrinkage family variant needed for TOV specifically, since
+    TOV did NOT match points/AST's EWMA family at the position-group
+    level, confirmed empirically not assumed). Confirms it correctly pools
+    by the (team, position_group) composite key -- a brand-new
+    (team, position_group) pair with zero prior history collapses exactly
+    to the trailing league average, the same leak-guard signature already
+    confirmed for the shared `add_walk_forward_player_rate` primitive at
+    the per-player level."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": 1,
+         "position_group": "G", "matchup_minutes": 10.0, "tov_forced": 3},
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": 2,
+         "position_group": "G", "matchup_minutes": 10.0, "tov_forced": 1},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "team": 3,
+         "position_group": "G", "matchup_minutes": 10.0, "tov_forced": 0},
+    ])
+    out = add_position_group_stat_difficulty_rate_expanding(log, "tov_forced", prior_matchup_minutes=10.0, prefix="tov_pg")
+    g2_row = out[out["gameId"] == "g2"].iloc[0]
+    expected_league_avg = (3 + 1) / (10 + 10)  # pooled across BOTH g1 rows (different teams, same position group)
+    check("a brand-new (team, position_group) pair with no history collapses to the pooled league average",
+          abs(g2_row["tov_pg_difficulty_rate"] - expected_league_avg) < 1e-9,
+          f"got {g2_row['tov_pg_difficulty_rate']}, expected {expected_league_avg}")
+
+
 if __name__ == "__main__":
     test_possession_counter_uses_teamid_not_cumulative_description()
     test_score_forward_fill_ignores_placeholder_zero_on_non_scoring_rows()
@@ -638,6 +820,12 @@ if __name__ == "__main__":
     test_negbin_parameterization_matches_target_mean_and_variance()
     test_usage_shares_sum_to_team_total_not_double_counted()
     test_usage_shares_clip_negative_and_handle_all_zero()
+    test_generic_holdout_check_distinguishes_noise_from_real_gap()
+    test_adaptive_league_average_tracks_shift_faster_than_flat_cumulative()
+    test_era_adjusted_rate_detrends_then_retrends_correctly()
+    test_defender_stat_difficulty_rate_generalizes_points_unchanged()
+    test_defender_total_minutes_asof_excludes_future_games()
+    test_position_group_expanding_variant_pools_by_team_posgroup()
 
     print()
     if FAILURES:

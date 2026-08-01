@@ -33,6 +33,38 @@ def _per_game_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def generic_holdout_confirmatory_check(dev_arr: np.ndarray, holdout_arr: np.ndarray, metric_name: str,
+                                        higher_is_better: bool, n_bootstrap: int = 5000, seed: int = 0) -> dict:
+    """The same dev-vs-holdout-GAP bootstrap as `holdout_confirmatory_check`
+    (the ONE-TIME confirmatory-veto read, see module docstring), extracted
+    to operate on a single already-computed per-row metric array rather
+    than home/away score columns -- so the props subsystem's ~10 different
+    per-player-stat categories (each its own MAE, not a score-shaped
+    home/away pair) can share this exact protocol without forcing this
+    function's score-specific contract to bend, mirroring how
+    `metrics_ledger.append_generic_run` was extracted from `append_run` for
+    the identical reason."""
+    rng = np.random.default_rng(seed)
+    dev_point, holdout_point = dev_arr.mean(), holdout_arr.mean()
+
+    dev_boot = np.array([dev_arr[rng.integers(0, len(dev_arr), len(dev_arr))].mean() for _ in range(n_bootstrap)])
+    holdout_boot = np.array([holdout_arr[rng.integers(0, len(holdout_arr), len(holdout_arr))].mean() for _ in range(n_bootstrap)])
+    gap = holdout_boot - dev_boot
+    ci = np.percentile(gap, [2.5, 97.5])
+    excludes_zero = ci[0] > 0 or ci[1] < 0
+    if not excludes_zero:
+        verdict = "NOISE -- dev/holdout gap CI includes zero, no real regression detected"
+    else:
+        regressed = (holdout_point - dev_point > 0) if not higher_is_better else (holdout_point - dev_point < 0)
+        verdict = "REAL REGRESSION -- VETO" if regressed else "REAL IMPROVEMENT on holdout (unusual but not a veto trigger)"
+
+    result = {"dev": float(dev_point), "holdout": float(holdout_point),
+              "gap_ci95": (float(ci[0]), float(ci[1])), "verdict": verdict}
+    print(f"{metric_name:24s} dev={dev_point:.4f}  holdout={holdout_point:.4f}  "
+          f"gap_ci95=({ci[0]:+.4f}, {ci[1]:+.4f})  -> {verdict}", flush=True)
+    return result
+
+
 def holdout_confirmatory_check(full_predictions: pd.DataFrame, n_bootstrap: int = 5000, seed: int = 0) -> dict:
     """full_predictions must span BOTH dev and holdout seasons (gameId,
     season, actual_home, actual_away, pred_home, pred_away) -- produced by

@@ -24,15 +24,16 @@ today).
   step, not a second validated rate model; the category's own already-
   validated conversion-rate model (`player_rebounding_rates.py`/
   `player_playmaking_rates.py`) still does the actual prediction.
-- **Matchup difficulty (`matchup_difficulty.py`) is NOT wired into this
-  live call yet**, even though it's fully built and validated (see
-  MODEL_DOCUMENTATION.md Sec10) -- wiring it live requires resolving each
-  offensive player's own position group (from `CommonTeamRoster`) and the
-  full opposing active roster's defender ratings for tonight specifically,
-  which is real additional live-data-assembly work, not a trivial call.
-  Points are anchored to the team total via `usage_allocation.py` WITHOUT
-  a matchup-difficulty reshape for now -- an honest, flagged fast-follow,
-  not a silently-dropped feature.
+- Matchup difficulty is applied to POINTS and AST/TOV, all three via the
+  FULL 3-level hierarchy (defender-specific -> position-group-vs-team ->
+  league floor, Sec13/18/19) -- gated on `season >= MATCHUP_DATA_START_SEASON`
+  and `MIN_MATCHUP_MINUTES_TO_TRUST`; an offensive player whose position
+  group can't be resolved (no roster data) gets no adjustment
+  (`matchup_adjusted: False`), not a crash or a silent zero passed off as
+  "checked and found neutral". AST/TOV are UNANCHORED (per
+  `usage_allocation.py`'s v1 scope), so their matchup adjustment is a
+  direct additive delta to the player's own projection (clipped at 0), not
+  a share-reallocation the way points' adjustment is.
 """
 
 import sys
@@ -43,6 +44,26 @@ import pandas as pd
 
 from src.ingest.fetch_rotowire_lineups import fetch_current_injury_report
 from src.ingest.fetch_schedule import FIRST_DEV_SEASON
+from src.models.matchup_difficulty import (
+    MATCHUP_DATA_START_SEASON,
+    MIN_MATCHUP_MINUTES_TO_TRUST,
+    POSGROUP_HALFLIFE_GAMES_AST,
+    POSGROUP_PRIOR_MATCHUP_MINUTES_TOV,
+    PRIOR_MATCHUP_MINUTES_AST,
+    PRIOR_MATCHUP_MINUTES_TOV,
+    add_defender_difficulty_rate,
+    add_defender_stat_difficulty_rate,
+    add_position_group_difficulty_rate,
+    add_position_group_stat_difficulty_rate,
+    add_position_group_stat_difficulty_rate_expanding,
+    build_defender_game_log,
+    build_defender_position_group_minutes,
+    build_position_group_matchup_log,
+    defender_position_group_minutes_asof,
+    defender_total_minutes_asof,
+    load_roster_position_lookup,
+    opponent_defense_adjustment,
+)
 from src.models.player_defensive_event_rates import add_defensive_event_rates
 from src.models.player_minutes import attach_player_track, build_player_game_log
 from src.models.player_playmaking_rates import add_playmaking_rates
@@ -50,7 +71,7 @@ from src.models.player_rate_shrinkage import add_walk_forward_player_rate
 from src.models.player_rebounding_rates import add_rebounding_rates
 from src.models.player_scoring_rates import add_scoring_rates
 from src.models.team_strength import add_team_ratings, build_team_game_log
-from src.models.usage_allocation import allocate_team_points, compute_usage_shares, raw_projected_points
+from src.models.usage_allocation import allocate_team_points, compute_usage_shares, matchup_point_delta, raw_projected_points
 from src.pipeline.active_roster import build_team_history, games_on_date, resolve_active_lineup
 from src.pipeline.generate_predictions import _fit_latest_player_ratings, run as generate_game_predictions
 from src.pipeline.refresh_data import refresh_all_data
@@ -58,6 +79,7 @@ from src.utils.paths import DATA_PROCESSED
 
 TEAM_MINUTES_PER_GAME = 240.0  # 5 players x 48 minutes; OT ignored for a PRE-game projection (see module docstring)
 PRIOR_MINUTES_EXPOSURE_UNIT = 100.0  # expanding-shrinkage prior for the chances/touches-per-minute unit-conversion rates
+POSITION_GROUPS = ("G", "F", "C")
 
 STAT_COLUMNS = ("2pt_proj_made", "3pt_proj_made", "ft_proj_made",
                 "oreb_proj", "dreb_proj", "ast_proj", "tov_proj", "stl_proj", "blk_proj")
@@ -139,6 +161,124 @@ def _project_active_roster_stats(active_player_ids: list, projected_minutes: pd.
     return pd.DataFrame(rows).set_index("playerId") if rows else pd.DataFrame()
 
 
+def _build_matchup_context(current_season: int, game_date: str) -> dict | None:
+    """Everything `_matchup_point_delta` needs, computed ONCE per `run()`
+    call (not per player) -- `None` if `current_season` predates matchup
+    data entirely (impossible for a live TONIGHT call, but this function
+    is also reachable for historical backtesting dates)."""
+    if current_season < MATCHUP_DATA_START_SEASON:
+        return None
+
+    raw_defender_log = build_defender_game_log(MATCHUP_DATA_START_SEASON, current_season)
+
+    defender_log = add_defender_difficulty_rate(raw_defender_log.copy())
+    defender_ratings = _latest_snapshot(defender_log, ["difficulty_rate"])["difficulty_rate"]
+
+    posgroup_rated = add_position_group_difficulty_rate(build_position_group_matchup_log(MATCHUP_DATA_START_SEASON, current_season))
+    posgroup_latest = (posgroup_rated.sort_values("gameDate")
+                        .groupby(["team", "position_group"])["posgroup_difficulty_rate"].last())
+    league_avg_by_posgroup = posgroup_latest.groupby(level="position_group").mean().to_dict()
+
+    defender_posgroup_log = build_defender_position_group_minutes(MATCHUP_DATA_START_SEASON, current_season)
+    minutes_by_posgroup = {pg: defender_position_group_minutes_asof(defender_posgroup_log, pg, game_date)
+                            for pg in POSITION_GROUPS}
+
+    roster_lookup = load_roster_position_lookup(FIRST_DEV_SEASON, current_season)
+    roster_pg_by_season_player = roster_lookup.set_index(["season", "playerId"])["position_group"].to_dict()
+
+    # AST/TOV (Sec18/19): full 3-level hierarchy, mirroring points. Level-1 (defender-specific).
+    ast_log = add_defender_stat_difficulty_rate(raw_defender_log.copy(), "ast_allowed",
+                                                 PRIOR_MATCHUP_MINUTES_AST, prefix="ast_difficulty")
+    ast_ratings = _latest_snapshot(ast_log, ["ast_difficulty_rate"])["ast_difficulty_rate"]
+
+    tov_log = add_defender_stat_difficulty_rate(raw_defender_log.copy(), "tov_forced",
+                                                 PRIOR_MATCHUP_MINUTES_TOV, prefix="tov_difficulty")
+    tov_ratings = _latest_snapshot(tov_log, ["tov_difficulty_rate"])["tov_difficulty_rate"]
+
+    # Level-2 (position-group-vs-team). AST uses EWMA (matches points); TOV uses expanding-shrinkage
+    # (does NOT match points -- confirmed empirically, see matchup_difficulty.py's module docstring).
+    posgroup_matchup_log = build_position_group_matchup_log(MATCHUP_DATA_START_SEASON, current_season)
+    ast_posgroup_rated = add_position_group_stat_difficulty_rate(
+        posgroup_matchup_log.copy(), "ast_allowed", POSGROUP_HALFLIFE_GAMES_AST, prefix="ast_posgroup")
+    ast_posgroup_latest = (ast_posgroup_rated.sort_values("gameDate")
+                           .groupby(["team", "position_group"])["ast_posgroup_difficulty_rate"].last())
+    ast_league_avg_by_posgroup = ast_posgroup_latest.groupby(level="position_group").mean().to_dict()
+
+    tov_posgroup_rated = add_position_group_stat_difficulty_rate_expanding(
+        posgroup_matchup_log.copy(), "tov_forced", POSGROUP_PRIOR_MATCHUP_MINUTES_TOV, prefix="tov_posgroup")
+    tov_posgroup_latest = (tov_posgroup_rated.sort_values("gameDate")
+                           .groupby(["team", "position_group"])["tov_posgroup_difficulty_rate"].last())
+    tov_league_avg_by_posgroup = tov_posgroup_latest.groupby(level="position_group").mean().to_dict()
+
+    # Exposure weighting (w(p,d)) is stat-agnostic -- how much a defender has guarded a position
+    # group recently doesn't depend on which stat we're predicting -- so `minutes_by_posgroup`
+    # (already built above for points) is reused directly for AST/TOV too.
+    total_minutes = defender_total_minutes_asof(raw_defender_log, game_date)
+
+    return {
+        "defender_ratings": defender_ratings, "posgroup_latest": posgroup_latest,
+        "league_avg_by_posgroup": league_avg_by_posgroup, "minutes_by_posgroup": minutes_by_posgroup,
+        "roster_pg_by_season_player": roster_pg_by_season_player,
+        "ast_ratings": ast_ratings, "ast_posgroup_latest": ast_posgroup_latest,
+        "ast_league_avg_by_posgroup": ast_league_avg_by_posgroup,
+        "tov_ratings": tov_ratings, "tov_posgroup_latest": tov_posgroup_latest,
+        "tov_league_avg_by_posgroup": tov_league_avg_by_posgroup,
+        "total_minutes": total_minutes,
+    }
+
+
+def _matchup_point_delta(pid: int, offense_season: int, opposing_team_id: int, opposing_roster_ids: list,
+                          projected_minutes_for_pid: float, matchup_ctx: dict | None) -> tuple[float, bool]:
+    """Returns (point_delta, was_adjusted). `was_adjusted=False` (delta=0.0)
+    when the offensive player's position group can't be resolved (no
+    roster data for them this season) -- an honest "no adjustment applied"
+    signal, not a silent zero passed off as "checked and found neutral"."""
+    if matchup_ctx is None:
+        return 0.0, False
+    position_group_value = matchup_ctx["roster_pg_by_season_player"].get((offense_season, pid), "")
+    if position_group_value == "":
+        return 0.0, False
+
+    minutes_at_pg = matchup_ctx["minutes_by_posgroup"].get(position_group_value)
+    posgroup_rating = matchup_ctx["posgroup_latest"].get((opposing_team_id, position_group_value))
+    league_avg = matchup_ctx["league_avg_by_posgroup"].get(position_group_value, 0.0)
+
+    rate_delta = opponent_defense_adjustment(
+        opposing_roster_player_ids=opposing_roster_ids, defender_ratings=matchup_ctx["defender_ratings"],
+        defender_minutes_at_posgroup=minutes_at_pg, posgroup_rating=posgroup_rating,
+        league_avg_posgroup_rating=league_avg, min_matchup_minutes_to_trust=MIN_MATCHUP_MINUTES_TO_TRUST,
+    )
+    return matchup_point_delta(rate_delta, projected_minutes_for_pid), True
+
+
+def _ast_tov_matchup_delta(stat: str, pid: int, offense_season: int, opposing_team_id: int,
+                           opposing_roster_ids: list, projected_minutes_for_pid: float,
+                           matchup_ctx: dict | None) -> tuple[float, bool]:
+    """AST/TOV analog of `_matchup_point_delta` (Sec18/19) -- now the FULL
+    3-level hierarchy (defender-specific -> position-group-vs-team ->
+    league floor), same as points. `stat` is "ast" or "tov". Returns
+    (delta, was_adjusted) -- `was_adjusted=False` when there's no matchup
+    context at all, OR the offensive player's position group can't be
+    resolved (same honest-fallback convention as points)."""
+    if matchup_ctx is None:
+        return 0.0, False
+    position_group_value = matchup_ctx["roster_pg_by_season_player"].get((offense_season, pid), "")
+    if position_group_value == "":
+        return 0.0, False
+
+    ratings = matchup_ctx[f"{stat}_ratings"]
+    posgroup_rating = matchup_ctx[f"{stat}_posgroup_latest"].get((opposing_team_id, position_group_value))
+    league_avg = matchup_ctx[f"{stat}_league_avg_by_posgroup"].get(position_group_value, 0.0)
+    minutes_at_pg = matchup_ctx["minutes_by_posgroup"].get(position_group_value)
+
+    rate_delta = opponent_defense_adjustment(
+        opposing_roster_player_ids=opposing_roster_ids, defender_ratings=ratings,
+        defender_minutes_at_posgroup=minutes_at_pg, posgroup_rating=posgroup_rating,
+        league_avg_posgroup_rating=league_avg, min_matchup_minutes_to_trust=MIN_MATCHUP_MINUTES_TO_TRUST,
+    )
+    return matchup_point_delta(rate_delta, projected_minutes_for_pid), True
+
+
 def _build_rate_logs(current_season: int) -> tuple:
     """One shared `build_player_game_log` call, reused for every category
     that doesn't need player-tracking data (scoring, defensive events),
@@ -173,6 +313,10 @@ def run(game_date: str) -> pd.DataFrame:
     team_history, team_side = build_team_history(team_log)
 
     scoring_log, rebounding_log, playmaking_log, defensive_log = _build_rate_logs(current_season)
+    matchup_ctx = _build_matchup_context(current_season, game_date)
+    if matchup_ctx is None:
+        print(f"  NOTE: season {current_season} predates matchup data (starts {MATCHUP_DATA_START_SEASON}) "
+              f"-- points will not be matchup-adjusted", flush=True)
 
     all_rows = []
     for row in game_preds.itertuples(index=False):
@@ -187,9 +331,9 @@ def run(game_date: str) -> pd.DataFrame:
         away_shares, away_tag = resolve_active_lineup(
             row.awayAbbrev, team_history.get(away_id, []), player_minutes_stints, team_side.get(away_id, {}), injury_report)
 
-        for shares, tag, team_abbrev, opp_abbrev, team_total in (
-            (home_shares, home_tag, row.homeAbbrev, row.awayAbbrev, row.pred_home),
-            (away_shares, away_tag, row.awayAbbrev, row.homeAbbrev, row.pred_away),
+        for shares, tag, team_abbrev, opp_abbrev, opposing_team_id, opposing_shares, team_total in (
+            (home_shares, home_tag, row.homeAbbrev, row.awayAbbrev, away_id, away_shares, row.pred_home),
+            (away_shares, away_tag, row.awayAbbrev, row.homeAbbrev, home_id, home_shares, row.pred_away),
         ):
             if shares.empty:
                 print(f"    {team_abbrev}: no active-roster data this call ({tag}) -- skipping props for this team", flush=True)
@@ -206,7 +350,35 @@ def run(game_date: str) -> pd.DataFrame:
             # sum for the WHOLE team (the same NaN-poisons-aggregate bug pattern already found
             # twice elsewhere in this project -- guarded against explicitly here, not by luck).
             raw_points = raw_projected_points(proj).fillna(0.0)
-            usage_shares = compute_usage_shares(raw_points)
+
+            opposing_roster_ids = list(opposing_shares.index)
+            matchup_adjusted_flags = {}
+            ast_adjusted_flags = {}
+            tov_adjusted_flags = {}
+            adjusted_points = raw_points.copy()
+            for pid in raw_points.index:
+                delta, was_adjusted = _matchup_point_delta(
+                    pid, current_season, opposing_team_id, opposing_roster_ids,
+                    float(projected_minutes.get(pid, 0.0)), matchup_ctx)
+                adjusted_points[pid] = raw_points[pid] + delta
+                matchup_adjusted_flags[pid] = was_adjusted
+
+                # AST/TOV (Sec18/19): unanchored, so a direct additive delta to the player's own
+                # projection -- no team-total redistribution needed the way points has.
+                pid_minutes = float(projected_minutes.get(pid, 0.0))
+                ast_delta, ast_adjusted = _ast_tov_matchup_delta(
+                    "ast", pid, current_season, opposing_team_id, opposing_roster_ids, pid_minutes, matchup_ctx)
+                tov_delta, tov_adjusted = _ast_tov_matchup_delta(
+                    "tov", pid, current_season, opposing_team_id, opposing_roster_ids, pid_minutes, matchup_ctx)
+                if pid in proj.index:
+                    if ast_adjusted and pd.notna(proj.loc[pid].get("ast_proj")):
+                        proj.loc[pid, "ast_proj"] = max(0.0, proj.loc[pid, "ast_proj"] + ast_delta)
+                    if tov_adjusted and pd.notna(proj.loc[pid].get("tov_proj")):
+                        proj.loc[pid, "tov_proj"] = max(0.0, proj.loc[pid, "tov_proj"] + tov_delta)
+                ast_adjusted_flags[pid] = ast_adjusted
+                tov_adjusted_flags[pid] = tov_adjusted
+
+            usage_shares = compute_usage_shares(adjusted_points)
             final_points = allocate_team_points(usage_shares, team_total)
 
             for pid in proj.index:
@@ -224,7 +396,13 @@ def run(game_date: str) -> pd.DataFrame:
                         "gameId": row.gameId, "playerId": pid, "team": team_abbrev, "opponent": opp_abbrev,
                         "stat_name": stat_name, "proj_mean": float(mean),
                         "minutes_tier_tag": tag, "anchored_to_team_total": stat_name == "points",
-                        "matchup_adjusted": False,  # see module docstring -- not wired into this live call yet
+                        # matchup difficulty reshapes points (position-group-aware) and ast/tov
+                        # (defender-level only, Sec18); every other category is never adjusted.
+                        "matchup_adjusted": (
+                            (stat_name == "points" and matchup_adjusted_flags.get(pid, False))
+                            or (stat_name == "ast" and ast_adjusted_flags.get(pid, False))
+                            or (stat_name == "tov" and tov_adjusted_flags.get(pid, False))
+                        ),
                     })
 
     result_df = pd.DataFrame(all_rows)

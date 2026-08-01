@@ -71,6 +71,24 @@ PRIOR_MATCHUP_MINUTES_DIFFICULTY = 50.0
 # empirically-swept optimum halflife.
 POSGROUP_HALFLIFE_GAMES = 10.0
 
+# AST-allowed / TOV-forced defender difficulty (Sec18): confirmed empirically on the 2017-2023
+# dev subset -- expanding-shrinkage beats naive AND every EWMA halflife tested for both (NOT
+# assumed to transfer from points-allowed's family, per this project's standing discipline; it
+# just happened to match here). ast_allowed: naive MAE 1.2740, best expanding 1.2454 @ prior=100,
+# best EWMA 1.2973. tov_forced: naive MAE 0.9109, best expanding 0.8859 @ prior=200, best EWMA
+# 0.9245. Each prior is its own empirically-swept optimum, not copy-pasted from the other.
+PRIOR_MATCHUP_MINUTES_AST = 100.0
+PRIOR_MATCHUP_MINUTES_TOV = 200.0
+
+# AST/TOV position-group-vs-team difficulty (Sec19): confirmed empirically on the 2017-2023 dev
+# subset -- NOT assumed to transfer from either points (EWMA) or level-1 AST/TOV (expanding). AST
+# matched points (EWMA halflife=10 wins: shrunk 2.6286 vs naive 2.8720). TOV did NOT match points --
+# expanding-shrinkage wins instead (prior=250: shrunk 1.8835 vs naive 1.9121, beating every EWMA
+# halflife tested, best 1.9062) -- yet another instance of two similar-looking stats needing
+# opposite treatment, confirmed rather than assumed.
+POSGROUP_HALFLIFE_GAMES_AST = 10.0
+POSGROUP_PRIOR_MATCHUP_MINUTES_TOV = 250.0
+
 
 def _parse_minutes(minutes_str) -> float:
     """"MM:SS" (no leading zero on minutes, e.g. "7:59") -> float minutes. Blank -> 0.0."""
@@ -90,7 +108,7 @@ def position_group(position_str) -> str:
     return str(position_str)[0]
 
 
-def _load_roster_position_lookup(start_year: int, end_year: int) -> pd.DataFrame:
+def load_roster_position_lookup(start_year: int, end_year: int) -> pd.DataFrame:
     """One row per (season, playerId) -> position_group, from
     `CommonTeamRoster` (NOT any box-score's own position column -- see
     module docstring). A player who was traded mid-season and appears on
@@ -140,11 +158,13 @@ def build_defender_game_log(start_year: int, end_year: int) -> pd.DataFrame:
             "season": y, "playerId": merged["personId"], "team": merged["teamId"],
             "matchup_minutes": merged["matchupMinutes"].apply(_parse_minutes),
             "points_allowed": merged["playerPoints"],
+            "ast_allowed": merged["matchupAssists"], "tov_forced": merged["matchupTurnovers"],
             "partial_possessions": merged["partialPossessions"],
         }))
     if not frames:
         return pd.DataFrame(columns=["gameId", "gameDate", "season", "playerId", "team",
-                                      "matchup_minutes", "points_allowed", "partial_possessions"])
+                                      "matchup_minutes", "points_allowed", "ast_allowed", "tov_forced",
+                                      "partial_possessions"])
     return pd.concat(frames, ignore_index=True)
 
 
@@ -153,12 +173,27 @@ def add_defender_difficulty_rate(log: pd.DataFrame) -> pd.DataFrame:
     `difficulty_rate` (shrunk points-allowed per matchup-minute; LOWER is a
     tougher defender) and `difficulty_proj` (this row's own realized
     matchup-minutes x rate -- a backtest convenience, see the pattern in
-    every other `add_*_rate` function in this codebase)."""
+    every other `add_*_rate` function in this codebase). Points-specific --
+    see `add_defender_stat_difficulty_rate` for the generalized version
+    used by AST/TOV (Sec18)."""
+    return add_defender_stat_difficulty_rate(log, "points_allowed", PRIOR_MATCHUP_MINUTES_DIFFICULTY,
+                                              prefix="difficulty")
+
+
+def add_defender_stat_difficulty_rate(log: pd.DataFrame, stat_col: str, prior_matchup_minutes: float,
+                                       prefix: str) -> pd.DataFrame:
+    """Generalizes `add_defender_difficulty_rate` to any per-defender
+    per-matchup-minute stat (points allowed, AST allowed, TOV forced --
+    Sec18) rather than hardcoding points. Adds `{prefix}_rate` (shrunk
+    stat-per-matchup-minute) and `{prefix}_proj` (this row's own realized
+    matchup-minutes x rate, backtest convenience). Family/prior is NOT
+    assumed to transfer from points -- each stat gets its own empirical
+    check in its own `validate_matchup_difficulty.py` category, per this
+    project's standing discipline."""
     log = log.copy()
-    log = add_walk_forward_player_rate(log, "points_allowed", "matchup_minutes",
-                                        PRIOR_MATCHUP_MINUTES_DIFFICULTY, prefix="difficulty")
-    log = log.rename(columns={"difficulty_shrunk_rate": "difficulty_rate"})
-    log["difficulty_proj"] = log["difficulty_rate"] * log["matchup_minutes"]
+    log = add_walk_forward_player_rate(log, stat_col, "matchup_minutes", prior_matchup_minutes, prefix=prefix)
+    log = log.rename(columns={f"{prefix}_shrunk_rate": f"{prefix}_rate"})
+    log[f"{prefix}_proj"] = log[f"{prefix}_rate"] * log["matchup_minutes"]
     return log
 
 
@@ -170,7 +205,7 @@ def build_position_group_matchup_log(start_year: int, end_year: int) -> pd.DataF
     Captures team-level defensive scheme against a position group, the
     level-2 fallback when a specific defender lacks enough matchup-minute
     history against tonight's opponent."""
-    roster_lookup = _load_roster_position_lookup(start_year, end_year)
+    roster_lookup = load_roster_position_lookup(start_year, end_year)
 
     frames = []
     for y in range(max(start_year, MATCHUP_DATA_START_SEASON), end_year + 1):
@@ -187,35 +222,66 @@ def build_position_group_matchup_log(start_year: int, end_year: int) -> pd.DataF
         box["matchup_minutes"] = box["matchupMinutes"].apply(_parse_minutes)
 
         grouped = box.groupby(["gameId", "teamId", "position_group"], as_index=False).agg(
-            matchup_minutes=("matchup_minutes", "sum"), points_allowed=("playerPoints", "sum"))
+            matchup_minutes=("matchup_minutes", "sum"), points_allowed=("playerPoints", "sum"),
+            ast_allowed=("matchupAssists", "sum"), tov_forced=("matchupTurnovers", "sum"))
         merged = schedule.merge(grouped, on="gameId", how="inner")
         frames.append(pd.DataFrame({
             "gameId": merged["gameId"], "gameDate": pd.to_datetime(merged["gameDate"]),
             "season": y, "team": merged["teamId"], "position_group": merged["position_group"],
             "matchup_minutes": merged["matchup_minutes"], "points_allowed": merged["points_allowed"],
+            "ast_allowed": merged["ast_allowed"], "tov_forced": merged["tov_forced"],
         }))
     if not frames:
         return pd.DataFrame(columns=["gameId", "gameDate", "season", "team", "position_group",
-                                      "matchup_minutes", "points_allowed"])
+                                      "matchup_minutes", "points_allowed", "ast_allowed", "tov_forced"])
     return pd.concat(frames, ignore_index=True)
 
 
 def add_position_group_difficulty_rate(log: pd.DataFrame) -> pd.DataFrame:
-    """log must have `build_position_group_matchup_log`'s columns. Groups by
-    (team, position_group) rather than a single `playerId` -- the shared
+    """log must have `build_position_group_matchup_log`'s columns. Adds
+    `posgroup_difficulty_rate` (EWMA-smoothed points-allowed per matchup-
+    minute -- see module docstring). Points-specific -- see
+    `add_position_group_stat_difficulty_rate` for the generalized version
+    used by AST/TOV (Sec19)."""
+    return add_position_group_stat_difficulty_rate(log, "points_allowed", POSGROUP_HALFLIFE_GAMES,
+                                                    prefix="posgroup")
+
+
+def add_position_group_stat_difficulty_rate(log: pd.DataFrame, stat_col: str, halflife_games: float,
+                                             prefix: str) -> pd.DataFrame:
+    """EWMA family (see module docstring -- points and AST both confirmed
+    this family at the position-group level; TOV did NOT, see
+    `add_position_group_stat_difficulty_rate_expanding` for that one).
+    Generalizes `add_position_group_difficulty_rate` to any per-position-
+    group per-matchup-minute stat (Sec18/19). Groups by (team,
+    position_group) rather than a single `playerId` -- the shared
     `add_walk_forward_player_mean_ewm` primitive is generic over `group_col`,
     so this reuses it with a composite string key rather than reimplementing
-    a team-level walk-forward rate from scratch. Adds `posgroup_difficulty_rate`
-    (EWMA-smoothed points-allowed per matchup-minute for that team against
-    that position group -- EWMA, not expanding-shrinkage, confirmed
-    empirically, see module docstring)."""
+    a team-level walk-forward rate from scratch. Adds `{prefix}_difficulty_rate`.
+    Family/halflife is NOT assumed to transfer from points -- each stat gets
+    its own empirical check, per this project's standing discipline."""
     log = log.copy()
     log["team_posgroup"] = log["team"].astype(str) + "_" + log["position_group"]
-    log["_pts_per_min_raw"] = log["points_allowed"] / log["matchup_minutes"].replace(0, np.nan)
-    log = add_walk_forward_player_mean_ewm(log, "_pts_per_min_raw", POSGROUP_HALFLIFE_GAMES,
-                                            prefix="posgroup", group_col="team_posgroup")
-    log = log.rename(columns={"posgroup_ewm_rate": "posgroup_difficulty_rate"})
-    return log.drop(columns=["team_posgroup", "_pts_per_min_raw"])
+    raw_col = f"_{prefix}_per_min_raw"
+    log[raw_col] = log[stat_col] / log["matchup_minutes"].replace(0, np.nan)
+    log = add_walk_forward_player_mean_ewm(log, raw_col, halflife_games, prefix=prefix, group_col="team_posgroup")
+    log = log.rename(columns={f"{prefix}_ewm_rate": f"{prefix}_difficulty_rate"})
+    return log.drop(columns=["team_posgroup", raw_col])
+
+
+def add_position_group_stat_difficulty_rate_expanding(log: pd.DataFrame, stat_col: str,
+                                                       prior_matchup_minutes: float, prefix: str) -> pd.DataFrame:
+    """Expanding-shrinkage family variant (Sec19) -- confirmed for TOV
+    specifically at the position-group level, the OPPOSITE of points/AST's
+    EWMA at this same level (see module docstring). Same interface as
+    `add_position_group_stat_difficulty_rate`, just `add_walk_forward_player_rate`
+    instead of the EWMA primitive."""
+    log = log.copy()
+    log["team_posgroup"] = log["team"].astype(str) + "_" + log["position_group"]
+    log = add_walk_forward_player_rate(log, stat_col, "matchup_minutes", prior_matchup_minutes,
+                                        prefix=prefix, group_col="team_posgroup")
+    log = log.rename(columns={f"{prefix}_shrunk_rate": f"{prefix}_difficulty_rate"})
+    return log.drop(columns=["team_posgroup"])
 
 
 # "Tonight's merge" -- handles switch-heavy defenses (never a hard 1:1 defender assignment).
@@ -234,7 +300,7 @@ def build_defender_position_group_minutes(start_year: int, end_year: int) -> pd.
     time guarding a position group across several players, so the
     adjustment must be a weighted blend, never a single hard-assigned
     defender)."""
-    roster_lookup = _load_roster_position_lookup(start_year, end_year)
+    roster_lookup = load_roster_position_lookup(start_year, end_year)
 
     frames = []
     for y in range(max(start_year, MATCHUP_DATA_START_SEASON), end_year + 1):
@@ -277,6 +343,20 @@ def defender_position_group_minutes_asof(defender_posgroup_log: pd.DataFrame, po
         (defender_posgroup_log["position_group"] == position_group_value)
         & (defender_posgroup_log["gameDate"] < pd.Timestamp(as_of_date))
     ]
+    return subset.groupby("playerId")["matchup_minutes"].sum()
+
+
+def defender_total_minutes_asof(defender_log: pd.DataFrame, as_of_date) -> pd.Series:
+    """Position-group-AGNOSTIC analog of `defender_position_group_minutes_asof`
+    -- trailing total matchup-minutes per defender across ALL position
+    groups combined, from `build_defender_game_log`'s output. Used for
+    AST-allowed/TOV-forced (Sec18), which don't have a position-group
+    fallback tier built (no `BoxScoreMatchupsV3`-derived per-position-group
+    log for these two stats yet -- a scoped v1, not an oversight): the
+    merge weights opposing defenders by OVERALL matchup-minute exposure
+    instead of exposure specifically against the offensive player's
+    position group."""
+    subset = defender_log[defender_log["gameDate"] < pd.Timestamp(as_of_date)]
     return subset.groupby("playerId")["matchup_minutes"].sum()
 
 

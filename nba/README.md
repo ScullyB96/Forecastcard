@@ -14,7 +14,7 @@ Two layers, both done (v1 scope) and validated on real data:
   `python -m src.pipeline.generate_predictions [YYYY-MM-DD]`.
 - **Player props**: a full per-player stat-line projection (points split 2PT/3PT/FT, rebounds
   split OREB/DREB, assists, turnovers, steals, blocks) built from six independently-validated
-  walk-forward rate models, a matchup-difficulty layer (built, not yet live-wired), and a
+  walk-forward rate models, a matchup-difficulty layer, and a
   macro-anchor + micro-reallocation composition rule that ties points back to the game-score
   model's own team totals without double-counting. Live entry point:
   `python -m src.pipeline.generate_props [YYYY-MM-DD]`.
@@ -54,8 +54,8 @@ pip install -r requirements.txt
   - `player_minutes.py`, `player_scoring_rates.py`, `player_rebounding_rates.py`,
     `player_playmaking_rates.py`, `player_defensive_event_rates.py` — the six per-player
     rate-category models (minutes; 2PT/3PT/FT attempts+makes; OREB/DREB; AST/TOV; STL/BLK)
-  - `matchup_difficulty.py` — the 3-level defender/team-scheme difficulty hierarchy (built,
-    validated, not yet wired into the live props pipeline — see `MODEL_DOCUMENTATION.md`)
+  - `matchup_difficulty.py` — the 3-level defender/team-scheme difficulty hierarchy, wired into
+    the live props pipeline (see `MODEL_DOCUMENTATION.md`)
   - `usage_allocation.py` — the macro-anchor + micro-reallocation composition rule (points
     anchored to the game-score model's own team total; REB/AST/TOV/STL/BLK left unanchored, v1)
   - `prop_distribution.py` — player-level predictive distributions (Normal/Student-t for

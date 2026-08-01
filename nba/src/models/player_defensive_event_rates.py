@@ -27,7 +27,28 @@ steals: block volume is heavily driven by matchup and rim-protection role
 metric like shot attempts or minutes, not a stable gambling-style skill like
 steals. No separate Gamma-Poisson implementation needed for the steals
 point-estimate; a genuine Poisson/NegBin distribution is only needed
-downstream in `prop_distribution.py` for the final predictive spread."""
+downstream in `prop_distribution.py` for the final predictive spread.
+
+**TWO successive fix attempts NOT ADOPTED, both reverted (2026-08-01, Sec16/17)**:
+steals carried a REAL dev-vs-holdout MAE gap (Sec14).
+(1) `league_avg_halflife_games=300` (Sec16) passed two dev-only checks but
+made holdout WORSE when checked (0.5554 -> 0.5568).
+(2) `add_era_adjusted_player_rate`'s detrend-then-retrend architecture
+(Sec17) was validated even more rigorously (consistent gains across FOUR
+independent dev-internal cutoffs, full-dev-range, and vs-naive) -- and
+still made holdout WORSE, and by MORE (0.5554 -> 0.5630, a larger
+regression than attempt (1)).
+
+**Both reverted. This MONOTONIC pattern -- each progressively more
+sophisticated trend-extrapolation attempt made real holdout performance
+WORSE, not better -- is the decisive finding, not a modeling failure to
+keep chasing.** It strongly indicates the 2024-2025 steal-rate shift
+(Sec14: 0.697 in 2023 -> 0.767 in 2024 -> 0.777 in 2025) is a genuine
+REGIME CHANGE, not a smooth continuing trend -- and NO historical
+extrapolation technique, however adaptive, can predict a level shift from
+data that predates it entirely. Stopping further attempts at this specific
+gap via trend-extrapolation. Steals uses the ORIGINAL, simplest, most-
+validated configuration (flat-cumulative expanding-shrinkage, prior=200)."""
 
 import numpy as np
 import pandas as pd
