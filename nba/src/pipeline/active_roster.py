@@ -1,0 +1,104 @@
+"""Shared active-lineup-resolution helpers, extracted from
+`generate_predictions.py` so both live entry points (`generate_predictions.py`
+and `generate_props.py`) call the EXACT same logic for "who's actually
+playing tonight and how many minutes will they get" -- a single source of
+truth that can't silently drift between the two pipelines.
+
+**Active-lineup resolution is 2-tier for v1, not a 3-tier design** --
+documented honestly rather than silently shipped as if a third tier
+existed: (1) RotoWire's Out/Doubtful signal (`fetch_rotowire_lineups.py`,
+matched to a player ID via `player_name_crosswalk.py`) is the only real
+injury signal actually wired up (the NBA official PDF injury report was
+deliberately not built for v1, see MODEL_DOCUMENTATION.md); (2) a
+last-resort trailing-minutes projection for every player NOT flagged
+Out/Doubtful, renormalized across the team's recent rotation. Every output
+row is tagged with which tier produced it.
+"""
+
+import pandas as pd
+from nba_api.stats.endpoints import scoreboardv3
+
+from src.ingest.player_name_crosswalk import player_id_for_name
+from src.ingest.team_codes import ABBREV_TO_TEAM_ID
+
+MINUTES_LOOKBACK_GAMES = 10
+
+
+def games_on_date(game_date: str) -> pd.DataFrame:
+    """ScoreboardV3's team-rows dataset doesn't carry an explicit home/away
+    column, but `gameCode` (e.g. "20260115/MEMORL") reliably encodes it --
+    confirmed live (2026-07-24) against a real slate: the 6 characters after
+    the "/" are the AWAY team's 3-letter tricode followed by the HOME team's,
+    matching each game's actual real-world home team. Parsed from
+    `gameCode` directly rather than trusting team-row order (unconfirmed and
+    not worth relying on)."""
+    sb = scoreboardv3.ScoreboardV3(game_date=game_date, timeout=30)
+    dfs = sb.get_data_frames()
+    game_meta, team_rows = dfs[1], dfs[2]
+
+    games = []
+    for row in game_meta.itertuples(index=False):
+        code = row.gameCode.split("/")[1]
+        away_abbrev, home_abbrev = code[:3], code[3:6]
+        away_id = ABBREV_TO_TEAM_ID.get(away_abbrev)
+        home_id = ABBREV_TO_TEAM_ID.get(home_abbrev)
+        games.append({"gameId": row.gameId, "homeTeamId": home_id, "awayTeamId": away_id,
+                      "homeAbbrev": home_abbrev, "awayAbbrev": away_abbrev})
+    return pd.DataFrame(games)
+
+
+def build_team_history(team_log: pd.DataFrame) -> tuple[dict, dict]:
+    """From the long (one row per team per game) team-game log: for each
+    team, its own gameIds ordered by date (all strictly prior to today,
+    since `team_log` only ever contains already-completed, box-scored
+    games), plus a per-team {gameId: 'home'/'away'} side lookup -- what
+    `lineup_rating.team_recent_roster_rapm` and `resolve_active_lineup`
+    both need for their lookback."""
+    team_log = team_log.sort_values("gameDate")
+    team_history: dict[int, list] = {}
+    team_side: dict[int, dict] = {}
+    for row in team_log.itertuples(index=False):
+        team_history.setdefault(row.team, []).append(row.gameId)
+        team_side.setdefault(row.team, {})[row.gameId] = "home" if row.is_home else "away"
+    return team_history, team_side
+
+
+def resolve_active_lineup(team_abbrev: str, team_prior_game_ids: list, player_minutes: pd.DataFrame,
+                           team_side_lookup: dict, injury_report: list[dict]) -> tuple[pd.Series, str]:
+    """Returns (minutes_shares renormalized to 1.0, source_tag). Players
+    RotoWire flags Out/Doubtful are excluded by player ID (via
+    `player_name_crosswalk.player_id_for_name`) before minutes shares are
+    computed -- a name with no crosswalk match (recent rookie/two-way player
+    not yet in `nba_api`'s static list) can't be excluded by ID and is
+    logged, not silently ignored."""
+    out_names = [r["player"] for r in injury_report if r["team"] == team_abbrev and r["likely_out"]]
+    out_ids = set()
+    for name in out_names:
+        pid = player_id_for_name(name)
+        if pid is not None:
+            out_ids.add(pid)
+        else:
+            print(f"    WARNING: RotoWire flagged '{name}' ({team_abbrev}) as Out/Doubtful but no "
+                  f"player-ID crosswalk match was found -- this player CANNOT be excluded from "
+                  f"tonight's projected minutes", flush=True)
+
+    recent = team_prior_game_ids[-MINUTES_LOOKBACK_GAMES:]
+    rows = []
+    for gid in recent:
+        side = team_side_lookup.get(gid)
+        if side is None:
+            continue
+        g = player_minutes[(player_minutes["gameId"] == gid) & (player_minutes["team_side"] == side)]
+        rows.append(g)
+    if not rows:
+        return pd.Series(dtype=float), "no recent rotation history"
+
+    combined = pd.concat(rows, ignore_index=True)
+    avg_minutes = combined.groupby("playerId")["minutes"].mean()
+    avg_minutes = avg_minutes.drop(index=[pid for pid in out_ids if pid in avg_minutes.index])
+
+    total = avg_minutes.sum()
+    if total <= 0:
+        return pd.Series(dtype=float), "no positive minutes in lookback window after exclusions"
+    tag = f"predictive (trailing {MINUTES_LOOKBACK_GAMES}-game minutes, {len(out_ids)} player(s) excluded via RotoWire)"
+    return avg_minutes / total, tag

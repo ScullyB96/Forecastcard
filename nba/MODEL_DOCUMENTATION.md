@@ -61,7 +61,28 @@ see Sec9 for the full writeup. Summary, each with a real decision-worthy number 
 **What's actually left on the game-score side**: the Phase 1 margin/scoring-era-drift issue found in
 Sec9 is a new, real, OPEN problem (not blocking, not silently accepted) -- a candidate for a future
 cycle analogous to the NHL sibling's own Cycle 13/Sec20 scoring-drift fix. Everything else in the
-original 5-phase plan is done. Player-props work (Sec8) is proceeding as its own track.
+original 5-phase plan is done.
+
+**STATUS (updated 2026-08-01): the player-props subsystem (Sec8, 10-12) is ALSO DONE, v1 scope,
+all 6 planned tasks complete.** Six per-player rate-category models (minutes, 2PT/3PT/FT
+scoring, rebounding, playmaking, steals/blocks), each independently validated at full dev-range
+scale with a real improvement over its naive floor -- along the way, found FOUR separate instances
+of two superficially-similar stats needing OPPOSITE smoothing families (minutes vs. shot attempts,
+2PT/3PT vs. FT, steals vs. blocks, and a team-scheme-vs-individual-skill split inside the matchup-
+difficulty layer itself), confirmed empirically every time, never assumed by analogy. A 3-level
+matchup-difficulty shrinkage hierarchy (defender-specific -> position-group-vs-team -> league
+floor), validated on the 2017-2023 subset. A macro-anchor + micro-reallocation composition rule
+(`usage_allocation.py`) that anchors points to Phase 1+2's already-validated team total without
+double-counting. A player-level predictive-distribution layer (`prop_distribution.py`) reusing
+`score_distribution.py`'s math for high-count stats plus a new Poisson/NegBin branch for low-count
+ones. A live `generate_props.py` pipeline, confirmed against a real historical slate (points
+reconcile exactly to the game-prediction pipeline's own team totals; no NaN/negative projections).
+**Known, explicitly-flagged v1 gap**: matchup difficulty is built and validated but NOT yet wired
+into the live `generate_props.py` call (every output row is tagged `matchup_adjusted: False`) --
+a real fast-follow, not silently dropped. See Sec8/10/11/12 for the full writeup, including two
+more real bugs found and fixed (an `inf`-poisoned log-score at a zero-mean count projection, and a
+NaN-poisons-the-team-sum risk in the live usage-allocation wiring). 23 regression tests (45
+assertions) passing in `tests/test_regression_bugs.py`.
 
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
@@ -635,30 +656,32 @@ confirming empirically each time rather than assumed by analogy -- treat every n
 as an open empirical question, never a copy-paste of the nearest existing category.
 
 **`player_rebounding_rates.py`/`player_playmaking_rates.py`** now have their own `validate_*.py`
-scripts (written this session, matching the other categories' pattern). `BoxScorePlayerTrackV3`'s
-backfill is still in progress (2015-2025, running in the background), so these can only be
-smoke-tested on the one season backfilled so far (2015-16, 31,141 player-game rows) rather than
-the full dev range -- treat the results below as PRELIMINARY, to be re-confirmed at full dev-range
-scale once the backfill completes (these ledger entries are honestly distinguishable from a true
-full-dev-range run by their much smaller `n_player_games`, ~31K vs. ~267-275K).
+scripts (written this session, matching the other categories' pattern), and `BoxScorePlayerTrackV3`'s
+full 2015-2025 backfill has since completed. A preliminary single-season smoke test (2015-16 only,
+31,141 rows) found OREB/DREB/TOV already beating naive with their existing priors, while AST's
+initial `PRIOR_TOUCHES_AST=300` (copy-pasted from TOV's, untested) was a real regression -- fixed
+by lowering to 50, the fourth instance in this subsystem of a copy-pasted constant being wrong
+when actually tested per-category (minutes vs. attempts, 2PT/3PT vs. FT, steals vs. blocks, and
+AST vs. TOV's shared prior).
 
-On that single-season sample: OREB (MAE 0.4640 vs naive 0.4667), DREB (MAE 0.7311 vs naive
-0.7474), and TOV (MAE 0.7151 vs naive 0.7307) all show real improvement with their existing
-priors. AST initially showed a REAL REGRESSION with `PRIOR_TOUCHES_AST=300` (MAE 0.8965 vs naive
-0.8933) -- that prior was copy-pasted from TOV's (also 300), an assumption not tested per-category
-as this project's discipline requires. A direct sweep on AST specifically found the family
-(expanding-shrinkage) was fine, just the prior was too large: `prior_touches=50` (MAE 0.8880)
-clearly beats naive. Lowered `PRIOR_TOUCHES_AST` to 50; re-validated and confirmed REAL
-IMPROVEMENT (MAE 0.8880 vs naive 0.8933). This is the fourth time in this subsystem that a
-copy-pasted constant or family assumption from a superficially similar stat was wrong when
-actually tested (minutes vs. attempts, 2PT/3PT vs. FT, steals vs. blocks, and now AST vs. TOV's
-shared prior) -- every category gets its own empirical check, no exceptions.
+**Full dev-range re-validation (275,138 player-games, matching every other category's scale)
+CONFIRMS all four categories, no further changes needed:**
+- OREB: shrunk MAE 0.4401 vs naive 0.4475 (CI (-0.0081,-0.0066)) -- REAL IMPROVEMENT
+- DREB: shrunk MAE 0.7211 vs naive 0.7395 (CI (-0.0195,-0.0173)) -- REAL IMPROVEMENT
+- AST: shrunk MAE 0.9286 vs naive 0.9402 (CI (-0.0139,-0.0096)) -- REAL IMPROVEMENT (confirms the
+  single-season prior=50 fix generalizes to the full range)
+- TOV: shrunk MAE 0.7001 vs naive 0.7182 (CI (-0.0194,-0.0169)) -- REAL IMPROVEMENT
 
-Next: let `BoxScorePlayerTrackV3`'s backfill finish (2015-2025), then re-run
-`validate_player_rebounding_rates.py`/`validate_player_playmaking_rates.py` on the full dev range
-to confirm (or correct) the preliminary findings above. Then the matchup-difficulty layer, then
-usage allocation + prop distribution + the live `generate_props.py` pipeline -- see the approved
-plan for the full sequencing.
+**Task #11 (`player_rate_shrinkage.py` primitive through all six per-player rate-category models)
+is now fully DONE, every category validated at full dev-range scale with a real, CI-excludes-zero
+improvement over its naive floor:** minutes (EWMA), 2PT/3PT/FT scoring (mixed EWMA/expanding-
+shrinkage per category), STL/BLK defensive events (opposite smoothing families), OREB/DREB
+rebounding, AST/TOV playmaking (all expanding-shrinkage). 17 regression tests (32 assertions)
+passing in `tests/test_regression_bugs.py`.
+
+Next: the matchup-difficulty layer (`fetch_boxscore_matchups.py` + `fetch_team_rosters.py` +
+`matchup_difficulty.py`, 2017-18+ only), then usage allocation + prop distribution + the live
+`generate_props.py` pipeline -- see the approved plan for the full sequencing. Done as of Sec10.
 
 ## 9. Game-score model finished: predictive-mode Phase 2, live wiring, and the Phase 4 holdout check (2026-07-25)
 
@@ -793,3 +816,150 @@ everything else (win probability and totals show no such regression).
 
 Both Phase 4 runs logged: `phase4_final_with_lineup` (the bundle, Sec9.3) and
 `phase4_final_team_strength_only` (the isolation check, Sec9.4).
+
+## 10. Matchup-difficulty layer -- DONE. Real, validated result on the 2017-2023 dev subset.
+
+New ingest: `fetch_boxscore_matchups.py` (`BoxScoreMatchupsV3` + `BoxScoreDefensiveV2`, confirmed
+live to work 2017-18 onward and fail cleanly before that -- `IndexError`/`AttributeError` from an
+empty payload, not a clean 404, matching the real Second Spectrum tracking rollout, not a bug) and
+`fetch_team_rosters.py` (`CommonTeamRoster`, full 2015-2025 range, fetched PER SEASON to avoid a
+look-ahead leak from a player's later-career position change). Both fully backfilled: 9 seasons of
+matchups/defensive data (2017-18..2025-26), 11 seasons of rosters (2015-16..2025-26).
+
+`matchup_difficulty.py` implements the plan's 3-level shrinkage hierarchy (defender-specific ->
+position-group-vs-team -> league-average floor) plus the "tonight's merge" weighting function.
+`CommonTeamRoster`'s `POSITION` field is used for position-group bucketing, NOT
+`BoxScoreMatchupsV3`'s own `positionOff` column -- confirmed live on real 2022-23 data to be BLANK
+for fully 49.99% of matchup rows, the same kind of unreliable box-score position field
+`build_stints.py` already found and avoided for starters detection.
+
+**Real finding: the two rating levels need OPPOSITE smoothing families** -- the fourth instance of
+this project's now-familiar pattern (minutes vs. attempts, 2PT/3PT vs. FT, steals vs. blocks):
+- **Defender-specific difficulty** (points allowed per matchup-minute, individual defender) is a
+  persistent SKILL -- expanding-shrinkage clearly wins (best MAE 3.978 at prior_matchup_minutes=50
+  vs. naive's 4.056, beating every EWMA halflife tested, worst 4.29 at halflife=3).
+- **Position-group-vs-team difficulty** (team defensive scheme against a position group) is a
+  volatile TEAM-SCHEME metric -- personnel changes, coaching adjustments, and trades shift how a
+  team defends a position group far faster than one player's individual defense changes. EWMA
+  halflife=10 games (MAE 8.181) beat every expanding-shrinkage prior tested (best 8.227, barely
+  better than naive's 8.288) and every other halflife tried.
+
+**Full validation on the 2017-2023 dev subset** (`validate_matchup_difficulty.py`, the matchup
+layer's own narrower dev range vs. the six per-player rate models' full 2015-2023 range):
+- Defender-specific: shrunk MAE 3.978 vs naive 4.056 (CI (-0.0823,-0.0734), n=175,355) -- REAL
+  IMPROVEMENT
+- Position-group-vs-team: shrunk MAE 8.181 vs naive 8.485 (CI (-0.3401,-0.2681), n=47,022) -- REAL
+  IMPROVEMENT
+
+`opponent_defense_adjustment` implements the actual merge: given tonight's opposing roster, weight
+each defender's rating by their SHARE of recent matchup-minutes at the offensive player's position
+group (handles switch-heavy defenses -- never a hard 1:1 defender assignment), falling back
+whole-cloth to the position-group-vs-team rating (not a partial blend) when the roster's total
+matchup-minute exposure at that position group doesn't clear `MIN_MATCHUP_MINUTES_TO_TRUST=20.0`
+(a placeholder pending real-slate testing once `generate_props.py` exists, not yet empirically
+tuned). Two regression tests added confirming the weighted-blend behavior and the trust-floor
+fallback. 19 regression tests (38 assertions) now passing in `tests/test_regression_bugs.py`.
+
+**Task #12 (fetch_boxscore_matchups.py + fetch_team_rosters.py + matchup_difficulty.py) is now
+DONE.**
+
+## 11. Composition rule + player-level distributions -- DONE. `usage_allocation.py` + `prop_distribution.py`.
+
+**`usage_allocation.py`** implements the plan's macro-anchor + micro-reallocation rule exactly:
+`raw_projected_points` sums each player's 2PT/3PT/FT projected makes (weighted by point value)
+from `player_scoring_rates.py`; `compute_usage_shares` normalizes a team's players' (matchup-
+adjusted) raw points to shares summing to 1 (clipping negatives to 0 first -- a matchup adjustment
+can in principle push a low-usage player's number below zero, which a real usage share can never
+be; falls back to equal shares if a whole group clips to 0, avoiding a divide-by-zero);
+`allocate_team_points` multiplies those shares by Phase 1+2's ALREADY-RAPM-adjusted team total --
+the ONLY place the team total enters. Confirmed on a real historical game (8-player roster): shares
+summed to exactly 1.0, allocated points summed to exactly the team total, and the ranking matched
+each player's own raw signal (more minutes/raw points -> proportionally more of the total). Two
+regression tests confirm the sum-to-team-total invariant and the negative-clip/all-zero edge cases.
+REB/AST/TOV/STL/BLK are deliberately left UNANCHORED in v1 (each rate model's own `_proj` column
+used directly, no share-based rescaling) -- Phase 1 has no team-level projection for those five
+categories, so there's no second signal to conflict with yet; a team-level anchor for them is a
+flagged fast-follow, not a silent omission.
+
+**`prop_distribution.py`** is the player-level analog of `score_distribution.py`, reusing its
+variance/Student-t math directly (not reimplemented) for high-count stats, plus a new
+Poisson-vs-Negative-Binomial branch for low-count discrete stats picked via a variance-to-mean
+overdispersion check. Validated on the full dev range (`validate_prop_distribution.py`, chronological
+70/30 fit/eval split, mirroring `validate_score_distribution.py`'s own convention):
+- **Points** (continuous): Student-t df=9.5 fitted (real, meaningful excess kurtosis), but mean
+  log-score on the eval set came back essentially tied (normal=2.9028 vs t=2.9052) -- Normal
+  adopted, matching this project's "don't add complexity that isn't clearly earning its keep"
+  discipline even when a fitted parameter LOOKS like it should matter.
+- **Blocks** (discrete): the overdispersion check did NOT trigger NB (variance/mean ratio came in
+  under the threshold on real data) -- Poisson adopted, log-score 0.8736 on 66,937 eval rows.
+
+**Real bug found and fixed**: a player with an expanding-shrunk `blk_rate_per_min` of exactly 0.0
+(real -- a perimeter player who has genuinely never recorded a block) projects `mean=0.0`; Poisson
+at mu=0 is a genuine degenerate point-mass at 0, so `logpmf(k>0, mu=0)` is EXACTLY `-inf` --
+one real garbage-time block for that player poisoned the ENTIRE 66,937-row eval set's mean
+log-score to `+inf` on the first real run. Fixed with `MIN_COUNT_MEAN=1e-3`, a floor applied before
+evaluating pmf/logpmf in both `over_under_prob` and `log_score` -- a live projection can never be a
+certainty that something "never happens". Two regression tests added: one confirming the fix (a
+0-mean, nonzero-actual count no longer produces an infinite log-score for either family), one
+confirming the NB2-to-scipy-`nbinom` parameter translation actually produces the right mean/variance
+(checked against scipy's own computed moments, not trusted by algebra inspection alone).
+
+23 regression tests (45 assertions) now passing in `tests/test_regression_bugs.py`.
+
+**Task #13 (usage_allocation.py + prop_distribution.py) is now DONE.**
+
+## 12. Live props pipeline -- DONE (v1 scope). `active_roster.py` + `generate_props.py`.
+
+**`active_roster.py`**: extracted `games_on_date`, `resolve_active_lineup`, and `build_team_history`
+out of `generate_predictions.py` into their own shared module -- both live entry points now call
+the exact same active-lineup-resolution logic, so they can't silently drift apart. Confirmed the
+refactor changed nothing behaviorally: re-ran `generate_predictions.py` against the same real
+2018-01-15 historical slate used to originally validate it (11 games) both immediately after the
+extraction and again later from inside `generate_props.py`'s own call -- all three runs produced
+identical predictions for every game (e.g. CHA @ DET: 113.6/116.7 every time). All 23 regression
+tests still pass.
+
+**`generate_props.py`**: the live daily player-props entry point, run as
+`python -m src.pipeline.generate_props [YYYY-MM-DD]`. Reuses `generate_predictions.py`'s own
+already-RAPM-adjusted team point totals as the macro anchor (calls it directly rather than
+re-deriving team ratings independently -- guarantees props and game predictions can never disagree
+on a team's total), resolves both teams' active rosters via `active_roster.py`, projects every
+active player's full stat line from all six rate-category models, composes points via
+`usage_allocation.py`, and writes one row per (game, player, stat) to
+`data/processed/daily_props_{date}.parquet`.
+
+**Real bug found and fixed while wiring this up** (caught by reasoning through the code before
+running it, not by a failed run): a player missing from one category's rate log (e.g. a brand-new
+call-up with no scoring history yet) produces `NaN` for that category's projected points. Passing
+that `NaN` straight into `usage_allocation.compute_usage_shares` would poison the `.sum()` for the
+WHOLE team, turning every other player's share into `NaN` too -- the exact same
+NaN-poisons-an-aggregate failure mode already found twice elsewhere in this project (the bootstrap
+harness, and the `player_scoring_rates.py` validation script). Fixed with an explicit
+`raw_projected_points(proj).fillna(0.0)` before computing shares, documented inline rather than
+left to be rediscovered by a future crash.
+
+**Verified against the same real 2018-01-15 slate** (matching the plan's own stated verification
+method -- spot-check plausibility against a real historical date, not a synthetic one): 3,337
+output rows across 334 players, zero negative or NaN `proj_mean` values, and points reconciled
+EXACTLY -- summing all of one team's projected `points` rows reproduces `generate_predictions.py`'s
+own team total for that game to 4+ decimal places (e.g. CHA @ DET: 113.55/116.65 vs. the printed
+113.6/116.7). Per-player point distributions within a team are proportionally sane (top scorer
+~14 projected points down to a fringe rotation player ~1, no implausible outliers).
+
+**Known, explicitly-flagged v1 gaps (not silently shipped as complete):**
+- **Matchup difficulty is NOT wired into this live call yet**, even though `matchup_difficulty.py`
+  is fully built and validated (Sec10). Every output row carries `matchup_adjusted: False`. Wiring
+  it live needs each offensive player's own position group (from `CommonTeamRoster`) and the full
+  opposing active roster's defender ratings resolved for tonight specifically -- real additional
+  live-data-assembly work, a flagged fast-follow.
+- REB/AST/TOV/STL/BLK remain UNANCHORED (each rate model's own projection used directly, per
+  `usage_allocation.py`'s documented v1 scope) and use an approximated projected-chances/
+  projected-touches unit conversion (each player's own trailing chances-per-minute /
+  touches-per-minute x projected minutes) rather than a dedicated validated exposure model.
+- Active-lineup resolution stays the existing 2-tier design (RotoWire Out/Doubtful + trailing-
+  minutes fallback) already documented in `generate_predictions.py` -- unchanged, not revisited here.
+
+**All 6 tasks in the approved player-props plan (#9-#14) are now DONE.** The props subsystem has a
+working, validated, real-data-tested v1 pipeline end to end: shared shrinkage primitive -> minutes
+-> six per-player rate categories -> matchup difficulty (built, not yet live-wired) -> usage
+allocation -> prop distribution -> live daily output. 23 regression tests (45 assertions) passing.

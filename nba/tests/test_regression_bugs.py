@@ -15,9 +15,12 @@ from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, bootstrap_c
 from src.models.garbage_time import add_garbage_time_weight
 from src.models.home_court import _baseline_log_ratios
 from src.models.player_rate_shrinkage import add_walk_forward_player_mean_ewm, add_walk_forward_player_rate
+from src.models.matchup_difficulty import opponent_defense_adjustment
 from src.models.player_defensive_event_rates import add_defensive_event_rates
 from src.models.player_playmaking_rates import PRIOR_TOUCHES_AST, PRIOR_TOUCHES_TOV
 from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FTA, add_scoring_rates
+from src.models.prop_distribution import log_score, over_under_prob
+from src.models.usage_allocation import allocate_team_points, compute_usage_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
 
 FAILURES = []
@@ -478,6 +481,139 @@ def test_ast_prior_not_copy_pasted_from_tov():
           f"got PRIOR_TOUCHES_AST={PRIOR_TOUCHES_AST}, PRIOR_TOUCHES_TOV={PRIOR_TOUCHES_TOV}")
 
 
+def test_opponent_defense_adjustment_weights_by_matchup_minute_share():
+    """`matchup_difficulty.opponent_defense_adjustment` implements the
+    plan's "tonight's merge" for switch-heavy defenses -- a weighted blend
+    across the opposing roster by each defender's SHARE of matchup-minutes
+    at the relevant position group, never a hard 1:1 assignment. With
+    defender A rated 1.0 (tougher than league-avg 1.2) getting 75% of the
+    minutes and defender B rated 1.3 (easier than average) getting 25%,
+    the adjustment should be the exposure-weighted average of each
+    defender's own (league_avg - their_rate), not a simple unweighted mean
+    (which would give a different, wrong number here since the split is
+    75/25, not 50/50)."""
+    import pandas as pd
+
+    defender_ratings = pd.Series({101: 1.0, 102: 1.3})
+    minutes_at_posgroup = pd.Series({101: 30.0, 102: 10.0})
+    adj = opponent_defense_adjustment(
+        opposing_roster_player_ids=[101, 102, 103],  # 103 has no matchup history at all
+        defender_ratings=defender_ratings, defender_minutes_at_posgroup=minutes_at_posgroup,
+        posgroup_rating=1.1, league_avg_posgroup_rating=1.2,
+    )
+    expected = 0.75 * (1.2 - 1.0) + 0.25 * (1.2 - 1.3)
+    check("adjustment is the matchup-minute-weighted blend (0.75/0.25 split), not an unweighted mean",
+          abs(adj - expected) < 1e-9, f"got {adj}, expected {expected}")
+
+    naive_unweighted_mean = 0.5 * (1.2 - 1.0) + 0.5 * (1.2 - 1.3)
+    check("weighted result differs from what an (incorrect) unweighted 50/50 mean would give",
+          abs(adj - naive_unweighted_mean) > 1e-9)
+
+
+def test_opponent_defense_adjustment_falls_back_below_trust_floor():
+    """When the opposing roster's TOTAL matchup-minute exposure at a
+    position group doesn't clear `min_matchup_minutes_to_trust`, the merge
+    must fall back WHOLE-CLOTH to the level-2 (position-group-vs-team)
+    rating rather than blending in the sparse defender-level signal --
+    the macro-anchor + micro-reallocation discipline of never letting two
+    levels move the same number at once. This test's roster only has 2.0
+    total matchup-minutes logged (far below the 20.0 floor), so the result
+    must equal exactly `league_avg - posgroup_rating`, ignoring the
+    (unreliable, sparse) defender-level numbers entirely."""
+    import pandas as pd
+
+    defender_ratings = pd.Series({101: 0.1})  # would look like an extremely tough defender if trusted
+    sparse_minutes = pd.Series({101: 2.0})
+    adj = opponent_defense_adjustment(
+        opposing_roster_player_ids=[101, 102, 103],
+        defender_ratings=defender_ratings, defender_minutes_at_posgroup=sparse_minutes,
+        posgroup_rating=1.1, league_avg_posgroup_rating=1.2, min_matchup_minutes_to_trust=20.0,
+    )
+    check("falls back to the level-2 posgroup rating (ignoring the sparse, unreliable defender signal)",
+          abs(adj - (1.2 - 1.1)) < 1e-9, f"got {adj}, expected {1.2 - 1.1}")
+
+
+def test_count_log_score_does_not_blow_up_at_zero_mean():
+    """Bug (found running `validate_prop_distribution.py` on the real
+    dev-range blocks eval set, 66,937 player-games): a player with an
+    expanding-shrunk `blk_rate_per_min` of exactly 0.0 (real -- a
+    perimeter player who has genuinely never recorded a block) projects
+    `mean=0.0`; Poisson at mu=0 is a genuine degenerate point-mass at 0,
+    so `logpmf(k>0, mu=0)` is EXACTLY `-inf`, not just very negative --
+    ONE real garbage-time block for that player poisoned the entire eval
+    set's mean log-score to `+inf` (`np.mean` of a list containing one
+    `inf` is `inf`). Fixed by flooring the count mean (`MIN_COUNT_MEAN`)
+    before evaluating pmf/logpmf in both `over_under_prob` and
+    `log_score`. This test confirms a real 0-mean, nonzero-actual count
+    no longer produces an infinite (or NaN) log-score for either poisson
+    or negbin."""
+    import math
+    score_poisson = log_score(actual=1, mean=0.0, family="poisson", params={})
+    check("poisson log-score at mean=0.0, actual=1 is finite (not -inf/+inf)",
+          math.isfinite(score_poisson), f"got {score_poisson}")
+
+    score_negbin = log_score(actual=1, mean=0.0, family="negbin", params={"r": 2.0})
+    check("negbin log-score at mean=0.0, actual=1 is finite (not -inf/+inf)",
+          math.isfinite(score_negbin), f"got {score_negbin}")
+
+    prob = over_under_prob(line=0.5, mean=0.0, family="poisson", params={})
+    check("over_under_prob at mean=0.0 doesn't crash or return NaN", not math.isnan(prob), f"got {prob}")
+
+
+def test_negbin_parameterization_matches_target_mean_and_variance():
+    """`prop_distribution.py`'s `over_under_prob`/`log_score` translate NB2
+    parameters (mean, dispersion r, where `var = mean + mean^2/r`) into
+    scipy's own (n, p) parameterization via `p = r / (r + mean)`, `n = r`.
+    A wrong translation would silently produce a distribution with the
+    wrong mean/variance while still returning plausible-looking
+    probabilities -- this test checks the actual scipy-constructed
+    distribution's moments against the target NB2 formula directly,
+    rather than trusting the algebra by inspection."""
+    from scipy import stats
+    mean, r = 5.0, 3.0
+    p = r / (r + mean)
+    dist = stats.nbinom(n=r, p=p)
+    check("NB mean matches the target mean", abs(dist.mean() - mean) < 1e-9, f"got {dist.mean()}")
+    expected_var = mean + mean ** 2 / r
+    check("NB variance matches the NB2 formula (mean + mean^2/r)",
+          abs(dist.var() - expected_var) < 1e-9, f"got {dist.var()}, expected {expected_var}")
+
+
+def test_usage_shares_sum_to_team_total_not_double_counted():
+    """`usage_allocation.py`'s macro-anchor + micro-reallocation rule: the
+    team total must be distributed EXACTLY once. This test confirms
+    `allocate_team_points(compute_usage_shares(raw), team_total)` sums
+    back to exactly `team_total` for an arbitrary raw split -- the
+    concrete, checkable form of "RAPM sets the total, matchup difficulty
+    only reshapes shares, never both move the same number"."""
+    import pandas as pd
+    raw = pd.Series({"A": 20.0, "B": 10.0, "C": 5.0})
+    team_total = 112.0
+    final = allocate_team_points(compute_usage_shares(raw), team_total)
+    check("allocated points sum to exactly the team total (no double-counting, no leakage)",
+          abs(final.sum() - team_total) < 1e-9, f"got {final.sum()}, expected {team_total}")
+    check("higher raw projection gets a proportionally higher final share",
+          final["A"] > final["B"] > final["C"])
+
+
+def test_usage_shares_clip_negative_and_handle_all_zero():
+    """Two edge cases in `compute_usage_shares`: (1) a matchup adjustment
+    could in principle push a low-usage player's raw+adjustment below
+    zero -- a "usage share" can never be negative in reality, so it must
+    be clipped to 0, not silently propagate a negative share into the
+    final allocation; (2) if every player in the group has a clipped
+    value of 0 (no offensive signal at all), the function must fall back
+    to equal shares rather than raising a divide-by-zero."""
+    import pandas as pd
+    shares = compute_usage_shares(pd.Series({"A": 5.0, "B": -3.0}))
+    check("a negative raw projection is clipped to a zero share, not a negative one", shares["B"] == 0.0)
+    check("shares still sum to 1 after clipping", abs(shares.sum() - 1.0) < 1e-9)
+
+    equal_shares = compute_usage_shares(pd.Series({"A": 0.0, "B": 0.0}))
+    check("all-zero group falls back to equal shares instead of raising divide-by-zero",
+          abs(equal_shares["A"] - 0.5) < 1e-9 and abs(equal_shares["B"] - 0.5) < 1e-9)
+
+
 if __name__ == "__main__":
     test_possession_counter_uses_teamid_not_cumulative_description()
     test_score_forward_fill_ignores_placeholder_zero_on_non_scoring_rows()
@@ -496,6 +632,12 @@ if __name__ == "__main__":
     test_ft_scoring_rate_uses_expanding_shrinkage_not_ewma()
     test_block_rate_uses_ewma_not_expanding_shrinkage()
     test_ast_prior_not_copy_pasted_from_tov()
+    test_opponent_defense_adjustment_weights_by_matchup_minute_share()
+    test_opponent_defense_adjustment_falls_back_below_trust_floor()
+    test_count_log_score_does_not_blow_up_at_zero_mean()
+    test_negbin_parameterization_matches_target_mean_and_variance()
+    test_usage_shares_sum_to_team_total_not_double_counted()
+    test_usage_shares_clip_negative_and_handle_all_zero()
 
     print()
     if FAILURES:

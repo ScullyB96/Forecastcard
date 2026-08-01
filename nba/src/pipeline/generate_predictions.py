@@ -47,23 +47,19 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
-from nba_api.stats.endpoints import scoreboardv3
 
 from src.ingest.build_stints import build_season_stints
 from src.ingest.fetch_rotowire_lineups import fetch_current_injury_report
 from src.ingest.fetch_schedule import FIRST_DEV_SEASON, season_str
-from src.ingest.player_name_crosswalk import player_id_for_name
-from src.ingest.team_codes import ABBREV_TO_TEAM_ID
 from src.models.lineup_rating import player_minutes_from_stints, project_lineup_adjustment, team_recent_roster_rapm
 from src.models.rapm_lite import fit_rapm, prepare_stints
 from src.models.score_distribution import (
     fit_home_away_correlation, fit_residual_variance_model, interval, predict_variance, win_prob_home,
 )
 from src.models.team_strength import add_team_ratings, build_team_game_log, project_game
+from src.pipeline.active_roster import MINUTES_LOOKBACK_GAMES, build_team_history, games_on_date, resolve_active_lineup
 from src.pipeline.refresh_data import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
-
-MINUTES_LOOKBACK_GAMES = 10
 
 
 def _fit_latest_player_ratings(current_season: int) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -93,94 +89,11 @@ def _fit_latest_player_ratings(current_season: int) -> tuple[pd.DataFrame, pd.Da
     return player_ratings, player_minutes
 
 
-def games_on_date(game_date: str) -> pd.DataFrame:
-    """ScoreboardV3's team-rows dataset doesn't carry an explicit home/away
-    column, but `gameCode` (e.g. "20260115/MEMORL") reliably encodes it --
-    confirmed live (2026-07-24) against a real slate: the 6 characters after
-    the "/" are the AWAY team's 3-letter tricode followed by the HOME team's,
-    matching each game's actual real-world home team. Parsed from
-    `gameCode` directly rather than trusting team-row order (unconfirmed and
-    not worth relying on)."""
-    sb = scoreboardv3.ScoreboardV3(game_date=game_date, timeout=30)
-    dfs = sb.get_data_frames()
-    game_meta, team_rows = dfs[1], dfs[2]
-
-    games = []
-    for row in game_meta.itertuples(index=False):
-        code = row.gameCode.split("/")[1]
-        away_abbrev, home_abbrev = code[:3], code[3:6]
-        away_id = ABBREV_TO_TEAM_ID.get(away_abbrev)
-        home_id = ABBREV_TO_TEAM_ID.get(home_abbrev)
-        games.append({"gameId": row.gameId, "homeTeamId": home_id, "awayTeamId": away_id,
-                      "homeAbbrev": home_abbrev, "awayAbbrev": away_abbrev})
-    return pd.DataFrame(games)
-
-
-def resolve_active_lineup(team_abbrev: str, team_prior_game_ids: list, player_minutes: pd.DataFrame,
-                           team_side_lookup: dict, injury_report: list[dict]) -> tuple[pd.Series, str]:
-    """Returns (minutes_shares renormalized to 1.0, source_tag). Players
-    RotoWire flags Out/Doubtful are excluded by player ID (via
-    `player_name_crosswalk.player_id_for_name`) before minutes shares are
-    computed -- a name with no crosswalk match (recent rookie/two-way player
-    not yet in `nba_api`'s static list) can't be excluded by ID and is
-    logged, not silently ignored."""
-    out_names = [r["player"] for r in injury_report if r["team"] == team_abbrev and r["likely_out"]]
-    out_ids = set()
-    for name in out_names:
-        pid = player_id_for_name(name)
-        if pid is not None:
-            out_ids.add(pid)
-        else:
-            print(f"    WARNING: RotoWire flagged '{name}' ({team_abbrev}) as Out/Doubtful but no "
-                  f"player-ID crosswalk match was found -- this player CANNOT be excluded from "
-                  f"tonight's projected minutes", flush=True)
-
-    recent = team_prior_game_ids[-MINUTES_LOOKBACK_GAMES:]
-    rows = []
-    for gid in recent:
-        side = team_side_lookup.get(gid)
-        if side is None:
-            continue
-        g = player_minutes[(player_minutes["gameId"] == gid) & (player_minutes["team_side"] == side)]
-        rows.append(g)
-    if not rows:
-        return pd.Series(dtype=float), "no recent rotation history"
-
-    combined = pd.concat(rows, ignore_index=True)
-    avg_minutes = combined.groupby("playerId")["minutes"].mean()
-    avg_minutes = avg_minutes.drop(index=[pid for pid in out_ids if pid in avg_minutes.index])
-
-    total = avg_minutes.sum()
-    if total <= 0:
-        return pd.Series(dtype=float), "no positive minutes in lookback window after exclusions"
-    tag = f"predictive (trailing {MINUTES_LOOKBACK_GAMES}-game minutes, {len(out_ids)} player(s) excluded via RotoWire)"
-    return avg_minutes / total, tag
-
-
 def _latest_team_ratings(team_log: pd.DataFrame) -> pd.DataFrame:
     """Each team's most recent walk-forward rating row -- i.e. its pregame
     rating as of the NEXT game it plays (today's game), since the walk-
     forward columns are already "as of before this row's own game"."""
     return team_log.sort_values("gameDate").groupby("team").tail(1).set_index("team")
-
-
-def _build_team_history(team_log: pd.DataFrame) -> tuple[dict, dict]:
-    """From the long (one row per team per game) team-game log: for each
-    team, its own gameIds ordered by date (all strictly prior to today,
-    since `team_log` only ever contains already-completed, box-scored
-    games), plus a per-team {gameId: 'home'/'away'} side lookup -- what
-    `lineup_rating.team_recent_roster_rapm` and `resolve_active_lineup`
-    both need for their lookback. Same construction as
-    `validate_rapm_lineup_adjustment._build_team_history`, kept as its own
-    small copy here rather than importing a `validate_*.py` (dev-backtest-
-    only) module's internals into the live production pipeline."""
-    team_log = team_log.sort_values("gameDate")
-    team_history: dict[int, list] = {}
-    team_side: dict[int, dict] = {}
-    for row in team_log.itertuples(index=False):
-        team_history.setdefault(row.team, []).append(row.gameId)
-        team_side.setdefault(row.team, {})[row.gameId] = "home" if row.is_home else "away"
-    return team_history, team_side
 
 
 def run(game_date: str) -> pd.DataFrame:
@@ -194,7 +107,7 @@ def run(game_date: str) -> pd.DataFrame:
     injury_report = fetch_current_injury_report()
     team_log = add_team_ratings(build_team_game_log(2015, current_season))
     latest = _latest_team_ratings(team_log)
-    team_history, team_side = _build_team_history(team_log)
+    team_history, team_side = build_team_history(team_log)
 
     player_ratings, player_minutes = _fit_latest_player_ratings(current_season)
     have_lineup_adjustment = not player_ratings.empty
