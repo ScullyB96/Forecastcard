@@ -80,11 +80,11 @@ from src.models.validate_game_simulator import build_profile, player_game_snapsh
 from src.models.weather import attach_weather_bucket, bucket_weather, build_weather_factors_by_season
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
-N_TRIALS_PER_GAME = 50  # lowered from 200 (2026-07-22), matches validate_game_simulator.py's
-                        # same tradeoff -- prioritize game count (between-game sample size,
-                        # which gates resolving ~1pp-scale effects) over trials/game (which
-                        # mainly reduces within-game Monte Carlo noise, a smaller contributor
-                        # once thousands of games are aggregated).
+N_TRIALS_PER_GAME = 200  # RAISED 50->200 (task #140, 2026-07-26), matches validate_game_
+                        # simulator.py's own canonical-protocol upgrade (see that file's
+                        # comment for the full rationale) -- keeping the two validators'
+                        # trial counts in sync avoids a silent mismatch between the oracle
+                        # and predictive-bullpen protocols.
 N_GAMES_TO_VALIDATE = 25000  # effectively "every complete-lineup game", see
                              # validate_game_simulator.py's own docstring for this same constant
 TEST_SEASONS = {2023, 2024, 2025}  # added 2023 (2026-07-22, critique claim 6), see

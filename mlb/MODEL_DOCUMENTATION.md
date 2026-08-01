@@ -3716,6 +3716,57 @@ Phase 3 is cheap opportunistic upside now that rejection costs minutes, not hour
 protects the whole thing once it's actually being used. **If only two things happen next
 session: the 2026 holdout run (0.3), then start the latent-effect measurement (1.1).**
 
+## 11.33 Task #140: canonical protocol trial count raised 50→200, plus an
+unexpected side-finding about what actually drove the dispersion drift
+(2026-07-26/08-01)
+
+Sec 11.16 flagged this as an explicitly-deferred open item — do not touch
+until the monthly monitoring plan (sec 11.17) actually surfaces a reason.
+Nothing from monitoring has triggered this; picked up on direct request
+instead, with that deferral rule surfaced and acknowledged before starting.
+
+**What changed**: `N_TRIALS_PER_GAME` raised 50→200 in the three canonical
+validators (`validate_game_simulator.py`, `validate_predictive_bullpen.py`,
+and `validate_holdout_2026.py`'s own constant, so the *next* scheduled
+holdout read — first Monday of August, not run early — automatically
+benefits). A fresh full re-baseline was run at the new K (n=7237,
+2023-2025, current code): **SU 0.587, Brier 0.2387, std(z)=0.963**, logged
+to the metrics ledger as the new canonical reference, superseding every
+earlier-cited K=50 figure in this document going forward.
+
+**The side-finding**: the first re-baseline run showed std(z) dropping from
+1.136 (the long-standing K=50 baseline, stable across many prior sessions'
+runs) to 0.963 — a much bigger shift than the "K only weakly affects
+dispersion" theory this project has held since sec 11.16 would predict.
+Investigated before writing that down as a real K-effect: a genuinely
+apples-to-apples check (same current code, same n=7237 games, ONLY K
+varied — K=50 vs. K=200) showed std(z) moving just 0.998→0.963, i.e. a
+small, modest effect, matching the original theory closely.
+
+**So what actually explains the 1.136→0.998 improvement (at the SAME
+K=50)?** The "old" K=50 baseline being compared against was generated
+before today's two other changes landed — task #158's `WIND_MATCH_BOOST`
+increase (2.0→2.75) and task #159's `HR_SHARE_CLIP_MIN` retune
+(0.02→0.035) — both shipped between that baseline and this session's
+re-check. Between them, these two small, independently-validated fixes
+apparently also meaningfully improved the simulator's aggregate total-runs
+dispersion calibration, discovered only as a side effect of this K-upgrade
+investigation, not measured directly at the time either shipped (neither
+task #158 nor #159's own full-stack A/B specifically scored dispersion —
+both were scored on SU/Brier, or in #158's case a domain-specific
+backtest). Not decomposed further (would need one more isolated run per
+fix) — flagged honestly as a real, attributed-but-not-split improvement
+rather than over-claiming either fix alone caused it.
+
+**Net conclusion**: task #140's own premise — raise K for a permanent,
+higher-precision baseline — is done and modestly helps (std(z) 0.20 pp
+closer to 1.0, SU +0.35pp, Brier -0.0015 attributable to K alone). The
+much larger dispersion improvement visible in casual before/after
+comparisons this session belongs to tasks #158/#159, not #140 — an
+important attribution correction for any future reader tempted to credit
+the wrong change. Real, bounded one-time cost paid (~4x runtime vs. the
+old K=50 canonical run); no further trial-count increases planned.
+
 ## 12. Suggested next steps for a future session
 
 **§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):

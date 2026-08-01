@@ -57,17 +57,23 @@ from src.models.ttop import build_ttop_factors_by_season
 from src.models.weather import attach_weather_bucket, bucket_weather, build_weather_factors_by_season
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
-N_TRIALS_PER_GAME = 50  # lowered from 200 (2026-07-22), see N_GAMES_TO_VALIDATE below --
-                        # deliberate tradeoff: per-game trial count mainly reduces WITHIN-game
-                        # Monte Carlo noise on one game's own sim_home_win_prob estimate (SE
-                        # ~sqrt(0.25/50) =~ 7% per game), a smaller, largely-averaging-out
-                        # contributor once thousands of independent games are aggregated --
-                        # unlike BETWEEN-game sample size (game count), which is what actually
-                        # gates resolving the ~1pp-scale effects §11.7 found unresolvable at
-                        # n=597-995. Prioritizing game count over trials/game keeps this
-                        # ~12x-larger protocol's runtime tractable (~7300 games * 50 trials is
-                        # a similar total trial count to the OLD 600-game/200-trial protocol
-                        # run ~1.2x, not 12x, more compute).
+N_TRIALS_PER_GAME = 200  # RAISED 50->200 (task #140, 2026-07-26): sec 11.16 flagged this
+                        # exact upgrade as an open item -- a K=50 unpaired canonical run is
+                        # fine for DISPERSION (std(z), tail coverage) but leaves real
+                        # per-game Monte Carlo noise (SE ~sqrt(0.25/50)=~7%) in every
+                        # POINT-METRIC comparison this protocol produces, including every
+                        # isolated-A/B "NOISE" verdict this session logged (tasks #159, the
+                        # bat-speed/pulled-air resolution, etc.) -- some of those CIs are
+                        # wider than they need to be. At K=200, per-game SE drops to
+                        # ~sqrt(0.25/200)=~3.5%, roughly halving the within-game noise
+                        # contribution stacked on top of already-maximal game count
+                        # (N_GAMES_TO_VALIDATE below already uses every real game available,
+                        # so trial count is the only remaining lever). Real, bounded
+                        # one-time cost: ~4x runtime vs. the old K=50 baseline. Originally
+                        # lowered 200->50 (2026-07-22) specifically to make the ~12x game-
+                        # count jump (600->7300+ games) tractable in one sitting -- that
+                        # constraint no longer applies now that this is the established,
+                        # already-adopted canonical protocol, not a first build-out.
 N_GAMES_TO_VALIDATE = 25000  # effectively "every complete-lineup game", not a cap --
                              # 2023+2024+2025 combined have ~7277 real complete-9-batter-lineup
                              # regular season games total (confirmed via direct count,

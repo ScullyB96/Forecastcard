@@ -41,7 +41,13 @@ from src.utils.paths import DATA_PROCESSED
 
 TEST_SEASONS = {2026}
 N_GAMES_TO_VALIDATE = 5000  # effectively "every complete-lineup 2026 game" -- see build_shared_tables' own note
-N_TRIALS_PER_GAME = 50  # matches the canonical (non-CRN) production protocol exactly
+N_TRIALS_PER_GAME = 200  # RAISED 50->200 (task #140, 2026-07-26) to match validate_game_
+                         # simulator.py's own canonical-protocol upgrade -- kept in sync so
+                         # the rolling holdout always reflects the SAME protocol precision as
+                         # every other canonical run, not a stale K=50 baseline. This constant
+                         # change is NOT itself a holdout read -- per this file's own rule
+                         # (never run this reactively), the next real read stays on its
+                         # pre-committed first-Monday-of-month schedule regardless.
 
 if __name__ == "__main__":
     pa = pd.read_parquet(DATA_PROCESSED / "pa_table_2023_2026.parquet")
