@@ -153,6 +153,20 @@ slate-wide points MAE improved from 6.34 to 5.03, and a properly-designed check 
 model's OWN pre-game top pick against its outcome, not the ex-post actual top scorer -- a known
 selection-effect trap) found no evidence of a further systematic bias.
 
+**A SECOND real bug found by continuing to spot-check (Sec22)**: an early-season date (2023-11-08)
+showed EVERY stat category under-projected by a consistent ~30-40% -- traced to `team_history`'s
+"last N games" lookback silently blending in games (and rosters) from the PRIOR season when a new
+season hadn't yet played 10 games, inflating the resolved active roster to ~2x its true size
+(22 players projected vs. 11 who actually played). A genuinely different bug from Sec21's (these
+games were legitimately before `game_date`; the problem was allowing "current roster" to blend
+across a season boundary at all). Fixed by restricting `team_history` to the target season only,
+leaving team-level rating continuity and RAPM's own cross-season skill memory untouched (both
+legitimately different concepts). Re-confirmed: the uniform under-projection is gone across every
+category, and a mid-season date unaffected by this bug (2025-01-15) shows unchanged output,
+confirming the fix is correctly scoped. 32 regression tests (67 assertions) passing. Two
+consecutive spot-checks, two real bugs the aggregate bootstrap validation never could have caught
+-- exactly the value of testing against real outcomes.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -1559,3 +1573,64 @@ walk-forward CORRECTNESS at the row level, not the LIVE PIPELINE'S date-handling
 for an arbitrary date) -- fixed it properly rather than working around the specific symptom, and
 then correctly distinguished a real remaining pattern (Curry/Herro's misses) from a statistical
 illusion (the naive top-scorer-share check) before concluding anything further was wrong.
+
+## 22. A SECOND real bug found by continuing to spot-check: cross-season roster bleed early in a season (2026-08-01)
+
+Kept testing after Sec21's fix rather than treating one clean spot-check as sufficient -- ran two
+more real historical dates. 2024-03-05 (mid-season, well within dev range) came back clean across
+EVERY category (points MAE 5.19, all other categories' MAEs matching their validated aggregate
+numbers closely) -- good evidence the Sec21 fix generalizes. 2023-11-08 (early in a season, only
+~9-10 games played) did not: EVERY SINGLE category was under-projected by a consistent ~30-40%
+relative amount (points 6.37 vs actual 8.99; 2PT 1.46 vs 2.36; 3PT 0.67 vs 0.93; FT 0.92 vs 1.49;
+OREB 0.55 vs 0.85; DREB 1.83 vs 2.70; AST 1.52 vs 1.97; TOV 0.80 vs 1.11; STL 0.42 vs 0.62; BLK
+0.27 vs 0.44) -- a uniform, cross-category pattern, not noise.
+
+**Diagnosed rather than dismissed**: confirmed team-level projected minutes correctly summed to
+240 per team, ruling out a minutes-TOTAL bug. Checked real box scores directly: DAL/TOR/SAC each
+had only 10-11 players record real minutes that night, but the live pipeline's resolved active
+roster gave POSITIVE projected minutes to 19-22 players per team -- roughly DOUBLE the true
+rotation size, diluting every real rotation player's share. Traced the cause: printed DAL's
+"trailing 10 games" as of 2023-11-08 directly -- 3 of the 10 were from the PRIOR season (2022-23),
+confirmed against both seasons' cached schedules. Early in a new season, the team hasn't played 10
+games yet, so the "last 10 games" lookback (shared by BOTH `resolve_active_lineup`'s active-roster/
+minutes resolution AND `team_recent_roster_rapm`'s recent-roster composite) silently reached back
+into last season's games -- and therefore last season's ROSTER, including players who may have
+since been traded, waived, or signed elsewhere -- inflating the resolved "active roster" pool with
+players no longer even on the team.
+
+**A genuinely different bug from Sec21's**, not a repeat: Sec21's fix (a strict `gameDate <
+game_date` cutoff) does NOT catch this, because these games are legitimately BEFORE `game_date` --
+the problem isn't a wrong-direction date leak, it's that "who is on this roster" was allowed to
+blend across a season boundary at all. This is also a DIFFERENT concept from the team-level
+PACE/RATING computation (which has its own, separate, intentional `cross_season_weight` option --
+a team's stylistic identity can defensibly carry some cross-season memory) and from RAPM-lite's own
+player-skill fit (`_fit_latest_player_ratings`, which is correctly left with full cross-season
+history -- a player's true skill doesn't reset on opening night, unlike literal roster membership).
+
+**Fixed**: both `generate_predictions.py` and `generate_props.py` now filter `team_log` to
+`season == target_season` specifically before building `team_history`/`team_side` (the structure
+`resolve_active_lineup` and `team_recent_roster_rapm` both consult) -- leaving the team-level
+rating computation and the RAPM fit itself untouched, since those two legitimately want cross-
+season memory. Re-checked DAL directly: trailing 10 games are now entirely within 2023-24 (only 7
+games existed yet that season, correctly returning fewer than 10 rather than padding with stale
+data), and the resolved active roster dropped from 22 to 12 players -- much closer to the true 11.
+
+**Re-ran the corrected 2023-11-08 comparison**: the uniform under-projection is gone across every
+category (points 8.32 vs 9.25; 2PT 2.02 vs 2.44; 3PT 0.93 vs 0.96; FT 1.27 vs 1.53; OREB 0.75 vs
+0.86; DREB 2.49 vs 2.75; AST 2.10 vs 2.03 -- now essentially balanced; TOV 1.10 vs 1.11 -- nearly
+exact; STL 0.57 vs 0.64; BLK 0.38 vs 0.46). Re-confirmed 2025-01-15 (a mid-season date, unaffected
+by this specific bug) shows an unchanged player count (318), confirming the fix is correctly scoped
+and doesn't disturb dates where this particular issue never applied. One new regression test added
+(`build_team_history` with a pre-season-filtered log excludes prior-season gameIds entirely, not
+just deprioritizes them). 32 regression tests (67 assertions) passing.
+
+**The pattern worth naming**: two consecutive real spot-checks each found a genuine, distinct bug
+that months of aggregate dev/holdout bootstrap validation never would have surfaced, because both
+bugs are specifically about how the LIVE ENTRY POINTS resolve "recent/current" state when queried
+for an arbitrary date -- a concern the walk-forward-correctness bootstrap protocol was never
+designed to test in the first place (it validates that each historical ROW's own features only use
+information from before that row, which was always true here; it says nothing about whether a
+LIVE CALLER'S notion of "the last N games" is scoped correctly). Real, hands-on spot-checking
+against actual outcomes found real problems that no amount of additional aggregate statistical
+rigor would have caught -- exactly the value the user's original "test a day from last year"
+question was asking for.

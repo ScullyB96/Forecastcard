@@ -130,7 +130,15 @@ def run(game_date: str) -> pd.DataFrame:
     team_log = add_team_ratings(build_team_game_log(2015, target_season))
     team_log = team_log[pd.to_datetime(team_log["gameDate"]) < pd.Timestamp(game_date)]
     latest = _latest_team_ratings(team_log)
-    team_history, team_side = build_team_history(team_log)
+    # `team_history`/`team_side` feed active-roster/minutes resolution and the "recent roster
+    # composite" RAPM lookback -- BOTH represent "who is on this team's roster right now", which
+    # must never blend across a season boundary (unlike the team-level PACE/RATING above, which
+    # has its own intentional cross-season option elsewhere). Real bug found via a 2023-11-08
+    # early-season spot-check: without this restriction, the "last 10 games" lookback silently
+    # pulled in games (and therefore players) from the PRIOR season, diluting the active roster
+    # with players no longer even on the team -- confirmed directly (DAL's trailing 10 games as of
+    # 2023-11-08 included 3 games from 2022-23). See MODEL_DOCUMENTATION.md for the full writeup.
+    team_history, team_side = build_team_history(team_log[team_log["season"] == target_season])
 
     player_ratings, player_minutes = _fit_latest_player_ratings(target_season, before_date=game_date)
     have_lineup_adjustment = not player_ratings.empty

@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.ingest.build_stints import _get_starters, _normalize_name, _prep_pbp_timeline, _roster_lookup
 from src.ingest.fetch_schedule import season_for_date
+from src.pipeline.active_roster import build_team_history
 from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, bootstrap_compare
 from src.models.garbage_time import add_garbage_time_weight
 from src.models.home_court import _baseline_log_ratios
@@ -839,6 +840,34 @@ def test_generate_props_before_filter_excludes_on_and_after_date():
     check("exactly one row survives the filter", len(out) == 1, f"got {len(out)}")
 
 
+def test_team_history_season_filter_excludes_prior_season_games():
+    """Real bug (2026-08-01, found via a 2023-11-08 early-season spot-check):
+    both live pipelines call `build_team_history` on a `team_log` that must
+    already be restricted to the CURRENT season -- without that filter,
+    the "last N games" lookback (used for BOTH active-roster/minutes
+    resolution and the recent-roster RAPM composite) silently blends in
+    games from the PRIOR season early in a new one, inflating the
+    resolved active roster with players who may no longer even be on the
+    team (confirmed directly on real data: DAL's trailing 10 games as of
+    2023-11-08 included 3 games from 2022-23, and the resolved active
+    roster came out to 22 players when only 11 actually played that
+    night). This test locks in the fix: pre-filtering by `season` before
+    calling `build_team_history` must produce a history containing ONLY
+    the target season's gameIds, even when the underlying log spans
+    multiple seasons."""
+    log = pd.DataFrame([
+        {"team": 1, "gameId": "g_2022_a", "gameDate": pd.Timestamp("2022-11-01"), "season": 2022, "is_home": True},
+        {"team": 1, "gameId": "g_2022_b", "gameDate": pd.Timestamp("2022-11-05"), "season": 2022, "is_home": False},
+        {"team": 1, "gameId": "g_2023_a", "gameDate": pd.Timestamp("2023-10-25"), "season": 2023, "is_home": True},
+        {"team": 1, "gameId": "g_2023_b", "gameDate": pd.Timestamp("2023-11-01"), "season": 2023, "is_home": False},
+    ])
+    team_history, _ = build_team_history(log[log["season"] == 2023])
+    check("season-filtered team_history contains only the target season's games",
+          set(team_history[1]) == {"g_2023_a", "g_2023_b"}, f"got {team_history[1]}")
+    check("prior-season games are fully excluded, not just deprioritized",
+          "g_2022_a" not in team_history[1] and "g_2022_b" not in team_history[1])
+
+
 if __name__ == "__main__":
     test_possession_counter_uses_teamid_not_cumulative_description()
     test_score_forward_fill_ignores_placeholder_zero_on_non_scoring_rows()
@@ -871,6 +900,7 @@ if __name__ == "__main__":
     test_position_group_expanding_variant_pools_by_team_posgroup()
     test_season_for_date_resolves_purely_from_calendar()
     test_generate_props_before_filter_excludes_on_and_after_date()
+    test_team_history_season_filter_excludes_prior_season_games()
 
     print()
     if FAILURES:

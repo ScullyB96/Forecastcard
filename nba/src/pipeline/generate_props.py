@@ -333,7 +333,12 @@ def run(game_date: str) -> pd.DataFrame:
 
     team_log = add_team_ratings(build_team_game_log(FIRST_DEV_SEASON, current_season))
     team_log = _before(team_log, game_date)
-    team_history, team_side = build_team_history(team_log)
+    # `team_history`/`team_side` must never blend across a season boundary -- see
+    # generate_predictions.py's own fix for the full writeup (a real bug found via a 2023-11-08
+    # early-season spot-check: the "last 10 games" lookback silently pulled in games, and
+    # therefore players, from the PRIOR season, inflating the resolved active roster with players
+    # no longer on the team and diluting every real player's projected share).
+    team_history, team_side = build_team_history(team_log[team_log["season"] == current_season])
 
     scoring_log, rebounding_log, playmaking_log, defensive_log = _build_rate_logs(current_season, game_date)
     matchup_ctx = _build_matchup_context(current_season, game_date)
