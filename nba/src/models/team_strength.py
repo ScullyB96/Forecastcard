@@ -18,6 +18,19 @@ PRIOR_GAMES_RATING = 12.0  # ADOPTED 2026-08-01 (was 15.0) -- see LEAGUE_AVG_HAL
 # docstring below for the full joint-fix writeup; MODEL_DOCUMENTATION.md Sec29.
 PRIOR_GAMES_PACE = 15.0
 
+CROSS_SEASON_WEIGHT_RATING = 0.3  # ADOPTED 2026-08-01 (was 0.0, i.e. a full within-season reset --
+# shrinkage.py's own docstring flagged this parameter as "a genuinely untested hypothesis for NBA
+# specifically... not an assumed-correct default" since the day it was introduced, and it was never
+# actually swept in this entire project until the full-model audit's research pass flagged it.
+# Swept 0.1-1.0 on the recent-dev slice (all vs the already-adopted joint-fix defaults above): EVERY
+# value showed a real improvement on total_mae AND margin_mae, the strongest dev-only result of any
+# lever tested this session; 0.25-0.35 additionally improved SU. Confirmed on real holdout at 0.3
+# (the strongest all-around candidate): total_mae -0.0835 REAL IMPROVEMENT, margin_mae -0.0763 REAL
+# IMPROVEMENT, su NOISE (no harm) -- a second genuine, clean win for Phase 1's core rating engine
+# found through the audit's research levers, on top of the LEAGUE_AVG_HALFLIFE_GAMES_RATING/
+# PRIOR_GAMES_RATING joint fix above. See run_cross_season_weight_holdout_check.py /
+# MODEL_DOCUMENTATION.md Sec33.
+
 LEAGUE_AVG_HALFLIFE_GAMES_RATING = 2000.0  # ADOPTED 2026-08-01 (was flat/infinite-memory, i.e. no
 # EWMA at all) -- the first configuration to genuinely resolve Phase 1's long-open margin/scoring-
 # era-drift regression (Sec9.5). Two levers were tried INDEPENDENTLY first and neither alone was a
@@ -81,12 +94,18 @@ def build_team_game_log(start_year: int, end_year: int) -> pd.DataFrame:
     return log.sort_values(["gameDate", "gameId", "is_home"], ascending=[True, True, False]).reset_index(drop=True)
 
 
-def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = 0.0,
+def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = CROSS_SEASON_WEIGHT_RATING,
                       league_avg_halflife_games: float | None = LEAGUE_AVG_HALFLIFE_GAMES_RATING,
                       prior_games_rating: float = PRIOR_GAMES_RATING,
                       prior_games_pace: float = PRIOR_GAMES_PACE) -> pd.DataFrame:
     """Adds walk-forward shrunk pace_shrunk_mean, rtg_attack_rate (OFF),
     rtg_defense_rate (DEF), and their league-average companions.
+
+    `cross_season_weight` (default `CROSS_SEASON_WEIGHT_RATING`, ADOPTED
+    2026-08-01 -- see that constant's own docstring): blends a team's own
+    immediately-preceding season rate into its early-season prior instead
+    of resetting fully to the league average. Pass `0.0` explicitly for
+    the ORIGINAL full-reset behavior.
 
     `league_avg_halflife_games` (default `LEAGUE_AVG_HALFLIFE_GAMES_RATING`,
     ADOPTED 2026-08-01 -- see that constant's own docstring for the full

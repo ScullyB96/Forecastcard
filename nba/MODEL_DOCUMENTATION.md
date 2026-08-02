@@ -274,6 +274,15 @@ Both the live pipeline and `validate_team_strength_baseline.py` pick this up aut
 explicit overrides needed); re-confirmed the new config still clearly beats naive
 (margin_mae -0.8180, an even wider gap than the original Sec1 result). See Sec29 for full detail.
 
+**A second real win for Phase 1 (Sec33, 2026-08-01): `cross_season_weight`, untested since
+introduction.** `shrinkage.py` flagged this parameter as untested the day it was added; never swept
+in this entire project until the audit's research pass flagged it. Swept on top of Sec29's already-
+adopted defaults -- every value from 0.1-1.0 showed a real improvement on both total_mae and
+margin_mae simultaneously, the cleanest dev-only result of any lever this session. Confirmed on real
+holdout at `cross_season_weight=0.3`: total_mae -0.0835, margin_mae -0.0763, both REAL IMPROVEMENT,
+su NOISE (no harm). Adopted as the new default (`CROSS_SEASON_WEIGHT_RATING = 0.3`); naive-floor gap
+now even wider (margin_mae -0.8687). See Sec33 for full detail.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -2480,3 +2489,44 @@ RELATIVE comparison (margin) that a difference metric is more exposed to. **Not 
 diagnostic correlation is confirmed NOT to translate cleanly into an adopted correction here,
 consistent with this project's now well-established distinction between "a residual correlates with
 X" and "adding a correction for X actually helps out-of-sample, net of the noise it introduces."
+
+## 33. A second real win for Phase 1: `cross_season_weight`, untested since the day it was introduced
+
+`shrinkage.py`'s own docstring flagged `cross_season_weight` as "a genuinely untested hypothesis for
+NBA specifically... not an assumed-correct default" the day it was added -- and it stayed at its
+default (0.0, full within-season reset) for this entire project until the full-model audit's
+research pass flagged it as a real, cheap, never-actually-swept lever (untried_synthesis #6).
+
+**Swept 0.1 through 1.0** on the recent-dev slice, ON TOP OF the already-adopted joint-fix defaults
+(Sec29: `prior_games_rating=12.0`, `league_avg_halflife_games=2000.0`) -- EVERY single value tested
+showed a real improvement on BOTH total_mae and margin_mae simultaneously, the strongest, cleanest
+dev-only result of any lever tested this session. The effect grows through ~0.3-0.6 then fades back
+toward noise by 1.0 (a full cross-season blend, no reset at all); su specifically peaks around
+0.25-0.35. Picked `cross_season_weight=0.3` as the strongest all-around candidate (real improvement
+on all three metrics) and confirmed it on the full dev range: total_mae -0.0711, margin_mae -0.0506,
+su +0.0065, all REAL IMPROVEMENT.
+
+**One-time confirmatory holdout read** (`run_cross_season_weight_holdout_check.py`), vs. the current
+(already-Sec29-adopted, cross_season_weight=0.0) config, holdout games only:
+
+| metric | delta | verdict |
+|---|---|---|
+| total_mae | -0.0835 | REAL IMPROVEMENT |
+| margin_mae | -0.0763 | REAL IMPROVEMENT |
+| su | +0.0025 | NOISE (no harm) |
+
+**A second clean, genuine win for Phase 1's core rating engine**, on top of Sec29's joint fix.
+**Adopted**: new constant `CROSS_SEASON_WEIGHT_RATING = 0.3`, `add_team_ratings`'s `cross_season_weight`
+default changed from `0.0` to this constant (pass `0.0` explicitly for the original full-reset
+behavior). Re-ran the naive-floor comparison with all three now-adopted defaults together: total_mae
+-0.3216, margin_mae -0.8687, su +0.0752, all REAL IMPROVEMENT and each wider than the prior
+Sec29-only re-check -- the gap over naive keeps growing as genuinely untested-but-available levers
+get properly checked. Live spot-check (2025-01-15) confirms updated predictions flow through
+automatically (no code changes needed in either live pipeline -- both call `add_team_ratings` with no
+explicit overrides).
+
+Between Sec29 and this section, the full-model audit's "untried synthesis" and domain-signal
+research levers have now delivered two consecutive, genuine, holdout-confirmed improvements to
+Phase 1 by testing combinations and parameters that existed in the code the whole time but had
+never actually been checked -- a strong argument for treating a dedicated audit/research pass as a
+recurring practice, not a one-off.
