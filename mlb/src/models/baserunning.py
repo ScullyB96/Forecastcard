@@ -103,7 +103,19 @@ def build_pregame_sb_rates(season_stats: pd.DataFrame, target_season: int) -> pd
     stabilization constant -- same shrinkage principle as true_talent.py,
     applied to this bespoke "opportunities" denominator instead of PA."""
     prior = season_stats[season_stats["season"] < target_season]
-    if prior.empty:
+    # task #163 (2026-08-02): a real ZeroDivisionError, never hit by any
+    # local dev run this whole project's history (every local machine
+    # already had stolen_bases.parquet cached from a one-time manual
+    # backfill run when this feature was first built) -- surfaced only by
+    # a genuinely fresh environment (Railway) with zero prior stolen-base
+    # data fetched. `prior` can be non-empty (real season/opportunity rows
+    # exist) while attempts/opportunities both sum to exactly 0 if the raw
+    # stolen_bases.parquet itself hasn't been fetched yet -- same
+    # "no real signal available" case load_stolen_base_stats already
+    # documents returning an empty frame for, just one merge step removed.
+    # Same graceful no-signal fallback as the prior.empty case right above,
+    # not a new behavior.
+    if prior.empty or prior["opportunities"].sum() == 0 or prior["attempts"].sum() == 0:
         return pd.DataFrame(columns=["player", "attempt_rate", "success_rate"])
 
     league_attempt_rate = prior["attempts"].sum() / prior["opportunities"].sum()

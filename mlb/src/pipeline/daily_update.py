@@ -30,6 +30,7 @@ from src.ingest.fetch import (
     current_mlb_season,
     fetch_schedule_season,
     fetch_statcast_season,
+    fetch_stolen_base_stats_for_seasons,
     verify_and_backfill_statcast,
 )
 from src.utils.paths import DATA_RAW
@@ -63,6 +64,27 @@ def refresh_all_data() -> dict:
         except Exception as e:
             print(f"  ERROR verifying statcast coverage for {s}: {e}", flush=True)
             status["errors"].append(f"verify_statcast_{s}: {e}")
+
+    # task #163 (2026-08-02): this was NEVER called from anywhere in the
+    # automated pipeline -- stolen_bases.parquet only existed because every
+    # local dev machine had it from a one-time manual backfill run when
+    # baserunning.py was first built (task #74). A genuinely fresh
+    # environment (confirmed on Railway) has no such file, which crashes
+    # build_pregame_sb_rates with a real ZeroDivisionError (see baserunning.py's
+    # own fix for the defensive side of this). This call is already
+    # per-game-checkpointed/resumable (only fetches games not already in the
+    # cache, see fetch_stolen_base_stats_for_seasons's own docstring) -- same
+    # "expensive once, cheap forever after" shape as the schedule/statcast
+    # fetches above, not a new kind of cost. The FIRST run anywhere without a
+    # persisted cache (e.g. a fresh Railway volume) will be slow -- one real
+    # API call per historical game across every season in `seasons`
+    # (thousands of calls) -- exactly like this same run's own first-ever
+    # statcast backfill was slow, and for the identical reason.
+    try:
+        fetch_stolen_base_stats_for_seasons(seasons)
+    except Exception as e:
+        print(f"  ERROR fetching stolen-base stats: {e}", flush=True)
+        status["errors"].append(f"stolen_bases: {e}")
 
     return status
 
