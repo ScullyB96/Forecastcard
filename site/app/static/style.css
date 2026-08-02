@@ -180,6 +180,32 @@ h2 {
   flex-shrink: 0;
 }
 
+.slate-picker {
+  display: block;
+  margin-bottom: var(--sp-3);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-pill);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+.past-slate-banner {
+  display: inline-block;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  color: var(--accent-2);
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  margin-bottom: var(--sp-3);
+}
+.past-slate-banner a { text-decoration: underline; }
+
 .sport-section { margin-bottom: var(--sp-7); }
 .sport-badge {
   display: inline-block;

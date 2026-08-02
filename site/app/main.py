@@ -91,16 +91,27 @@ def home(request: Request):
     })
 
 
-@app.get("/{sport}")
-def sport_page(request: Request, sport: str):
+def _render_sport(request: Request, sport: str, slate_key: str | None):
     if sport not in db.SPORTS:
         return RedirectResponse(url="/")
-    slate_key = db.latest_slate_key(sport)
     games = db.games_for_slate(sport, slate_key) if slate_key else []
     props_by_game_id = _props_by_game_id(sport, slate_key, games) if slate_key else {}
-    run = next((r for r in db.latest_runs() if r["sport"] == sport), None)
+    run = db.run_for_slate(sport, slate_key) if slate_key else None
+    latest = db.latest_slate_key(sport)
     return templates.TemplateResponse(request, "sport.html", {
         "sports": db.SPORTS, "active_sport": sport, "sport": sport,
         "slate_key": slate_key, "games": games, "props_by_game_id": props_by_game_id,
         "opener": OPENERS.get(sport), "run": run,
+        "available_slates": db.slate_keys_for_sport(sport),
+        "is_latest": slate_key == latest,
     })
+
+
+@app.get("/{sport}")
+def sport_page(request: Request, sport: str):
+    return _render_sport(request, sport, db.latest_slate_key(sport) if sport in db.SPORTS else None)
+
+
+@app.get("/{sport}/{slate_key}")
+def sport_slate_page(request: Request, sport: str, slate_key: str):
+    return _render_sport(request, sport, slate_key)

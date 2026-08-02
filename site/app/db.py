@@ -63,6 +63,28 @@ def props_for_game(sport: str, slate_key: str, game_id: str) -> list[dict]:
         return cur.fetchall()
 
 
+def slate_keys_for_sport(sport: str) -> list[str]:
+    """Every slate_key with a real run for this sport, newest first --
+    powers the history/browse dropdown on the sport page. Every past
+    date's games/props rows already persist forever (slate_key is part of
+    each table's primary key, so a new date's export can only ever
+    collide with rows sharing that same slate_key) -- this just needs to
+    enumerate which ones exist."""
+    with _cursor() as cur:
+        cur.execute(
+            "SELECT slate_key FROM runs WHERE sport = %s ORDER BY run_at DESC", (sport,)
+        )
+        return [r["slate_key"] for r in cur.fetchall()]
+
+
+def run_for_slate(sport: str, slate_key: str) -> dict | None:
+    with _cursor() as cur:
+        cur.execute(
+            "SELECT * FROM runs WHERE sport = %s AND slate_key = %s", (sport, slate_key)
+        )
+        return cur.fetchone()
+
+
 def latest_runs() -> list[dict]:
     """One row per sport: its most recent run, for a simple health/"last
     updated" view. LEFT JOIN-free by construction -- just the max run_at

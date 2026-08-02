@@ -4,8 +4,18 @@
 {% block title %}{{ sport|upper }} Predictions{% endblock %}
 {% block content %}
 <h1>{{ sport|upper }}</h1>
+{% if available_slates %}
+  <select class="slate-picker" onchange="if (this.value) window.location = '/{{ sport }}/' + this.value;">
+    {% for s in available_slates %}
+    <option value="{{ s }}" {{ 'selected' if s == slate_key }}>{{ s }}</option>
+    {% endfor %}
+  </select>
+{% endif %}
 {% if slate_key %}
   <p class="slate-meta">slate {{ slate_key }}</p>
+  {% if not is_latest %}
+  <div class="past-slate-banner">Viewing a past slate -- <a href="/{{ sport }}">view latest</a></div>
+  {% endif %}
   {% if run %}<div class="run-status" title="{{ run.status }}{{ ': ' + run.notes if run.notes }}">Updated {{ run.run_at|relative_time }}</div>{% endif %}
   <div class="game-grid">
     {% for game in games %}
