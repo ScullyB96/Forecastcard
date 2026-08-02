@@ -10,5 +10,4 @@ builder = "NIXPACKS"
 
 [deploy]
 startCommand = "python -m src.pipeline.generate_predictions && python -m src.pipeline.generate_props && python -m src.pipeline.export_to_site_db"
-cronSchedule = "0 14 * * *"
-restartPolicyType = "NEVER"
+restartPolicyType = "ON_FAILURE"
