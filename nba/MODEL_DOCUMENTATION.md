@@ -2530,3 +2530,34 @@ research levers have now delivered two consecutive, genuine, holdout-confirmed i
 Phase 1 by testing combinations and parameters that existed in the code the whole time but had
 never actually been checked -- a strong argument for treating a dedicated audit/research pass as a
 recurring practice, not a one-off.
+
+## 34. OREB team-level anchoring: a THIRD mechanism converges to the exact same ceiling -- investigation now closed
+
+Given `cross_season_weight`'s clean, decisive win for `team_strength.py` (Sec33, via the identical
+`shrinkage.add_walk_forward_rate` primitive), tested the same lever for `team_stat_rates.py` --
+never exposed as a parameter there before (`add_team_stat_ratings` hardcoded 0.0 for every
+category). Added it as an overridable, default-preserving parameter, then swept it for OREB
+specifically (the one category with a real, confirmed absolute holdout loss to naive, per Sec23).
+
+**Dev-only result looked genuinely promising**: 0.1 and 0.25 both showed REAL IMPROVEMENT on the
+recent-dev slice and the full dev range, against both the current config AND naive directly (full
+dev range: -0.0045 vs current, -0.0255 vs naive, both real). This cleared both Stage 1 and Stage 2
+cleanly, the same bar the winning Phase 1 levers cleared.
+
+**One-time confirmatory holdout read, the decisive test**: candidate's own dev-vs-holdout gap is
+still a REAL REGRESSION (dev=2.9014 -> holdout=3.0637); vs. naive on holdout specifically:
+3.0637 vs 3.0401, delta +0.0236, **NOISE** -- statistically indistinguishable from naive, not a
+clear win.
+
+**This is the THIRD structurally distinct mechanism to converge on the exact same outcome**:
+Sec26's adaptive league-average target gave 3.0354 vs naive's 3.0401 (NOISE); Sec26's reduced/
+increased shrinkage strength made things monotonically worse in both directions (Sec30); now
+`cross_season_weight` gives 3.0637 vs 3.0401 (NOISE again). Three independent, well-motivated,
+properly-validated mechanisms -- recency-weighted target, shrinkage strength, cross-season
+blending -- all land at essentially the same "statistical tie with naive, never a clear beat"
+ceiling. This is strong, convergent evidence that OREB's team-level rate model has a genuine
+structural limit with the `add_walk_forward_rate` primitive as currently built, not a
+tuning problem any single parameter can solve. **The OREB team-level anchoring investigation is
+now closed** (not just "still open") -- it remains unanchored (bottom-up player-sum only, per
+Sec23's original decision); a genuine fix, if one exists, would need a structurally different
+primitive or a fundamentally different signal, not another parameter sweep on this one.

@@ -98,13 +98,23 @@ def build_team_stat_game_log(start_year: int, end_year: int) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 
-def add_team_stat_ratings(log: pd.DataFrame) -> pd.DataFrame:
+def add_team_stat_ratings(log: pd.DataFrame, cross_season_weight: float = 0.0) -> pd.DataFrame:
     """Adds, per category, f"{label}_attack_rate"/f"{label}_defense_rate"
     (walk-forward shrunk toward the trailing league average, same
-    primitive and season-reset convention as OFF_RATING/DEF_RATING)."""
+    primitive and season-reset convention as OFF_RATING/DEF_RATING).
+
+    `cross_season_weight` (default 0.0, i.e. the original full within-
+    season reset): applies UNIFORMLY across all 6 categories -- added to
+    test the same lever that gave `team_strength.add_team_ratings` a real
+    win (Sec33) via the identical `shrinkage.add_walk_forward_rate`
+    primitive, never previously tested for any team_stat_rates category.
+    Pass a nonzero value to blend in each team's own immediately-preceding
+    season rate for early-season games instead of resetting fully to the
+    league average."""
     log = log.copy()
     for label, prior in PRIOR_GAMES.items():
-        log = add_walk_forward_rate(log, f"{label}_for", f"{label}_against", prior, prefix=label)
+        log = add_walk_forward_rate(log, f"{label}_for", f"{label}_against", prior, prefix=label,
+                                     cross_season_weight=cross_season_weight)
     return log
 
 
