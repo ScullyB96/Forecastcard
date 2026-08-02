@@ -67,10 +67,34 @@ def _trailing_league_stat_ewma(log: pd.DataFrame, value_col: str, halflife_games
     return log.merge(per_game[["gameId", "_trailing_ewma"]], on="gameId", how="left")["_trailing_ewma"]
 
 
+def _trailing_own_mean_ewma(log: pd.DataFrame, value_col: str, halflife_games: float) -> pd.Series:
+    """Aligned-to-`log`'s-index Series: EWMA (half-life in GAMES) of a
+    team's OWN value, strictly prior games only, within (team, season). No
+    same-game leak risk here unlike `_trailing_league_stat_ewma`: each row
+    already belongs to exactly one team, so there's no shared-gameId
+    two-row collapse to worry about -- grouping by (team, season) and
+    shift(1)-ing within that group is leak-safe by construction.
+
+    MOTIVATION (2026-08-01, full-model-audit untried-synthesis lever):
+    `league_avg_halflife_games` recency-weights the shrinkage TARGET (what
+    an undersampled team blends toward), but a team's own in-season signal
+    (`for_cumsum_before`/`against_cumsum_before` below) has always been a
+    flat, equally-weighted cumulative mean -- game 1 of the season counts
+    exactly as much as last night's game by game 40. Never tested whether
+    recency-weighting the team's OWN history (not just the shared target)
+    helps, a structurally different lever from `cross_season_weight` (which
+    only changes the early-season PRIOR, not how in-season games are
+    weighted against each other)."""
+    g = log.sort_values(["gameDate", "gameId"])
+    return g.groupby(["team", "season"])[value_col].transform(
+        lambda s: s.shift(1).ewm(halflife=halflife_games, min_periods=1).mean())
+
+
 def add_walk_forward_rate(log: pd.DataFrame, for_col: str, against_col: str,
                            prior_games: float, prefix: str,
                            cross_season_weight: float = 0.0,
-                           league_avg_halflife_games: float | None = None) -> pd.DataFrame:
+                           league_avg_halflife_games: float | None = None,
+                           own_halflife_games: float | None = None) -> pd.DataFrame:
     """log must have columns: gameId, gameDate, season, team, <for_col>,
     <against_col>, one row per team per game. Adds f"{prefix}_league_avg",
     f"{prefix}_attack_rate", f"{prefix}_defense_rate", and
@@ -100,7 +124,19 @@ def add_walk_forward_rate(log: pd.DataFrame, for_col: str, against_col: str,
     treat as a hyperparameter to grid-search in validate_team_strength_baseline.py,
     not an assumed-correct default; the 0.0 default preserves the
     conservative, already-standard behavior until a nonzero weight is
-    actually shown to help via paired bootstrap."""
+    actually shown to help via paired bootstrap.
+
+    `own_halflife_games` (default None, i.e. the original flat, equally-
+    weighted in-season cumulative mean for the team's OWN signal): when
+    set, replaces `for_cumsum_before`/`against_cumsum_before`'s flat
+    average with `_trailing_own_mean_ewma`'s recency-weighted one before
+    blending against `prior_mean_for`/`prior_mean_against` at
+    `prior_games` strength -- see that helper's docstring for the full
+    motivation. Structurally distinct from `cross_season_weight` (which
+    only changes the early-season PRIOR) and from `league_avg_halflife_games`
+    (which only changes the shared TARGET) -- this is the first lever to
+    recency-weight the team's own within-season history itself. None
+    preserves the original column byte-for-byte (regression-tested)."""
     log = log.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
 
     league_avg_col = f"{prefix}_league_avg"
@@ -129,8 +165,14 @@ def add_walk_forward_rate(log: pd.DataFrame, for_col: str, against_col: str,
                                           + (1 - cross_season_weight) * log.loc[has_prior, league_avg_col])
         log = log.drop(columns=["_prior_season_for", "_prior_season_against"])
 
-    log[f"{prefix}_attack_rate"] = (for_cumsum_before + prior_games * prior_mean_for) / (games_before + prior_games)
-    log[f"{prefix}_defense_rate"] = (against_cumsum_before + prior_games * prior_mean_against) / (games_before + prior_games)
+    if own_halflife_games is None:
+        log[f"{prefix}_attack_rate"] = (for_cumsum_before + prior_games * prior_mean_for) / (games_before + prior_games)
+        log[f"{prefix}_defense_rate"] = (against_cumsum_before + prior_games * prior_mean_against) / (games_before + prior_games)
+    else:
+        own_for_ewma = _trailing_own_mean_ewma(log, for_col, own_halflife_games).fillna(0.0)
+        own_against_ewma = _trailing_own_mean_ewma(log, against_col, own_halflife_games).fillna(0.0)
+        log[f"{prefix}_attack_rate"] = (games_before * own_for_ewma + prior_games * prior_mean_for) / (games_before + prior_games)
+        log[f"{prefix}_defense_rate"] = (games_before * own_against_ewma + prior_games * prior_mean_against) / (games_before + prior_games)
     log["games_played_before"] = games_before
     return log
 

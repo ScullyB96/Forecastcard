@@ -295,6 +295,15 @@ per-category default dict (`DEFAULT_CROSS_SEASON_WEIGHTS`) that deliberately kee
 `add_team_stat_ratings` loops over all 6 categories in one function. Reaches `generate_props.py`
 automatically, no call-site changes. See Sec35 for full detail.
 
+**A fourth real win for Phase 1: `own_halflife_games` (Sec36, 2026-08-01).** A structurally
+different lever again -- recency-weights a team's OWN in-season history (previously a flat
+cumulative mean), not the prior (`cross_season_weight`) or the shared target
+(`league_avg_halflife_games`). Swept 5-80 games on the recent-dev slice; 5 was too aggressive (real
+regression), 20/40 cleared the net-win bar most cleanly. Confirmed on real holdout at
+`own_halflife_games=40`: total_mae -0.0499, margin_mae -0.0412, both REAL IMPROVEMENT vs. the
+current config, su NOISE (no harm). Adopted as `team_strength.OWN_HALFLIFE_GAMES_RATING = 40.0`;
+reaches the live pipeline automatically via `add_team_ratings`'s default. See Sec36 for full detail.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -2628,3 +2637,56 @@ session (after the Sec29 joint margin fix, Sec33's Phase 1 `cross_season_weight`
 and the second time `cross_season_weight` specifically has cleared holdout -- reinforcing that this
 parameter, flagged as untested since `shrinkage.py` was written, was a genuinely under-explored
 lever across this entire codebase, not just for Phase 1.
+
+## 36. A fifth real win: `own_halflife_games`, recency-weighting a team's OWN in-season history (2026-08-01)
+
+The untried-synthesis lever from the audit's research pass: `cross_season_weight` (Sec33) and
+`league_avg_halflife_games` (Sec29) each recency-weight a DIFFERENT part of the shrinkage math --
+the early-season prior and the shared league-average target, respectively -- but neither touches
+how a team's OWN within-season games are weighted against each other. `add_walk_forward_rate`'s
+`for_cumsum_before`/`against_cumsum_before` have always been a flat cumulative sum: game 1 of a
+season counts exactly as much as last night's game. Never tested whether recency-weighting the
+team's own signal helps.
+
+**New primitive**: `shrinkage._trailing_own_mean_ewma` -- an EWMA (half-life in games) of a team's
+own value within (team, season), strictly prior games only. No same-game leak risk here unlike
+`_trailing_league_stat_ewma` (which needs a per-gameId collapse before shifting): each row already
+belongs to exactly one team, so grouping by (team, season) and `shift(1)`-ing within that group is
+leak-safe by construction. Wired in as a new `own_halflife_games` param on `add_walk_forward_rate`
+(default `None` reproduces the original flat-cumulative-sum column byte-for-byte, regression-tested)
+-- when set, replaces the flat own-mean with the EWMA-weighted one before blending against the
+shrinkage prior at `prior_games` strength, preserving the exact same shrinkage-strength
+interpretation, just swapping how the "own value" is estimated.
+
+**Dev-only Stage 1** (recent-dev slice, on top of the already-adopted Sec29/33 defaults): swept
+5/10/20/40/80 games. 5 was too aggressive -- REAL REGRESSION on margin_mae (+0.1635) and su
+(-0.0147), thrashing on noise at that short a half-life. 10/20/40/80 all cleared the net-win bar; 20
+and 40 cleared it most cleanly, with REAL IMPROVEMENT on BOTH total_mae and margin_mae
+simultaneously (40: -0.1233/-0.0273; 20: -0.1889/-0.0343), su NOISE (no harm) at both.
+
+**Stage 2** (full dev range, n=10,737 games): both 20 and 40 beat the current config on total_mae
+(real improvement); 40 ALSO beat it on margin_mae (real improvement, -0.0171) while 20 was noise-
+not-regression there. Both beat naive by a wide margin on all three metrics. 40 chosen as the
+strongest all-around candidate (clears both metrics cleanly, not just one).
+
+**One-time confirmatory holdout read** (`run_own_halflife_holdout_check.py`), candidate vs. current
+config, holdout-only: total_mae -0.0499 REAL IMPROVEMENT, margin_mae -0.0412 REAL IMPROVEMENT, su
+NOISE (no harm) -- a clean net-positive result, no regression on any metric. The candidate's OWN
+dev-vs-holdout gap on margin_mae still shows a REAL REGRESSION (dev=10.3931 -> holdout=11.2137) --
+the same scoring-era-drift phenomenon Sec29 diagnosed is still present and not eliminated by this
+fix either -- but the decision-relevant comparison (vs. the current config, holdout-only) is what
+matters, exactly the same logic Sec29/33 already used: this config copes with that real difficulty
+measurably better than the prior one did.
+
+**Adopted**: `team_strength.OWN_HALFLIFE_GAMES_RATING = 40.0`, threaded through `add_team_ratings`'s
+new `own_halflife_games` parameter (applied to rtg only, not pace -- untested for pace, left as a
+possible future lever). All existing callers (`generate_predictions.py`, `generate_props.py`,
+`validate_team_strength_baseline.py`, etc.) invoke `add_team_ratings(log)` with no explicit
+override, so this reaches the live pipeline automatically, no call-site changes needed -- the same
+"thread it through the shared default" pattern every Phase 1 lever this session has used.
+
+This is the fifth genuine, holdout-confirmed win found via the audit's research levers this session
+(Sec29, Sec33, Sec35, and now this), and the third structurally distinct lever (prior / target /
+own-history) to independently pay off for Phase 1's rating engine specifically -- strong evidence
+that `shrinkage.py`'s walk-forward primitive had a lot of genuinely unexplored surface area, not
+just one lucky fix.

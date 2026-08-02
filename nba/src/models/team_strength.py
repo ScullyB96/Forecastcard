@@ -31,6 +31,22 @@ CROSS_SEASON_WEIGHT_RATING = 0.3  # ADOPTED 2026-08-01 (was 0.0, i.e. a full wit
 # PRIOR_GAMES_RATING joint fix above. See run_cross_season_weight_holdout_check.py /
 # MODEL_DOCUMENTATION.md Sec33.
 
+OWN_HALFLIFE_GAMES_RATING = 40.0  # ADOPTED 2026-08-01 (was None, i.e. a flat equally-weighted
+# in-season cumulative mean of the team's OWN rating history) -- a structurally distinct lever from
+# both constants below: CROSS_SEASON_WEIGHT_RATING changes the early-season PRIOR only,
+# LEAGUE_AVG_HALFLIFE_GAMES_RATING changes the shared TARGET only, but neither touches how a team's
+# own in-season games are weighted against each other (game 1 of a season counted exactly as much
+# as last night's game). Dev-only Stage 1 (recent-dev slice) swept 5/10/20/40/80 games: 5 was a REAL
+# REGRESSION (too aggressive, thrashes on noise), 10-80 all cleared the net-win bar, 20 and 40
+# cleared it most cleanly (real improvement on BOTH total_mae and margin_mae). Stage 2 (full dev
+# range) confirmed both, with 40 the stronger all-around candidate. Confirmed on real holdout (vs.
+# current config): total_mae -0.0499 REAL IMPROVEMENT, margin_mae -0.0412 REAL IMPROVEMENT, su NOISE
+# (no harm) -- the fourth genuine, holdout-confirmed win found via the audit's research levers this
+# session. The candidate's OWN dev-vs-holdout gap on margin_mae still shows a real widening (the
+# same scoring-era-drift phenomenon Sec29 diagnosed, not eliminated by this fix either) -- but it
+# copes with that difficulty measurably better than the prior (flat cumulative) config did, same
+# decision logic as Sec29/33. See run_own_halflife_holdout_check.py / MODEL_DOCUMENTATION.md Sec36.
+
 LEAGUE_AVG_HALFLIFE_GAMES_RATING = 2000.0  # ADOPTED 2026-08-01 (was flat/infinite-memory, i.e. no
 # EWMA at all) -- the first configuration to genuinely resolve Phase 1's long-open margin/scoring-
 # era-drift regression (Sec9.5). Two levers were tried INDEPENDENTLY first and neither alone was a
@@ -97,7 +113,8 @@ def build_team_game_log(start_year: int, end_year: int) -> pd.DataFrame:
 def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = CROSS_SEASON_WEIGHT_RATING,
                       league_avg_halflife_games: float | None = LEAGUE_AVG_HALFLIFE_GAMES_RATING,
                       prior_games_rating: float = PRIOR_GAMES_RATING,
-                      prior_games_pace: float = PRIOR_GAMES_PACE) -> pd.DataFrame:
+                      prior_games_pace: float = PRIOR_GAMES_PACE,
+                      own_halflife_games: float | None = OWN_HALFLIFE_GAMES_RATING) -> pd.DataFrame:
     """Adds walk-forward shrunk pace_shrunk_mean, rtg_attack_rate (OFF),
     rtg_defense_rate (DEF), and their league-average companions.
 
@@ -120,13 +137,20 @@ def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = CROSS_SEASO
     `league_avg_halflife_games` (which changes what the blending TARGET
     tracks, not how strongly a team's own rating is pulled toward it).
     Neither lever alone was a clean win (Sec24 target-only, Sec26
-    strength-only) -- both were needed together (Sec29)."""
+    strength-only) -- both were needed together (Sec29).
+
+    `own_halflife_games` (default `OWN_HALFLIFE_GAMES_RATING`, ADOPTED
+    2026-08-01 -- see that constant's own docstring): recency-weights the
+    team's own within-season rating history (applied to rtg only, not
+    pace -- untested for pace). Pass `None` explicitly for the ORIGINAL
+    flat, equally-weighted in-season cumulative mean instead."""
     log = add_walk_forward_mean(log, "pace", prior_games_pace, prefix="pace",
                                  cross_season_weight=cross_season_weight,
                                  league_avg_halflife_games=league_avg_halflife_games)
     log = add_walk_forward_rate(log, "offRtg", "defRtg", prior_games_rating, prefix="rtg",
                                  cross_season_weight=cross_season_weight,
-                                 league_avg_halflife_games=league_avg_halflife_games)
+                                 league_avg_halflife_games=league_avg_halflife_games,
+                                 own_halflife_games=own_halflife_games)
     return log
 
 

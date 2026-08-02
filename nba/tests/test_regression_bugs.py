@@ -37,7 +37,7 @@ from src.models.lineup_rating import predictive_minutes_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
 from src.models.team_stat_rates import (ADOPTED_CATEGORIES, CROSS_SEASON_WEIGHT_STAT, STAT_COLUMNS,
                                          add_team_stat_ratings, build_team_stat_game_log, project_team_stat)
-from src.models.team_strength import PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings
+from src.models.team_strength import OWN_HALFLIFE_GAMES_RATING, PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings
 from src.pipeline.generate_props import _anchor_preserving_missing, _latest_snapshot, _team_stat_totals
 
 FAILURES = []
@@ -615,7 +615,8 @@ def test_add_team_ratings_new_prior_games_params_default_preserving():
          "is_home": True, "pace": 98.0, "offRtg": 107.0, "defRtg": 108.0, "actualScore": 110.0},
     ])
     default_out = add_team_ratings(log.copy())
-    explicit_out = add_team_ratings(log.copy(), prior_games_rating=PRIOR_GAMES_RATING, prior_games_pace=PRIOR_GAMES_PACE)
+    explicit_out = add_team_ratings(log.copy(), prior_games_rating=PRIOR_GAMES_RATING, prior_games_pace=PRIOR_GAMES_PACE,
+                                     own_halflife_games=OWN_HALFLIFE_GAMES_RATING)
     for col in ["pace_shrunk_mean", "rtg_attack_rate", "rtg_defense_rate"]:
         check(f"{col}: default params reproduce the explicit-constant call exactly",
               (default_out[col].reset_index(drop=True).fillna(-999)
@@ -1291,6 +1292,49 @@ def test_team_level_adaptive_league_average_default_preserving_and_responsive():
            == expected_mean_flat.reset_index(drop=True).fillna(-999)).all())
 
 
+def test_own_halflife_default_preserving_and_responsive():
+    """`shrinkage.add_walk_forward_rate`'s new `own_halflife_games` option
+    (2026-08-01, full-model-audit untried-synthesis lever): recency-weights
+    a team's OWN within-season history, structurally distinct from
+    `cross_season_weight` (early-season prior only) and
+    `league_avg_halflife_games` (shared target only) -- neither of which
+    touches how a team's own in-season games are weighted against each
+    other. Same two-check pattern as the league-average EWMA test above:
+    (1) `None` reproduces the exact original flat-cumulative-sum column;
+    (2) given a clear within-season shift in one team's own rate, the
+    EWMA-weighted version ends up closer to that team's new rate."""
+    from src.models.shrinkage import add_walk_forward_rate
+
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "X", "opp": "Y", "pts": 100.0, "opp_pts": 100.0},
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "Y", "opp": "X", "pts": 100.0, "opp_pts": 100.0},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "team": "X", "opp": "Z", "pts": 100.0, "opp_pts": 100.0},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2020-01-02"), "season": 2020, "team": "Z", "opp": "X", "pts": 100.0, "opp_pts": 100.0},
+        {"gameId": "g3", "gameDate": pd.Timestamp("2020-01-03"), "season": 2020, "team": "X", "opp": "Y", "pts": 130.0, "opp_pts": 130.0},
+        {"gameId": "g3", "gameDate": pd.Timestamp("2020-01-03"), "season": 2020, "team": "Y", "opp": "X", "pts": 130.0, "opp_pts": 130.0},
+        {"gameId": "g4", "gameDate": pd.Timestamp("2020-01-04"), "season": 2020, "team": "X", "opp": "Z", "pts": 130.0, "opp_pts": 130.0},
+        {"gameId": "g4", "gameDate": pd.Timestamp("2020-01-04"), "season": 2020, "team": "Z", "opp": "X", "pts": 130.0, "opp_pts": 130.0},
+        {"gameId": "g5", "gameDate": pd.Timestamp("2020-01-05"), "season": 2020, "team": "X", "opp": "Y", "pts": 0.0, "opp_pts": 0.0},
+        {"gameId": "g5", "gameDate": pd.Timestamp("2020-01-05"), "season": 2020, "team": "Y", "opp": "X", "pts": 0.0, "opp_pts": 0.0},
+    ])
+
+    default_out = add_walk_forward_rate(log.copy(), "pts", "opp_pts", prior_games=10.0, prefix="pts")
+    flat_out = add_walk_forward_rate(log.copy(), "pts", "opp_pts", prior_games=10.0, prefix="pts", own_halflife_games=None)
+    check("own_halflife_games=None reproduces the exact original flat-cumulative-sum column",
+          (default_out["pts_attack_rate"].reset_index(drop=True).fillna(-999)
+           == flat_out["pts_attack_rate"].reset_index(drop=True).fillna(-999)).all())
+
+    adaptive_out = add_walk_forward_rate(log.copy(), "pts", "opp_pts", prior_games=10.0,
+                                          prefix="pts", own_halflife_games=1.0)
+    g5_flat = default_out[default_out["gameId"] == "g5"].iloc[0]["pts_attack_rate"]
+    g5_adaptive = adaptive_out[adaptive_out["gameId"] == "g5"].iloc[0]["pts_attack_rate"]
+    true_recent_rate = 130.0
+    check("team X's EWMA-weighted own rate is closer to ITS OWN new (recent, high-scoring) rate "
+          "than the flat-cumulative one after a clear within-season shift",
+          abs(g5_adaptive - true_recent_rate) < abs(g5_flat - true_recent_rate),
+          f"flat={g5_flat}, adaptive={g5_adaptive}, true_recent={true_recent_rate}")
+
+
 def test_team_stat_totals_falls_back_to_empty_when_team_missing():
     """`generate_props._team_stat_totals` is the live wiring's per-game
     combine step -- must return real per-category (home, away) totals when
@@ -1358,6 +1402,7 @@ if __name__ == "__main__":
     test_adopted_categories_excludes_oreb_holdout_failure()
     test_team_stat_totals_falls_back_to_empty_when_team_missing()
     test_team_level_adaptive_league_average_default_preserving_and_responsive()
+    test_own_halflife_default_preserving_and_responsive()
     test_prop_distribution_variance_floor_is_player_scale_not_team_scale()
     test_add_team_ratings_new_prior_games_params_default_preserving()
     test_add_team_stat_ratings_oreb_excluded_from_uniform_cross_season_adoption()
