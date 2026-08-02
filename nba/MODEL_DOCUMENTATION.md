@@ -283,6 +283,18 @@ holdout at `cross_season_weight=0.3`: total_mae -0.0835, margin_mae -0.0763, bot
 su NOISE (no harm). Adopted as the new default (`CROSS_SEASON_WEIGHT_RATING = 0.3`); naive-floor gap
 now even wider (margin_mae -0.8687). See Sec33 for full detail.
 
+**A third real win: `cross_season_weight` also adopted for the 5 team_stat_rates categories
+(Sec35, 2026-08-01).** Sec34 tested the same lever for OREB specifically and it converged to the
+same ceiling as two other mechanisms (still unanchored). But dreb/ast/tov/stl/blk -- the 5
+categories that DID clear their original Sec23 holdout check and are already live-anchored -- are a
+different question, tested independently. All 5 cleared both dev stages; on real holdout, 4/5
+(dreb/tov/stl/blk) showed REAL IMPROVEMENT vs. the current config and ast was NOISE (no regression
+anywhere). Adopted `CROSS_SEASON_WEIGHT_STAT = 0.25` for `ADOPTED_CATEGORIES` only, via a
+per-category default dict (`DEFAULT_CROSS_SEASON_WEIGHTS`) that deliberately keeps OREB pinned at
+0.0 -- a uniform float default would have silently re-applied Sec34's rejected OREB config, since
+`add_team_stat_ratings` loops over all 6 categories in one function. Reaches `generate_props.py`
+automatically, no call-site changes. See Sec35 for full detail.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -2561,3 +2573,58 @@ tuning problem any single parameter can solve. **The OREB team-level anchoring i
 now closed** (not just "still open") -- it remains unanchored (bottom-up player-sum only, per
 Sec23's original decision); a genuine fix, if one exists, would need a structurally different
 primitive or a fundamentally different signal, not another parameter sweep on this one.
+
+## 35. A third real win: `cross_season_weight` adopted for the 5 team_stat_rates ADOPTED_CATEGORIES (2026-08-01)
+
+Sec34 tested `cross_season_weight` for OREB specifically and it converged to the same ceiling as
+two other mechanisms. But the same lever, tested for the other 5 categories (dreb/ast/tov/stl/blk
+-- the ones that DID clear their original Sec23 holdout check and are already live-anchored), is a
+structurally different question: these categories don't have OREB's documented holdout-loss
+problem, so there's no reason to assume the same ceiling applies. Tested independently.
+
+**Stage 1 (recent-dev slice, candidate=0.25 vs current csw=0.0)**: all 5 categories showed REAL
+IMPROVEMENT -- dreb -0.0079, ast -0.0140, tov -0.0136, stl -0.0069, blk -0.0086 (all CIs exclude
+zero).
+
+**Stage 2 (full dev range, n=21,476 games)**: all 5 cleared BOTH comparisons cleanly --
+vs. current config: dreb -0.0098, ast -0.0175, tov -0.0118, stl -0.0056, blk -0.0067 (all REAL
+IMPROVEMENT); vs. naive floor: dreb -0.0927, ast -0.0910, tov -0.0800, stl -0.0408, blk -0.0441
+(all REAL IMPROVEMENT, larger margins than vs. current -- expected, since naive has no shrinkage at
+all).
+
+**One-time confirmatory holdout read** (`run_team_stat_cross_season_holdout_check.py`, n=4,900
+games), candidate vs. current config, holdout-only:
+
+| category | delta | verdict |
+|---|---|---|
+| dreb | -0.0162 | REAL IMPROVEMENT |
+| ast | +0.0053 | NOISE (CI includes zero) |
+| tov | -0.0160 | REAL IMPROVEMENT |
+| stl | -0.0047 | REAL IMPROVEMENT |
+| blk | -0.0041 | REAL IMPROVEMENT |
+
+4 of 5 categories show a real holdout improvement; ast is noise but NOT a regression (CI includes
+zero, point estimate barely positive). No category regressed. Net-win criterion cleared uniformly
+-- **adopted `cross_season_weight=0.25` for all 5 ADOPTED_CATEGORIES**.
+
+**Implementation detail that mattered**: `add_team_stat_ratings` loops over all 6
+`STAT_COLUMNS` categories (including OREB) in one shared function. A naive "just change the
+default float" edit would have silently re-applied Sec34's REJECTED OREB config the moment this
+adoption landed, since OREB shares the same loop. Fixed by keying the default on a per-category
+dict (`DEFAULT_CROSS_SEASON_WEIGHTS`) -- 0.25 for `ADOPTED_CATEGORIES`, 0.0 (unchanged) for oreb --
+with the function's `cross_season_weight` param changed from a float default to `float | None`
+(explicit float still applies uniformly across all 6, preserving every existing sweep script's
+behavior; `None`, the new default, resolves per-category). Covered by
+`test_add_team_stat_ratings_oreb_excluded_from_uniform_cross_season_adoption` in
+`tests/test_regression_bugs.py`.
+
+Both `generate_props.py` and `run_team_stat_holdout_check.py` call `add_team_stat_ratings(log)`
+with no explicit `cross_season_weight`, so this adoption reaches the live props pipeline
+automatically with no call-site changes needed -- the same "thread it through the shared default"
+pattern Sec29/33 used for `team_strength.add_team_ratings`.
+
+This is the fourth genuine, holdout-confirmed win found via the audit's research levers this
+session (after the Sec29 joint margin fix, Sec33's Phase 1 `cross_season_weight`, and now this),
+and the second time `cross_season_weight` specifically has cleared holdout -- reinforcing that this
+parameter, flagged as untested since `shrinkage.py` was written, was a genuinely under-explored
+lever across this entire codebase, not just for Phase 1.

@@ -50,6 +50,18 @@ PRIOR_GAMES = {
 # fix that doesn't actually generalize.
 ADOPTED_CATEGORIES = ("dreb", "ast", "tov", "stl", "blk")
 
+CROSS_SEASON_WEIGHT_STAT = 0.25  # ADOPTED 2026-08-01 (was 0.0, full within-season reset) -- the
+# same lever that gave team_strength.add_team_ratings two real wins (Sec29, Sec33), tested here for
+# the first time on the 5 ADOPTED_CATEGORIES (full-model-audit research pass). Dev-only Stage 1
+# (recent-dev slice) and Stage 2 (full dev range) both showed all 5 categories beating BOTH the
+# current csw=0.0 config AND the naive floor. Confirmed on real holdout: 4/5 categories (dreb, tov,
+# stl, blk) REAL IMPROVEMENT vs current config, ast NOISE (no harm) -- net positive, no regression
+# on any category, so adopted uniformly across all 5 rather than per-category. OREB (the 6th
+# category, tested separately since it's excluded from ADOPTED_CATEGORIES) did NOT clear its own
+# holdout check with this same lever -- see run_oreb_cross_season_holdout_check.py /
+# MODEL_DOCUMENTATION.md Sec34 -- and stays at 0.0/unanchored. See
+# run_team_stat_cross_season_holdout_check.py / MODEL_DOCUMENTATION.md Sec35.
+
 
 def build_team_stat_game_log(start_year: int, end_year: int) -> pd.DataFrame:
     """One row per team per game, with each stat's `{label}_for` (this
@@ -98,23 +110,34 @@ def build_team_stat_game_log(start_year: int, end_year: int) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 
-def add_team_stat_ratings(log: pd.DataFrame, cross_season_weight: float = 0.0) -> pd.DataFrame:
+# Per-category cross_season_weight default: CROSS_SEASON_WEIGHT_STAT (0.25) for the 5
+# ADOPTED_CATEGORIES, but 0.0 (unchanged full reset) for oreb -- OREB's OWN holdout check with this
+# identical lever showed a real regression/veto (run_oreb_cross_season_holdout_check.py, Sec34), so
+# it's deliberately excluded from the uniform adoption despite sharing this function's per-category
+# loop. Not a dict literal with oreb spelled out, so a future new category added to STAT_COLUMNS
+# doesn't silently inherit 0.25 without its own holdout check.
+DEFAULT_CROSS_SEASON_WEIGHTS = {label: (CROSS_SEASON_WEIGHT_STAT if label in ADOPTED_CATEGORIES else 0.0)
+                                 for label in STAT_COLUMNS}
+
+
+def add_team_stat_ratings(log: pd.DataFrame, cross_season_weight: float | None = None) -> pd.DataFrame:
     """Adds, per category, f"{label}_attack_rate"/f"{label}_defense_rate"
     (walk-forward shrunk toward the trailing league average, same
     primitive and season-reset convention as OFF_RATING/DEF_RATING).
 
-    `cross_season_weight` (default 0.0, i.e. the original full within-
-    season reset): applies UNIFORMLY across all 6 categories -- added to
-    test the same lever that gave `team_strength.add_team_ratings` a real
-    win (Sec33) via the identical `shrinkage.add_walk_forward_rate`
-    primitive, never previously tested for any team_stat_rates category.
-    Pass a nonzero value to blend in each team's own immediately-preceding
-    season rate for early-season games instead of resetting fully to the
-    league average."""
+    `cross_season_weight` (default `None` -> per-category
+    `DEFAULT_CROSS_SEASON_WEIGHTS`: 0.25 for the 5 ADOPTED_CATEGORIES,
+    ADOPTED 2026-08-01, see `CROSS_SEASON_WEIGHT_STAT`'s own docstring;
+    0.0/unchanged for oreb since it didn't clear its own holdout check with
+    this lever). Pass an explicit float to apply that value UNIFORMLY
+    across all 6 categories instead -- e.g. for a sweep test that wants a
+    single controlled value everywhere, as `run_oreb_cross_season_holdout_check.py`
+    and this module's own dev-sweep scripts do."""
     log = log.copy()
     for label, prior in PRIOR_GAMES.items():
+        csw = cross_season_weight if cross_season_weight is not None else DEFAULT_CROSS_SEASON_WEIGHTS[label]
         log = add_walk_forward_rate(log, f"{label}_for", f"{label}_against", prior, prefix=label,
-                                     cross_season_weight=cross_season_weight)
+                                     cross_season_weight=csw)
     return log
 
 

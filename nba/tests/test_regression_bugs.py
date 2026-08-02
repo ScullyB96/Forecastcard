@@ -35,7 +35,8 @@ from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_c
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta
 from src.models.lineup_rating import predictive_minutes_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
-from src.models.team_stat_rates import ADOPTED_CATEGORIES, STAT_COLUMNS, build_team_stat_game_log, project_team_stat
+from src.models.team_stat_rates import (ADOPTED_CATEGORIES, CROSS_SEASON_WEIGHT_STAT, STAT_COLUMNS,
+                                         add_team_stat_ratings, build_team_stat_game_log, project_team_stat)
 from src.models.team_strength import PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings
 from src.pipeline.generate_props import _anchor_preserving_missing, _latest_snapshot, _team_stat_totals
 
@@ -619,6 +620,37 @@ def test_add_team_ratings_new_prior_games_params_default_preserving():
         check(f"{col}: default params reproduce the explicit-constant call exactly",
               (default_out[col].reset_index(drop=True).fillna(-999)
                == explicit_out[col].reset_index(drop=True).fillna(-999)).all())
+
+
+def test_add_team_stat_ratings_oreb_excluded_from_uniform_cross_season_adoption():
+    """ADOPTED 2026-08-01: `cross_season_weight=0.25` was adopted for the 5 ADOPTED_CATEGORIES
+    (dreb/ast/tov/stl/blk) after clearing its own holdout check, but OREB's identical lever showed a
+    real regression on its own separate holdout check (`run_oreb_cross_season_holdout_check.py`,
+    Sec34) and was NOT adopted. `add_team_stat_ratings`'s per-category `DEFAULT_CROSS_SEASON_WEIGHTS`
+    must give oreb 0.0 (unchanged full reset) while giving every ADOPTED_CATEGORIES label
+    `CROSS_SEASON_WEIGHT_STAT` -- confirms a uniform-default mistake can't silently re-apply the
+    rejected OREB config just because it shares this function's per-category loop."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "X", "opponent": "Y",
+         "is_home": True, **{f"{label}_for": 10.0 for label in STAT_COLUMNS}, **{f"{label}_against": 8.0 for label in STAT_COLUMNS}},
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "Y", "opponent": "X",
+         "is_home": False, **{f"{label}_for": 8.0 for label in STAT_COLUMNS}, **{f"{label}_against": 10.0 for label in STAT_COLUMNS}},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2021-01-05"), "season": 2021, "team": "X", "opponent": "Y",
+         "is_home": False, **{f"{label}_for": 9.0 for label in STAT_COLUMNS}, **{f"{label}_against": 9.0 for label in STAT_COLUMNS}},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2021-01-05"), "season": 2021, "team": "Y", "opponent": "X",
+         "is_home": True, **{f"{label}_for": 9.0 for label in STAT_COLUMNS}, **{f"{label}_against": 9.0 for label in STAT_COLUMNS}},
+    ])
+    default_out = add_team_stat_ratings(log.copy())
+    oreb_reset_out = add_team_stat_ratings(log.copy(), cross_season_weight=0.0)
+    adopted_out = add_team_stat_ratings(log.copy(), cross_season_weight=CROSS_SEASON_WEIGHT_STAT)
+
+    check("oreb: default (None) matches the explicit cross_season_weight=0.0 call exactly",
+          (default_out["oreb_attack_rate"].reset_index(drop=True).fillna(-999)
+           == oreb_reset_out["oreb_attack_rate"].reset_index(drop=True).fillna(-999)).all())
+    for label in ADOPTED_CATEGORIES:
+        check(f"{label}: default (None) matches the explicit cross_season_weight={CROSS_SEASON_WEIGHT_STAT} call exactly",
+              (default_out[f"{label}_attack_rate"].reset_index(drop=True).fillna(-999)
+               == adopted_out[f"{label}_attack_rate"].reset_index(drop=True).fillna(-999)).all())
 
 
 def test_matchup_delta_application_direction_suppresses_points_boosts_tov():
@@ -1328,6 +1360,7 @@ if __name__ == "__main__":
     test_team_level_adaptive_league_average_default_preserving_and_responsive()
     test_prop_distribution_variance_floor_is_player_scale_not_team_scale()
     test_add_team_ratings_new_prior_games_params_default_preserving()
+    test_add_team_stat_ratings_oreb_excluded_from_uniform_cross_season_adoption()
     test_matchup_delta_application_direction_suppresses_points_boosts_tov()
     test_anchor_preserving_missing_does_not_mask_genuinely_missing_players()
     test_latest_snapshot_carries_forward_across_ewma_season_reset()
