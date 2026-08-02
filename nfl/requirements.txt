@@ -1,4 +1,13 @@
-nfl_data_py==0.3.3
+# nfl_data_py==0.3.3 is deliberately NOT listed here -- its own published
+# metadata pins numpy<2.0,pandas<2.0, which conflicts with this project's
+# numpy==2.5.1/pandas==3.0.3 (both actually work fine together in practice;
+# nfl_data_py's pin is simply stale). A plain `pip install -r
+# requirements.txt` in a truly fresh environment would hit
+# ResolutionImpossible on this (confirmed 2026-08-02, surfaced by a Railway
+# deploy's clean-room build after this had silently worked locally for
+# months on an incrementally-built venv that never re-resolved it).
+# Install nfl_data_py separately, BEFORE this file, with --no-deps:
+#   pip install --no-deps nfl_data_py==0.3.3 && pip install -r requirements.txt
 pandas==3.0.3
 numpy==2.5.1
 scikit-learn==1.9.0

@@ -10,8 +10,15 @@
 # UTC as a placeholder; re-check against the actual current DST offset
 # when this is actually deployed.
 
+# buildCommand override needed because requirements.txt deliberately
+# excludes nfl_data_py (see its own comment there) -- installed separately
+# here with --no-deps to avoid a real ResolutionImpossible pip error
+# (nfl_data_py's published numpy<2.0/pandas<2.0 pins are stale; this
+# combo is confirmed working in practice, just not pip-resolvable as one
+# flat install).
 [build]
 builder = "NIXPACKS"
+buildCommand = "pip install --no-deps nfl_data_py==0.3.3 && pip install -r requirements.txt"
 
 [deploy]
 startCommand = "python -m src.pipeline.weekly_update && python -m src.pipeline.export_to_site_db"
