@@ -22,7 +22,7 @@ OPENERS = {
     },
     "nba": {
         "kickoff_utc": "2026-10-20T23:30:00+00:00",  # estimated Tue Oct 20, ~7:30pm ET
-        "label": "Opening night (estimated -- full schedule not yet released)",
+        "label": "Opening night",
         "confirmed": False,
     },
 }
