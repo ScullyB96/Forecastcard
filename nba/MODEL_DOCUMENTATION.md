@@ -2799,3 +2799,52 @@ didn't survive adoption), this diagnostic itself is too weak to justify building
 correction on top of it. Not pursued further -- no dev/holdout sweep spent, consistent with this
 project's discipline of checking a lever's premise cheaply before spending real validation effort
 on it (same reasoning applied to the 3PT detrend-retrend lever in Sec31).
+
+## 40. Multiple-comparisons robustness check on this session's adopted wins (2026-08-01)
+
+The audit's own validation-methodology critique flagged multiple-comparisons correction as an
+unaddressed risk: this session ran roughly 9 independent one-time confirmatory holdout reads as
+adoption gates, each at the standard 95% CI (per-test alpha=0.05). With that many tests, a
+family-wise Bonferroni correction would use a much stricter per-test alpha = 0.05/9 = 0.00556 (a
+99.444% CI) to hold the true family-wise false-positive rate at 5%. `check_multiple_comparisons_correction.py`
+re-examines every ADOPTED holdout comparison at that stricter interval (already-rejected candidates
+don't need re-checking -- they failed the looser bar already). This spends no new holdout read: the
+holdout data was already read once per adoption decision; recomputing a stricter percentile from a
+fresh resample of the SAME already-observed holdout predictions is a stricter lens on an existing
+result, not a new confirmatory look.
+
+**A real confound found and fixed along the way**: the joint-margin-fix re-check initially showed
+margin_mae NOT surviving (delta shrank from the original -0.0194 to just -0.0055) -- but this was an
+artifact, not a real finding. `run_joint_margin_fix_holdout_check.py`'s own fitting function doesn't
+override `cross_season_weight`/`own_halflife_games`, so re-running it now silently applies the
+LATER-adopted Sec33/36 levers to BOTH the candidate and current arms equally, artificially narrowing
+the gap between them (since those later levers independently also improve margin_mae). Fixed by
+explicitly pinning `cross_season_weight=0.0, own_halflife_games=None` on both arms to faithfully
+reproduce Sec29's original isolated test conditions -- after the fix, the delta exactly matches the
+original -0.0194.
+
+**Final result, all 3 Phase 1 wins and all 4 checked own_halflife team_stat_rates categories
+robustly survive**:
+
+| lever | metric | delta | survives Bonferroni? |
+|---|---|---|---|
+| Phase1 joint margin fix | total_mae / margin_mae | -0.2605 / -0.0194 | YES / YES |
+| Phase1 cross_season_weight | total_mae / margin_mae | -0.0799 / -0.0793 | YES / YES |
+| Phase1 own_halflife_games | total_mae / margin_mae | -0.0499 / -0.0412 | YES / YES |
+| team_stat cross_season_weight [dreb] | mae | -0.0162 | YES |
+| team_stat cross_season_weight [tov] | mae | -0.0160 | YES |
+| team_stat cross_season_weight [stl] | mae | -0.0047 | **NO** |
+| team_stat cross_season_weight [blk] | mae | -0.0041 | **NO** |
+| team_stat own_halflife_games [dreb/tov/stl/blk] | mae | all real | YES (all 4) |
+
+**Interpretation**: every Phase 1 lever and every `own_halflife_games` team_stat_rates category
+holds up even under a conservative family-wise correction -- these are the most robust findings of
+the session. `cross_season_weight`'s stl/blk results were already the weakest of that group's 4
+real-improvement findings at the standard 95% bar (deltas an order of magnitude smaller than
+dreb/tov's), and don't clear the much stricter Bonferroni threshold -- their point estimates are
+still directionally an improvement (not reversed to a regression), just not statistically
+distinguishable from zero under this conservative a correction. Not a reason to revert them (they
+passed their own two-stage dev screen plus a real 95% holdout gate, and Bonferroni is a
+deliberately conservative worst-case bound, not the project's adoption standard) -- but honestly
+flagged here as the least statistically robust of this session's adopted changes, should a future
+pass want to revisit them specifically.
