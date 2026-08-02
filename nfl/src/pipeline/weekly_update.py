@@ -190,7 +190,18 @@ if __name__ == "__main__":
         reg_sched.sort_values(["season", "week"]).groupby("home_team").last()["roof"]
         .isin(["dome", "closed"]).astype(float).to_dict()
     )
-    layer1_full = pd.read_parquet(DATA_PROCESSED / "layer1_games_with_ratings.parquet")
+    # `rated` (built two lines above via the exact same PowerRatingEngine
+    # walk-forward this file also uses) already carries everything the
+    # totals-calibration step below needs -- home_score/away_score/game_id
+    # from build_dataset's schedule merge, pregame_total_signal from
+    # run_walk_forward. Previously this re-read a `layer1_games_with_
+    # ratings.parquet` file that's only ever written by ratings.py's own
+    # standalone `__main__` block -- a file that never existed on a fresh
+    # Railway deploy (nothing here calls ratings.py), which crashed every
+    # real run with a FileNotFoundError. Reusing the in-memory frame
+    # removes that phantom dependency entirely instead of requiring a
+    # separate manual bootstrap step.
+    layer1_full = rated.copy()
     layer1_full["actual_total"] = layer1_full["home_score"] + layer1_full["away_score"]
     roof_lookup = reg_sched[["game_id", "roof"]].assign(is_indoor=lambda d: d["roof"].isin(["dome", "closed"]).astype(float))
     layer1_full = layer1_full.merge(roof_lookup[["game_id", "is_indoor"]], on="game_id", how="left")
