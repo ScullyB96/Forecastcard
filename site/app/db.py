@@ -30,10 +30,25 @@ def latest_slate_key(sport: str) -> str | None:
     every route show "whatever the latest run produced" without the site
     needing its own per-sport notion of "today"/"this week" (NFL's
     "{season}-wk{week}" slate_key isn't a date, so a generic date-based
-    default wouldn't work for it anyway)."""
+    default wouldn't work for it anyway).
+
+    Only considers slates with at least one real game row. A dual-run
+    cron can create a `runs` row for tomorrow (the night-before pass)
+    hours before that day's schedule/lineups are confirmed and real
+    games get exported -- without this filter, the site would default to
+    that still-empty slate the moment its run_at became the newest,
+    which is exactly the "predictions are gone" symptom this project's
+    timezone fix was built to eliminate."""
     with _cursor() as cur:
         cur.execute(
-            "SELECT slate_key FROM runs WHERE sport = %s ORDER BY run_at DESC LIMIT 1", (sport,)
+            """
+            SELECT r.slate_key FROM runs r
+            WHERE r.sport = %s AND EXISTS (
+                SELECT 1 FROM games g WHERE g.sport = r.sport AND g.slate_key = r.slate_key
+            )
+            ORDER BY r.run_at DESC LIMIT 1
+            """,
+            (sport,),
         )
         row = cur.fetchone()
         return row["slate_key"] if row else None
@@ -64,15 +79,27 @@ def props_for_game(sport: str, slate_key: str, game_id: str) -> list[dict]:
 
 
 def slate_keys_for_sport(sport: str) -> list[str]:
-    """Every slate_key with a real run for this sport, newest first --
-    powers the history/browse dropdown on the sport page. Every past
-    date's games/props rows already persist forever (slate_key is part of
-    each table's primary key, so a new date's export can only ever
-    collide with rows sharing that same slate_key) -- this just needs to
-    enumerate which ones exist."""
+    """Every slate_key with a real run AND at least one real game for
+    this sport, newest first -- powers the history/browse picker on the
+    sport page. Every past date's games/props rows already persist
+    forever (slate_key is part of each table's primary key, so a new
+    date's export can only ever collide with rows sharing that same
+    slate_key) -- this just needs to enumerate which ones exist.
+
+    Excludes a slate the pipeline has touched but not yet populated
+    (e.g. tomorrow's night-before run before schedule/lineups post) --
+    not a real, browsable slate yet, so it shouldn't appear as a pickable
+    option until an actual export lands."""
     with _cursor() as cur:
         cur.execute(
-            "SELECT slate_key FROM runs WHERE sport = %s ORDER BY run_at DESC", (sport,)
+            """
+            SELECT r.slate_key FROM runs r
+            WHERE r.sport = %s AND EXISTS (
+                SELECT 1 FROM games g WHERE g.sport = r.sport AND g.slate_key = r.slate_key
+            )
+            ORDER BY r.run_at DESC
+            """,
+            (sport,),
         )
         return [r["slate_key"] for r in cur.fetchall()]
 

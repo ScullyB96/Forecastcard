@@ -4,15 +4,26 @@
 {% block title %}{{ sport|upper }} Predictions{% endblock %}
 {% block content %}
 <h1>{{ sport|upper }}</h1>
-{% if available_slates %}
-  <select class="slate-picker" onchange="if (this.value) window.location = '/{{ sport }}/' + this.value;">
-    {% for s in available_slates %}
-    <option value="{{ s }}" {{ 'selected' if s == slate_key }}>{{ s }}</option>
-    {% endfor %}
-  </select>
+{% if slate_options %}
+  <div class="date-nav">
+    {% if prev_slate %}
+    <a class="date-nav-arrow" href="/{{ sport }}/{{ prev_slate }}" aria-label="Previous slate">‹</a>
+    {% else %}
+    <span class="date-nav-arrow disabled" aria-hidden="true">‹</span>
+    {% endif %}
+    <select class="slate-picker" onchange="if (this.value) window.location = '/{{ sport }}/' + this.value;">
+      {% for opt in slate_options %}
+      <option value="{{ opt.key }}" {{ 'selected' if opt.key == slate_key }}>{{ opt.label }}</option>
+      {% endfor %}
+    </select>
+    {% if next_slate %}
+    <a class="date-nav-arrow" href="/{{ sport }}/{{ next_slate }}" aria-label="Next slate">›</a>
+    {% else %}
+    <span class="date-nav-arrow disabled" aria-hidden="true">›</span>
+    {% endif %}
+  </div>
 {% endif %}
 {% if slate_key %}
-  <p class="slate-meta">slate {{ slate_key }}</p>
   {% if not is_latest %}
   <div class="past-slate-banner">Viewing a past slate -- <a href="/{{ sport }}">view latest</a></div>
   {% endif %}

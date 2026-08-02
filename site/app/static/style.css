@@ -180,15 +180,39 @@ h2 {
   flex-shrink: 0;
 }
 
-.slate-picker {
-  display: block;
+.date-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   margin-bottom: var(--sp-3);
+}
+
+.date-nav-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 1.15rem;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+.date-nav-arrow:hover { color: var(--text); border-color: var(--border-strong); background: var(--panel-2); }
+.date-nav-arrow.disabled { color: var(--text-faint); opacity: 0.35; pointer-events: none; }
+
+.slate-picker {
   padding: var(--sp-1) var(--sp-3);
   border-radius: var(--radius-pill);
   background: var(--panel);
   border: 1px solid var(--border);
   color: var(--text);
   font-size: 0.85rem;
+  font-weight: 600;
   font-family: var(--font-body);
   cursor: pointer;
 }

@@ -160,6 +160,16 @@ def home(request: Request):
     })
 
 
+def _slate_label(slate_key: str) -> str:
+    """Human-readable date-picker label ('Sun, Aug 2') for a date-shaped
+    slate_key; falls back to the raw key unchanged for sports whose
+    slate_key isn't a date (e.g. NFL's "{season}-wk{week}")."""
+    try:
+        return datetime.strptime(slate_key, "%Y-%m-%d").strftime("%a, %b %-d")
+    except ValueError:
+        return slate_key
+
+
 def _render_sport(request: Request, sport: str, slate_key: str | None):
     if sport not in db.SPORTS:
         return RedirectResponse(url="/")
@@ -167,11 +177,28 @@ def _render_sport(request: Request, sport: str, slate_key: str | None):
     props_by_game_id = _props_by_game_id(sport, slate_key, games) if slate_key else {}
     run = db.run_for_slate(sport, slate_key) if slate_key else None
     latest = db.latest_slate_key(sport)
+
+    # available_slates is newest-first -- prev/next are neighbors in that
+    # list (the nearest slate with real data), not calendar-adjacent
+    # dates, since off days and not-yet-generated dates shouldn't produce
+    # a dead link. Mirrors the "<< prev / next >>" pattern real slate-
+    # based sites (e.g. Ballpark Pal) use for browsing by date.
+    available_slates = db.slate_keys_for_sport(sport)
+    prev_slate = next_slate = None
+    if slate_key in available_slates:
+        idx = available_slates.index(slate_key)
+        if idx + 1 < len(available_slates):
+            prev_slate = available_slates[idx + 1]
+        if idx > 0:
+            next_slate = available_slates[idx - 1]
+
     return templates.TemplateResponse(request, "sport.html", {
         "sports": db.SPORTS, "active_sport": sport, "sport": sport,
         "slate_key": slate_key, "games": games, "props_by_game_id": props_by_game_id,
         "opener": OPENERS.get(sport), "run": run,
-        "available_slates": db.slate_keys_for_sport(sport),
+        "available_slates": available_slates,
+        "slate_options": [{"key": s, "label": _slate_label(s)} for s in available_slates],
+        "prev_slate": prev_slate, "next_slate": next_slate,
         "is_latest": slate_key == latest,
     })
 
