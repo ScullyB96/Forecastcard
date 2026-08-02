@@ -12,6 +12,9 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "python -m src.pipeline.generate_daily_props && python -m src.pipeline.export_to_site_db"
-cronSchedule = "0 14 * * *"
-restartPolicyType = "NEVER"
+# TEMPORARY (2026-08-02): forcing a one-off real run for 2026-08-02
+# specifically, since Railway's own cron would only ever run for
+# "today"/"tomorrow" -- revert to the plain startCommand + restore
+# cronSchedule once this run is confirmed live on the site.
+startCommand = "python -m src.pipeline.generate_daily_props 2026-08-02 && python -m src.pipeline.export_to_site_db 2026-08-02"
+restartPolicyType = "ON_FAILURE"
