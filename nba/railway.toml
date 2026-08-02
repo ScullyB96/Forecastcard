@@ -10,14 +10,30 @@
 # refresh (schedule/box scores/PBP/tracking/rosters/matchups/defensive/
 # stints, ~1300 games) completed cleanly end-to-end for the first time.
 #
-# 10:00 ET = 14:00 UTC during EDT (Mar-Nov) or 15:00 UTC during EST
-# (Nov-Mar) -- picked 14:00 UTC as a placeholder; re-check against the
-# actual current DST offset when this is actually deployed.
+# DUAL-RUN (2026-08-02): fires twice a day so tomorrow's slate is ready the
+# moment the site's displayed day flips at midnight Eastern, not hours
+# later once the morning cron happens to run. One cronSchedule, comma-
+# separated hours, no second Railway service needed:
+#   01:00 UTC = ~9pm ET the night before (EDT) -- populates tomorrow's slate.
+#   14:00 UTC = ~10am ET same day (EDT) -- refreshes it (unchanged timing).
+# src/utils/tz.py's default_slate_date() picks the right target
+# automatically based on the real Eastern hour at the moment each one
+# fires -- no mode flag or second command needed. Also fixes a real
+# UTC-vs-Eastern day-boundary bug this same helper was built to close
+# (MLB's identical version of this bug is the one that actually surfaced
+# live -- this service's plain `date.today()` default was only ever
+# correct by coincidence of sharing that same 14:00 UTC hour, not because
+# it was actually timezone-aware).
+#
+# DST caveat (documented, not solved): the literal UTC values above are
+# EDT-accurate; during EST months (Nov-Mar, squarely within the NBA
+# season) each fires one Eastern hour earlier than intended -- a known,
+# lower-severity gap, not attempted here.
 
 [build]
 builder = "NIXPACKS"
 
 [deploy]
 startCommand = "python -m src.pipeline.generate_predictions && python -m src.pipeline.generate_props && python -m src.pipeline.export_to_site_db"
-cronSchedule = "0 14 * * *"
+cronSchedule = "0 1,14 * * *"
 restartPolicyType = "NEVER"

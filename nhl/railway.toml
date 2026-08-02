@@ -1,13 +1,28 @@
 # Railway service config for the NHL daily worker (cron).
 # Root directory for this service in the Railway dashboard: nhl/
 #
-# 10:00 ET = 14:00 UTC during EDT (Mar-Nov) or 15:00 UTC during EST
-# (Nov-Mar) -- picked 14:00 UTC as a placeholder; re-check against the
-# actual current DST offset when this is actually deployed.
+# FIXED (2026-08-02): this service previously had NO cronSchedule set at
+# all -- a real config gap left over from an earlier live-test round,
+# meaning it never actually ran on any recurring schedule. Now DUAL-RUN,
+# matching mlb/nba: fires twice a day so tomorrow's slate is ready the
+# moment the site's displayed day flips at midnight Eastern, not hours
+# later once a single morning cron happens to run. One cronSchedule,
+# comma-separated hours, no second Railway service needed:
+#   01:00 UTC = ~9pm ET the night before (EDT) -- populates tomorrow's slate.
+#   14:00 UTC = ~10am ET same day (EDT) -- refreshes it.
+# src/utils/tz.py's default_slate_date() picks the right target
+# automatically based on the real Eastern hour at the moment each one
+# fires -- no mode flag or second command needed.
+#
+# DST caveat (documented, not solved): the literal UTC values above are
+# EDT-accurate; during EST months (Nov-Mar, squarely within the NHL
+# season) each fires one Eastern hour earlier than intended -- a known,
+# lower-severity gap, not attempted here.
 
 [build]
 builder = "NIXPACKS"
 
 [deploy]
 startCommand = "python -m src.pipeline.generate_predictions && python -m src.pipeline.export_to_site_db"
-restartPolicyType = "ON_FAILURE"
+cronSchedule = "0 1,14 * * *"
+restartPolicyType = "NEVER"
