@@ -694,37 +694,65 @@ h2 {
 
 /* ---------- login ---------- */
 
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+}
+.login-brand {
+  display: block;
+  margin-bottom: var(--sp-4);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: 0.01em;
+  color: var(--text-dim);
+}
 .login-box {
+  width: 100%;
   max-width: 320px;
-  margin: var(--sp-7) auto;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-card);
-  padding: var(--sp-5);
+  padding: var(--sp-6) var(--sp-5);
+}
+.login-box h1 {
+  margin: 0 0 var(--sp-4);
+  font-size: 1.5rem;
 }
 .login-box input {
   width: 100%;
-  padding: var(--sp-2);
+  padding: var(--sp-3);
   margin: var(--sp-2) 0 var(--sp-4);
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
+  font-size: var(--fs-body);
+  transition: border-color 150ms ease;
+}
+.login-box input:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 .login-box button {
   width: 100%;
-  padding: 0.55rem;
-  border-radius: 6px;
+  padding: 0.65rem;
+  border-radius: 8px;
   border: none;
   background: var(--accent);
   color: #000;
   font-weight: 700;
+  font-size: var(--fs-body);
   cursor: pointer;
-  transition: background 150ms ease;
+  transition: background 150ms ease, transform 150ms ease;
 }
 .login-box button:hover { background: var(--accent-2); }
-.login-error { color: var(--lose); font-size: 0.85rem; }
+.login-box button:active { transform: scale(0.98); }
+.login-error { margin: 0 0 var(--sp-3); color: var(--lose); font-size: 0.85rem; }
 
 @media (prefers-color-scheme: light) {
   :root {
