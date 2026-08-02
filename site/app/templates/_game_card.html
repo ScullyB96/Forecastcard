@@ -108,6 +108,12 @@
     <span>proj {{ game.home_team }} {{ '%.1f'|format(game.projected_home_score) }}</span>
   </div>
   {% endif %}
+  {% if game.confidence %}
+  <div class="confidence-pill confidence-{{ game.confidence.tier }}"
+       title="{{ game.confidence.reasons|join('; ') if game.confidence.reasons else 'Confirmed lineups, real weather, full player history' }}">
+    <span class="confidence-dot"></span>{{ game.confidence.tier|capitalize }} confidence
+  </div>
+  {% endif %}
   {% set grouped = props_by_game_id.get(game.game_id) %}
   {% if grouped and grouped.total %}
   {{ top_props_row(grouped.top_props) }}

@@ -141,6 +141,64 @@ def login_submit(request: Request, password: str = Form(...), next: str = Form("
     return templates.TemplateResponse(request, "login.html", {"next": next, "error": True}, status_code=401)
 
 
+
+# Labels for the lineup_source values MLB's export already tags per side
+# (src/pipeline/generate_daily_props.py's lineup_for_game(): "real" > "rotowire"
+# > "projected", in that priority order). Other sports don't set this key
+# yet, so .get() below just skips the penalty rather than erroring.
+LINEUP_SOURCE_LABEL = {
+    "real": "confirmed lineup",
+    "rotowire": "Rotowire-projected lineup",
+    "projected": "model-projected lineup (no real lineup posted yet)",
+}
+LINEUP_SOURCE_PENALTY = {"real": 0, "rotowire": 1, "projected": 2}
+
+
+def _confidence_for_game(game: dict) -> dict | None:
+    """Data-quality confidence for one game, built entirely from flags the
+    pipeline already exports in `extra` -- no new pipeline work, no schema
+    change. This is deliberately NOT model conviction (the win probability
+    already reflects that): it answers "how solid is the input data this
+    prediction was built on," which today is implicit (you'd have to know
+    to distrust a projected lineup) and this makes explicit. Returns None
+    when a sport hasn't tagged any of these fields (nothing to score)."""
+    extra = game.get("extra") or {}
+    if not any(k in extra for k in ("home_lineup_source", "away_lineup_source", "real_weather", "used_debut_fallback")):
+        return None
+
+    score = 10
+    reasons = []
+    for side in ("home", "away"):
+        source = extra.get(f"{side}_lineup_source")
+        penalty = LINEUP_SOURCE_PENALTY.get(source, 0)
+        if penalty:
+            score -= penalty
+            reasons.append(f"{side.capitalize()} lineup: {LINEUP_SOURCE_LABEL[source]}")
+    if extra.get("real_weather") is False:
+        score -= 1
+        reasons.append("Weather is forecast/climatological, not a real observation yet")
+    if extra.get("used_debut_fallback"):
+        score -= 1
+        reasons.append("A player in this game has no MLB history yet (debut fallback used)")
+    score = max(score, 0)
+
+    if score >= 10:
+        tier = "confirmed"
+    elif score >= 8:
+        tier = "high"
+    elif score >= 6:
+        tier = "medium"
+    else:
+        tier = "low"
+    return {"score": score, "tier": tier, "reasons": reasons}
+
+
+def _with_confidence(games: list[dict]) -> list[dict]:
+    for g in games:
+        g["confidence"] = _confidence_for_game(g)
+    return games
+
+
 @app.get("/")
 def home(request: Request):
     slate_keys = {s: db.latest_slate_key(s) for s in db.SPORTS}
@@ -149,7 +207,7 @@ def home(request: Request):
     for sport, slate_key in slate_keys.items():
         if not slate_key:
             continue
-        games = db.games_for_slate(sport, slate_key)
+        games = _with_confidence(db.games_for_slate(sport, slate_key))
         games_by_sport[sport] = games
         props_by_sport[sport] = _props_by_game_id(sport, slate_key, games)
     runs_by_sport = {r["sport"]: r for r in db.latest_runs()}
@@ -173,7 +231,7 @@ def _slate_label(slate_key: str) -> str:
 def _render_sport(request: Request, sport: str, slate_key: str | None):
     if sport not in db.SPORTS:
         return RedirectResponse(url="/")
-    games = db.games_for_slate(sport, slate_key) if slate_key else []
+    games = _with_confidence(db.games_for_slate(sport, slate_key)) if slate_key else []
     props_by_game_id = _props_by_game_id(sport, slate_key, games) if slate_key else {}
     run = db.run_for_slate(sport, slate_key) if slate_key else None
     latest = db.latest_slate_key(sport)
