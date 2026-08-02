@@ -1,16 +1,14 @@
 # Railway service config for the NBA daily worker (cron).
 # Root directory for this service in the Railway dashboard: nba/
 #
-# PAUSED (2026-08-02): a real live test from this exact container confirmed
-# stats.nba.com silently black-holes requests from Railway's egress IP range
-# (TCP connects fine, HTTP response never arrives -- a datacenter-IP-reputation
-# block, not a transient timeout or a header/UA issue; general internet and
-# even plain www.nba.com both work fine from the same container). No amount
-# of retrying/backoff fixes an IP-level block, so this service is deliberately
-# left with no cronSchedule and restartPolicyType=NEVER until a real fix
-# lands (proxy/residential egress, or an alternate data source) -- see
-# conversation history for the fix options considered. Re-add cronSchedule
-# (matching mlb/nhl's "0 14 * * *" pattern) once that's resolved.
+# RESOLVED (2026-08-02): stats.nba.com was silently black-holing requests
+# from Railway's egress IP range at TWO independent layers -- an IP-reputation
+# block (fixed by routing through a Webshare residential proxy, see
+# NBA_STATS_PROXY_URL) AND a TLS/HTTP fingerprint block (plain `requests`'s
+# handshake doesn't look like a real browser's; fixed via curl_cffi's Chrome
+# impersonation, see src/utils/nba_proxy.py). Confirmed live: a full data
+# refresh (schedule/box scores/PBP/tracking/rosters/matchups/defensive/
+# stints, ~1300 games) completed cleanly end-to-end for the first time.
 #
 # 10:00 ET = 14:00 UTC during EDT (Mar-Nov) or 15:00 UTC during EST
 # (Nov-Mar) -- picked 14:00 UTC as a placeholder; re-check against the
@@ -21,4 +19,5 @@ builder = "NIXPACKS"
 
 [deploy]
 startCommand = "python -m src.pipeline.generate_predictions && python -m src.pipeline.generate_props && python -m src.pipeline.export_to_site_db"
+cronSchedule = "0 14 * * *"
 restartPolicyType = "NEVER"
