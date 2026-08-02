@@ -44,8 +44,65 @@ def _relative_time(dt: datetime) -> str:
 templates.env.filters["relative_time"] = _relative_time
 
 
-def _props_by_game_id(sport: str, slate_key: str, games: list[dict]) -> dict[str, list[dict]]:
-    return {g["game_id"]: db.props_for_game(sport, slate_key, g["game_id"]) for g in games}
+# Preferred on-page order for known markets (mirrors each sport's own
+# BATTER_MARKETS/PITCHER_MARKETS-style constants) -- anything not listed
+# falls back to alphabetical after these, so a market this list doesn't
+# know about yet (a new sport, a new stat) still renders instead of
+# erroring, just without a curated position.
+MARKET_ORDER = [
+    "1+ HR", "2+ Hits", "1+ Hit", "Total Bases", "1+ RBI", "1+ BB", "Hits", "Batter Strikeouts",
+    "6+ K", "Strikeouts", "Walks Allowed", "Hits Allowed", "Runs Allowed", "Batters Faced",
+]
+_MARKET_RANK = {m: i for i, m in enumerate(MARKET_ORDER)}
+
+# extra.role is only set by MLB's export today (NFL/NBA/NHL props have no
+# role key) -- ROLE_LABELS.get(None) below falls back to a generic "Props"
+# section so those sports still render sensibly, just without a batter/
+# pitcher split they don't have data for.
+ROLE_LABELS = {"batter": "Batters", "pitcher": "Pitchers"}
+
+
+def _prop_confidence(p: dict) -> float:
+    """Sort key so the most notable prop leads each market group --
+    highest probability first, or highest projection for mean-only
+    markets -- instead of the old alphabetical-by-player ordering."""
+    if p.get("over_prob") is not None:
+        return p["over_prob"]
+    if p.get("proj_mean") is not None:
+        return p["proj_mean"]
+    return 0.0
+
+
+def _group_props(rows: list[dict]) -> dict:
+    """Turn one game's flat prop list into role -> market sections, each
+    sorted by descending confidence. Replaces a single 300+ row
+    alphabetical dump with the category-first layout real sportsbook
+    sites use (pick a market, see who's most likely first)."""
+    by_role: dict[str | None, dict[str, list[dict]]] = {}
+    for p in rows:
+        role = (p.get("extra") or {}).get("role")
+        by_role.setdefault(role, {}).setdefault(p["market"], []).append(p)
+
+    sections = []
+    for role in sorted(by_role, key=lambda r: (r is None, r != "batter")):
+        markets = by_role[role]
+        market_names = sorted(markets, key=lambda m: (_MARKET_RANK.get(m, len(MARKET_ORDER)), m))
+        sections.append({
+            "role": role,
+            "label": ROLE_LABELS.get(role, "Props"),
+            "markets": [
+                {"market": m, "rows": sorted(markets[m], key=_prop_confidence, reverse=True)}
+                for m in market_names
+            ],
+        })
+    return {"total": len(rows), "sections": sections}
+
+
+def _props_by_game_id(sport: str, slate_key: str, games: list[dict]) -> dict[str, dict]:
+    return {
+        g["game_id"]: _group_props(db.props_for_game(sport, slate_key, g["game_id"]))
+        for g in games
+    }
 
 
 @app.get("/healthz")

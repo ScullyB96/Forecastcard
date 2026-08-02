@@ -21,21 +21,16 @@
 {% macro prop_row(p) %}
 {% if p.line is not none %}
 <div class="prop-row prop-row--ou">
-  <div class="prop-who">
-    <div class="prop-player">{{ p.player_name }}{% if p.team %} · {{ p.team }}{% endif %}</div>
-    <div class="prop-market">{{ p.market }} {{ p.line }}</div>
-  </div>
+  <div class="prop-player">{{ p.player_name }}{% if p.team %} · {{ p.team }}{% endif %}</div>
   <div class="prop-value">
+    <span class="prop-line-val">{{ p.line }}</span>
     {% if p.over_prob is not none %}<span class="prop-pill over">O {{ (p.over_prob * 100)|round }}%</span>{% endif %}
     {% if p.under_prob is not none %}<span class="prop-pill under">U {{ (p.under_prob * 100)|round }}%</span>{% endif %}
   </div>
 </div>
 {% else %}
 <div class="prop-row prop-row--single">
-  <div class="prop-who">
-    <div class="prop-player">{{ p.player_name }}{% if p.team %} · {{ p.team }}{% endif %}</div>
-    <div class="prop-market">{{ p.market }}</div>
-  </div>
+  <div class="prop-player">{{ p.player_name }}{% if p.team %} · {{ p.team }}{% endif %}</div>
   <div class="prop-value">
     {%- if p.over_prob is not none -%}
       <span class="prop-pill single">{{ (p.over_prob * 100)|round }}%</span>
@@ -47,6 +42,26 @@
   </div>
 </div>
 {% endif %}
+{% endmacro %}
+
+{% macro prop_panel(grouped) %}
+<div class="prop-panel">
+  {% for sec in grouped.sections %}
+  <div class="prop-role-section">
+    {% if grouped.sections|length > 1 %}<h4 class="prop-role-title">{{ sec.label }}</h4>{% endif %}
+    {% for grp in sec.markets %}
+    <div class="prop-market-group">
+      <div class="prop-market-title">{{ grp.market }} <span class="prop-market-count">{{ grp.rows|length }}</span></div>
+      <div class="prop-list">
+        {% for p in grp.rows %}
+          {{ prop_row(p) }}
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
 {% endmacro %}
 
 {% macro game_card(game, props_by_game_id, sport) %}
@@ -65,15 +80,11 @@
     <span>proj {{ game.home_team }} {{ '%.1f'|format(game.projected_home_score) }}</span>
   </div>
   {% endif %}
-  {% set props = props_by_game_id.get(game.game_id, []) %}
-  {% if props %}
+  {% set grouped = props_by_game_id.get(game.game_id) %}
+  {% if grouped and grouped.total %}
   <details class="props-toggle">
-    <summary>{{ props|length }} prop{{ 's' if props|length != 1 }}</summary>
-    <div class="prop-list">
-      {% for p in props %}
-        {{ prop_row(p) }}
-      {% endfor %}
-    </div>
+    <summary>{{ grouped.total }} prop{{ 's' if grouped.total != 1 }}</summary>
+    {{ prop_panel(grouped) }}
   </details>
   {% endif %}
 </div>

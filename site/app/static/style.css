@@ -393,8 +393,50 @@ h2 {
 .props-toggle[open] summary::after { transform: rotate(180deg); }
 .props-toggle summary:hover { color: var(--text); border-color: var(--border-strong); }
 
-.prop-list {
+.prop-panel {
   margin-top: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.prop-role-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.prop-role-title {
+  margin: 0;
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-label);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.prop-market-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.prop-market-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-1);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.prop-market-count {
+  font-size: var(--fs-meta);
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.prop-list {
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -412,21 +454,13 @@ h2 {
   background: var(--panel-2);
 }
 
-.prop-who {
-  min-width: 0;
-}
 .prop-player {
+  min-width: 0;
   font-size: 0.85rem;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.prop-market {
-  font-size: var(--fs-meta);
-  color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .prop-value {
@@ -434,6 +468,13 @@ h2 {
   align-items: center;
   gap: var(--sp-2);
   flex-shrink: 0;
+}
+
+.prop-line-val {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-dim);
 }
 
 .prop-line {

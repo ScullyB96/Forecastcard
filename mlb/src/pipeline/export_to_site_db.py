@@ -25,9 +25,12 @@ import pandas as pd
 import psycopg2
 import psycopg2.extras
 import pybaseball as pb
+import requests
 
 from src.utils.paths import DATA_PROCESSED
 from src.utils.tz import default_slate_date
+
+MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 SPORT = "mlb"
 
@@ -66,10 +69,27 @@ GAME_EXTRA_COLUMNS = [
 ]
 
 
+def _statsapi_name(player_id: int) -> str | None:
+    """Live MLB Stats API lookup for one player -- fallback for ids the
+    Chadwick register hasn't caught up with yet (e.g. very recent debuts).
+    Only called for the handful of ids the bulk lookup below misses, so one
+    request per id per day is negligible. Returns None on any failure
+    (network, 404, unexpected shape) so the caller can fall back further
+    rather than the whole export erroring."""
+    try:
+        resp = requests.get(f"{MLB_API_BASE}/people/{player_id}", timeout=5)
+        resp.raise_for_status()
+        people = resp.json().get("people", [])
+        return people[0]["fullName"] if people else None
+    except Exception:
+        return None
+
+
 def _player_names(player_ids: list[int]) -> dict[int, str]:
     """MLBAM id -> "First Last" via pybaseball's Chadwick register lookup
-    (cached locally after first call). Falls back to the id itself for any
-    id the register doesn't resolve (e.g. very recent debuts) rather than
+    (cached locally after first call), with a live MLB Stats API fallback
+    for anything the register doesn't resolve (e.g. very recent debuts) --
+    falls back to the id itself only if that also fails, rather than
     failing the whole export."""
     if not player_ids:
         return {}
@@ -78,6 +98,11 @@ def _player_names(player_ids: list[int]) -> dict[int, str]:
         int(row.key_mlbam): f"{row.name_first.title()} {row.name_last.title()}"
         for row in lookup.itertuples()
     }
+    unresolved = [pid for pid in player_ids if pid not in names]
+    for pid in unresolved:
+        name = _statsapi_name(pid)
+        if name:
+            names[pid] = name
     return {pid: names.get(pid, str(pid)) for pid in player_ids}
 
 
