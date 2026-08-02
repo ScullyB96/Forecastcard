@@ -2941,3 +2941,40 @@ This tool is now available for screening future candidates too -- a genuinely pr
 should show this same pattern (no season regressing) before ever spending the one-time holdout
 read, one more filter ahead of Stage 1/Stage 2, never a replacement for the confirmatory-veto
 protocol itself.
+
+## 43. Block/cluster bootstrap infrastructure (2026-08-02)
+
+The audit's remaining validation-methodology lever: `bootstrap_compare`'s standard paired bootstrap
+resamples individual GAMES with replacement, implicitly assuming every game is an independent draw.
+That's not quite right if a team's residuals are serially correlated across its own consecutive
+games (e.g. a systematic rating mispricing that persists for a few games before the walk-forward fit
+catches up) -- a naive per-row bootstrap would understate the true sampling variability in that case,
+inflating apparent significance. Earlier in this session this was set aside as awkward for per-GAME
+rows (each game has two teams, no single block to resample by) -- revisited using the per-TEAM-SIDE
+"arms" format already used throughout this project's own validation scripts (one row per team per
+game, via a home/away split), which resolves that ambiguity cleanly: each row unambiguously belongs
+to exactly one team, so a team-level block/cluster bootstrap is straightforward.
+
+**New function**: `bootstrap_significance.block_bootstrap_compare(per_row_a, per_row_b, row_id_col,
+block_col, metrics, ...)` -- resamples whole BLOCKS (e.g. team, or team-season) with replacement
+instead of individual rows; a block drawn by a resample contributes every one of its rows together,
+preserving whatever real within-block correlation exists instead of assuming it away.
+
+**Regression-tested with synthetic data demonstrating exactly the failure mode this exists to
+catch**: 20 blocks x 20 rows, each block given its own random "delta bias" shared by every row in
+that block (so within-block deltas are correlated), but the TRUE average delta across all 20 blocks
+is exactly 0 by construction. The naive per-row bootstrap (treating 400 rows as 400 independent
+draws) is FOOLED -- shows a spurious "REAL IMPROVEMENT" verdict purely from how the 20 random block
+biases happened to average. The block bootstrap on the SAME data correctly shows NOISE, with a CI
+more than 2x wider, correctly reflecting only 20 independent blocks of information rather than 400
+independent rows. A second test confirms it isn't just unconditionally more conservative: with no
+block correlation and a genuine, sizeable true effect, it still correctly detects REAL IMPROVEMENT.
+
+**Applied to the flagship result**: re-checked the full 3-lever adopted Phase 1 config against the
+original pre-session baseline, team-clustered (block_col="team", only 30 blocks -- one per team
+across the ENTIRE 9-season dev range, about as conservative a clustering as reasonably justified).
+Result: total_mae delta -0.2323, 95% CI (-0.2654, -0.2001), REAL IMPROVEMENT; margin_mae delta
+-0.0790, 95% CI (-0.0927, -0.0663), REAL IMPROVEMENT. Both metrics clear even this much more
+conservative bar comfortably -- a fourth independent validation lens (after the full-dev aggregate,
+the per-season dev rolling window, and the per-season holdout check) confirming these wins are not
+an artifact of any particular resampling assumption.

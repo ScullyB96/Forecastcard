@@ -16,7 +16,7 @@ from src.ingest.build_stints import _get_starters, _normalize_name, _prep_pbp_ti
 from src.ingest.fetch_schedule import season_for_date
 from src.ingest.player_name_crosswalk import _build_name_index
 from src.pipeline.active_roster import build_team_history, resolve_active_lineup
-from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, bootstrap_compare
+from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, block_bootstrap_compare, bootstrap_compare
 from src.models.rolling_window_backtest import rolling_window_report, summarize_rolling_report
 from src.models.garbage_time import add_garbage_time_weight
 from src.models.home_court import _baseline_log_ratios
@@ -1251,6 +1251,79 @@ def test_rolling_window_report_isolates_per_season_and_excludes_first_season_by_
           f"got improvement={summary['n_real_improvement']}, noise={summary['n_noise']}")
 
 
+def test_block_bootstrap_correctly_widens_ci_for_within_block_correlated_deltas():
+    """`bootstrap_significance.block_bootstrap_compare` (2026-08-02, the audit's flagged
+    block/cluster-bootstrap validation-methodology lever): a plain per-row bootstrap assumes every
+    row is an independent draw, which is wrong when rows share a within-block correlated component
+    (e.g. a team's own residuals correlated across its own games) -- this can produce a FALSE
+    POSITIVE "real" verdict from a purely spurious block-level pattern that has nothing to do with
+    the true, zero, average effect. Synthetic data (fixed seed, 20 blocks x 20 rows): each block gets
+    its own random `block_delta_bias` added to arm A relative to arm B (so within a block, every
+    row's delta shares that bias -- correlated, not independent), but the TRUE average delta across
+    all 20 blocks is exactly 0 by construction (bias is drawn from a zero-mean distribution and
+    independent per block). A naive per-row bootstrap (treating 400 rows as 400 independent draws)
+    should falsely detect a "real" effect here purely from thin luck in how the 20 block biases
+    happened to average; a properly block-clustered bootstrap (which only has 20 independent blocks
+    of information, not 400) should correctly show NOISE and produce a wider CI."""
+    rng = np.random.default_rng(42)
+    n_blocks, rows_per_block = 20, 20
+    rows = []
+    for b in range(n_blocks):
+        block_delta_bias = rng.normal(0, 1.5)
+        for r in range(rows_per_block):
+            row_id = f"{b}_{r}"
+            val_b = 10.0 + rng.normal(0, 0.5)
+            val_a = val_b + block_delta_bias + rng.normal(0, 0.2)
+            rows.append({"row_id": row_id, "block": b, "val_a": val_a, "val_b": val_b})
+    df = pd.DataFrame(rows)
+    per_row_a = df[["row_id", "block", "val_a"]].rename(columns={"val_a": "val"})
+    per_row_b = df[["row_id", "val_b"]].rename(columns={"val_b": "val"})
+
+    metrics = [{"name": "val", "col": "val", "higher_is_better": False}]
+    naive = bootstrap_compare(per_row_a[["row_id", "val"]], per_row_b, game_id_col="row_id",
+                               metrics=metrics, n_bootstrap=2000)
+    blocked = block_bootstrap_compare(per_row_a, per_row_b, row_id_col="row_id", block_col="block",
+                                       metrics=metrics, n_bootstrap=2000)
+
+    naive_width = naive["val"]["delta_ci95"][1] - naive["val"]["delta_ci95"][0]
+    blocked_width = blocked["val"]["delta_ci95"][1] - blocked["val"]["delta_ci95"][0]
+    check("naive per-row bootstrap is fooled: shows a REAL verdict despite a zero true effect "
+          "(the false positive this function exists to catch)",
+          "REAL" in naive["val"]["verdict"], f"got {naive['val']['verdict']}")
+    check("block bootstrap correctly shows NOISE for the same data (zero true effect)",
+          "NOISE" in blocked["val"]["verdict"], f"got {blocked['val']['verdict']}")
+    check("block bootstrap's CI is meaningfully WIDER, correctly reflecting only 20 independent "
+          "blocks of information rather than 400 independent rows",
+          blocked_width > naive_width * 2, f"naive width={naive_width}, blocked width={blocked_width}")
+    check("block_bootstrap_compare reports the correct block count", blocked["n_blocks"] == n_blocks,
+          f"got {blocked['n_blocks']}")
+
+
+def test_block_bootstrap_still_detects_a_real_effect_with_no_block_correlation():
+    """Sanity check that `block_bootstrap_compare` isn't just unconditionally more conservative --
+    with NO within-block correlation (every row's delta is independent noise) and a genuine, sizeable
+    true average difference, it must still correctly detect a REAL IMPROVEMENT, not default to NOISE
+    just because it's the block-aware variant."""
+    rng = np.random.default_rng(7)
+    n_blocks, rows_per_block = 20, 20
+    rows = []
+    for b in range(n_blocks):
+        for r in range(rows_per_block):
+            row_id = f"{b}_{r}"
+            val_b = 10.0 + rng.normal(0, 0.5)
+            val_a = val_b - 1.0 + rng.normal(0, 0.5)  # genuine, sizeable true improvement, no block bias
+            rows.append({"row_id": row_id, "block": b, "val_a": val_a, "val_b": val_b})
+    df = pd.DataFrame(rows)
+    per_row_a = df[["row_id", "block", "val_a"]].rename(columns={"val_a": "val"})
+    per_row_b = df[["row_id", "val_b"]].rename(columns={"val_b": "val"})
+
+    result = block_bootstrap_compare(per_row_a, per_row_b, row_id_col="row_id", block_col="block",
+                                      metrics=[{"name": "val", "col": "val", "higher_is_better": False}],
+                                      n_bootstrap=2000)
+    check("a genuine, sizeable true effect is still detected as REAL IMPROVEMENT under block bootstrap",
+          "REAL IMPROVEMENT" in result["val"]["verdict"], f"got {result['val']['verdict']}")
+
+
 def test_generate_props_before_filter_excludes_on_and_after_date():
     """`generate_props._before` (2026-08-01) is the fix for the real bug
     found via a 2025-01-15 spot-check: a star player's trailing-minutes
@@ -1520,6 +1593,8 @@ if __name__ == "__main__":
     test_season_for_date_resolves_purely_from_calendar()
     test_current_nba_season_falls_back_when_newest_candidate_fails_entirely()
     test_rolling_window_report_isolates_per_season_and_excludes_first_season_by_default()
+    test_block_bootstrap_correctly_widens_ci_for_within_block_correlated_deltas()
+    test_block_bootstrap_still_detects_a_real_effect_with_no_block_correlation()
     test_generate_props_before_filter_excludes_on_and_after_date()
     test_team_history_season_filter_excludes_prior_season_games()
     test_team_stat_game_log_for_against_symmetry()
