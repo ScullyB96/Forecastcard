@@ -31,6 +31,11 @@ BASE_URL = "https://api-web.nhle.com/v1/schedule"
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 REQUEST_DELAY_SECONDS = 0.2
+SCHEDULE_COLUMNS = [
+    "gameId", "season", "gameType", "gameDate", "startTimeUTC", "gameState",
+    "venue", "lastPeriodType", "awayTeamId", "awayTeamAbbrev", "awayScore",
+    "homeTeamId", "homeTeamAbbrev", "homeScore",
+]
 
 
 def _fetch_week(date: str) -> dict:
@@ -79,6 +84,16 @@ def fetch_schedule_range(start_date: str, end_date: str) -> pd.DataFrame:
         if not next_date:
             break
         current = next_date
+    # task #164 (2026-08-02): a date window with zero scheduled games (e.g. a
+    # deep off-season day) leaves all_rows empty -- pd.DataFrame({}.values())
+    # produces a columnless frame, which crashes sort_values(["gameDate", ...])
+    # with a real KeyError. Only hit in production via games_on_date's
+    # single-day query during the off-season; the multi-week historical
+    # backfill window is never empty. Same schema either way so callers
+    # (e.g. games_on_date's `week["gameDate"] == game_date` filter) don't
+    # need to special-case an empty result.
+    if not all_rows:
+        return pd.DataFrame(columns=SCHEDULE_COLUMNS)
     return pd.DataFrame(all_rows.values()).sort_values(["gameDate", "gameId"]).reset_index(drop=True)
 
 
