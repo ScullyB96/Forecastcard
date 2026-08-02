@@ -1,21 +1,64 @@
-{% macro game_card(game, props_by_game_id, sport) %}
-<div class="game-card">
-  <div class="matchup">
-    {% if game.home_win_prob is not none and game.home_win_prob >= 0.5 %}
-      {{ game.away_team }} @ <span class="fav">{{ game.home_team }}</span>
-    {% elif game.away_win_prob is not none and game.away_win_prob > 0.5 %}
-      <span class="fav">{{ game.away_team }}</span> @ {{ game.home_team }}
-    {% else %}
-      {{ game.away_team }} @ {{ game.home_team }}
-    {% endif %}
+{% macro team_row(sport, abbrev, win_prob, is_favorite, has_data) %}
+{% set meta = team_info(sport, abbrev) %}
+<div class="team-row{% if has_data %}{{ ' is-favorite' if is_favorite else ' is-underdog' }}{% endif %}">
+  <div class="team-id">
+    <span class="team-logo-wrap">
+      {% if meta.espn_slug %}
+      <img class="team-logo" alt="{{ meta.display_name }}"
+           src="https://a.espncdn.com/i/teamlogos/{{ sport }}/500/{{ meta.espn_slug }}.png"
+           onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+      {% endif %}
+      <span class="team-logo-fallback" style="{{ 'display:none;' if meta.espn_slug else 'display:flex;' }}background:{{ meta.primary }};">{{ abbrev }}</span>
+    </span>
+    <span class="team-name">{{ meta.display_name }}</span>
   </div>
-  {% if game.home_win_prob is not none %}
-  <div class="win-prob-bar"><span style="width: {{ (game.home_win_prob * 100)|round(1) }}%"></span></div>
-  <div class="score-row">
-    <span>{{ game.away_team }} win% {{ (game.away_win_prob * 100)|round(1) if game.away_win_prob is not none else '—' }}</span>
-    <span>{{ game.home_team }} win% {{ (game.home_win_prob * 100)|round(1) }}</span>
-  </div>
+  {% if has_data %}
+  <span class="team-winprob">{{ (win_prob * 100)|round(1) }}%</span>
   {% endif %}
+</div>
+{% endmacro %}
+
+{% macro prop_row(p) %}
+{% if p.line is not none %}
+<div class="prop-row prop-row--ou">
+  <div class="prop-who">
+    <div class="prop-player">{{ p.player_name }}{% if p.team %} · {{ p.team }}{% endif %}</div>
+    <div class="prop-market">{{ p.market }} {{ p.line }}</div>
+  </div>
+  <div class="prop-value">
+    {% if p.over_prob is not none %}<span class="prop-pill over">O {{ (p.over_prob * 100)|round }}%</span>{% endif %}
+    {% if p.under_prob is not none %}<span class="prop-pill under">U {{ (p.under_prob * 100)|round }}%</span>{% endif %}
+  </div>
+</div>
+{% else %}
+<div class="prop-row prop-row--single">
+  <div class="prop-who">
+    <div class="prop-player">{{ p.player_name }}{% if p.team %} · {{ p.team }}{% endif %}</div>
+    <div class="prop-market">{{ p.market }}</div>
+  </div>
+  <div class="prop-value">
+    {%- if p.over_prob is not none -%}
+      <span class="prop-pill single">{{ (p.over_prob * 100)|round }}%</span>
+    {%- elif p.proj_mean is not none -%}
+      <span class="prop-line">{{ '%.2f'|format(p.proj_mean) }}</span>
+    {%- else -%}
+      <span class="prop-pill">—</span>
+    {%- endif -%}
+  </div>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro game_card(game, props_by_game_id, sport) %}
+{% set has_data = game.home_win_prob is not none %}
+{% set home_is_fav = has_data and game.home_win_prob >= 0.5 %}
+{% set away_is_fav = has_data and not home_is_fav and game.away_win_prob is not none and game.away_win_prob > 0.5 %}
+<div class="game-card">
+  {{ team_row(sport, game.away_team, game.away_win_prob, away_is_fav, has_data) }}
+  {% if has_data %}
+  <div class="win-prob-bar"><span style="width: {{ (game.home_win_prob * 100)|round(1) }}%"></span></div>
+  {% endif %}
+  {{ team_row(sport, game.home_team, game.home_win_prob, home_is_fav, has_data) }}
   {% if game.projected_home_score is not none %}
   <div class="score-row">
     <span>proj {{ game.away_team }} {{ '%.1f'|format(game.projected_away_score) }}</span>
@@ -26,26 +69,11 @@
   {% if props %}
   <details class="props-toggle">
     <summary>{{ props|length }} prop{{ 's' if props|length != 1 }}</summary>
-    <table class="props-table">
-      <thead><tr><th>Player</th><th>Market</th><th>Proj</th></tr></thead>
-      <tbody>
-        {% for p in props %}
-        <tr>
-          <td>{{ p.player_name }}{% if p.team %} ({{ p.team }}){% endif %}</td>
-          <td>{{ p.market }}</td>
-          <td>
-            {%- if p.proj_mean is not none -%}
-              {{ '%.2f'|format(p.proj_mean) }}
-            {%- elif p.over_prob is not none -%}
-              {{ (p.over_prob * 100)|round(1) }}%
-            {%- else -%}
-              —
-            {%- endif -%}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <div class="prop-list">
+      {% for p in props %}
+        {{ prop_row(p) }}
+      {% endfor %}
+    </div>
   </details>
   {% endif %}
 </div>
