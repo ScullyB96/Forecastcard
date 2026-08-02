@@ -241,6 +241,9 @@ def _slate_label(slate_key: str) -> str:
         return slate_key
 
 
+templates.env.filters["slate_label"] = _slate_label
+
+
 def _render_sport(request: Request, sport: str, slate_key: str | None):
     if sport not in db.SPORTS:
         return RedirectResponse(url="/")

@@ -238,6 +238,17 @@ h2 {
 .past-slate-banner a { text-decoration: underline; }
 
 .sport-section { margin-bottom: var(--sp-7); }
+.sport-section-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.sport-section-date {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
 .sport-badge {
   display: inline-block;
   padding: 0.15rem 0.6rem;
@@ -246,7 +257,6 @@ h2 {
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  margin-bottom: var(--sp-2);
 }
 .sport-badge.mlb { background: color-mix(in srgb, var(--mlb) 22%, transparent); color: color-mix(in srgb, var(--mlb) 70%, white); }
 .sport-badge.nfl { background: color-mix(in srgb, var(--nfl) 22%, transparent); color: color-mix(in srgb, var(--nfl) 70%, white); }
