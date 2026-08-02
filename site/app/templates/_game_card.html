@@ -44,13 +44,41 @@
 {% endif %}
 {% endmacro %}
 
+{% macro top_props_row(top_props) %}
+{% if top_props %}
+<div class="top-props">
+  <span class="top-props-label">Top plays</span>
+  {% for p in top_props %}
+  <span class="top-props-chip">
+    <span class="top-props-name">{{ p.player_name }}</span>
+    <span class="top-props-market">{{ p.market }}</span>
+    <span class="top-props-value">
+      {%- if p.over_prob is not none -%}{{ (p.over_prob * 100)|round }}%
+      {%- elif p.proj_mean is not none -%}{{ '%.2f'|format(p.proj_mean) }}
+      {%- else -%}—
+      {%- endif -%}
+    </span>
+  </span>
+  {% endfor %}
+</div>
+{% endif %}
+{% endmacro %}
+
 {% macro prop_panel(grouped) %}
 <div class="prop-panel">
+  {% if grouped.chips|length > 1 %}
+  <div class="prop-filter-bar">
+    <button type="button" class="prop-filter-chip active" data-market="all">All</button>
+    {% for c in grouped.chips %}
+    <button type="button" class="prop-filter-chip" data-market="{{ c.market }}">{{ c.market }} <span class="prop-filter-count">{{ c.count }}</span></button>
+    {% endfor %}
+  </div>
+  {% endif %}
   {% for sec in grouped.sections %}
-  <div class="prop-role-section">
+  <div class="prop-role-section" data-role-section>
     {% if grouped.sections|length > 1 %}<h4 class="prop-role-title">{{ sec.label }}</h4>{% endif %}
     {% for grp in sec.markets %}
-    <div class="prop-market-group">
+    <div class="prop-market-group" data-market="{{ grp.market }}">
       <div class="prop-market-title">{{ grp.market }} <span class="prop-market-count">{{ grp.rows|length }}</span></div>
       <div class="prop-list">
         {% for p in grp.rows %}
@@ -82,6 +110,7 @@
   {% endif %}
   {% set grouped = props_by_game_id.get(game.game_id) %}
   {% if grouped and grouped.total %}
+  {{ top_props_row(grouped.top_props) }}
   <details class="props-toggle">
     <summary>{{ grouped.total }} prop{{ 's' if grouped.total != 1 }}</summary>
     {{ prop_panel(grouped) }}

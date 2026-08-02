@@ -77,25 +77,37 @@ def _group_props(rows: list[dict]) -> dict:
     """Turn one game's flat prop list into role -> market sections, each
     sorted by descending confidence. Replaces a single 300+ row
     alphabetical dump with the category-first layout real sportsbook
-    sites use (pick a market, see who's most likely first)."""
+    sites use (pick a market, see who's most likely first).
+
+    Also returns `chips` (a flat, ordered list of every market + its row
+    count, for a clickable filter-chip bar -- the same "pick one category"
+    pattern Action Network's prop tables use) and `top_props` (the 3
+    highest-confidence rows across the whole game, any market, so a card
+    has real headline content visible without expanding anything)."""
     by_role: dict[str | None, dict[str, list[dict]]] = {}
     for p in rows:
         role = (p.get("extra") or {}).get("role")
         by_role.setdefault(role, {}).setdefault(p["market"], []).append(p)
 
     sections = []
+    chips = []
     for role in sorted(by_role, key=lambda r: (r is None, r != "batter")):
         markets = by_role[role]
         market_names = sorted(markets, key=lambda m: (_MARKET_RANK.get(m, len(MARKET_ORDER)), m))
-        sections.append({
-            "role": role,
-            "label": ROLE_LABELS.get(role, "Props"),
-            "markets": [
-                {"market": m, "rows": sorted(markets[m], key=_prop_confidence, reverse=True)}
-                for m in market_names
-            ],
-        })
-    return {"total": len(rows), "sections": sections}
+        market_groups = [
+            {"market": m, "rows": sorted(markets[m], key=_prop_confidence, reverse=True)}
+            for m in market_names
+        ]
+        sections.append({"role": role, "label": ROLE_LABELS.get(role, "Props"), "markets": market_groups})
+        chips.extend({"market": g["market"], "count": len(g["rows"])} for g in market_groups)
+
+    # Only probability-type rows are comparable on one scale (0-1) --
+    # mixing in proj_mean rows (e.g. "7.2 projected strikeouts") would let
+    # a raw counting-stat number outrank a genuine 70%+ probability just
+    # because 7.2 > 0.70, which isn't a real confidence comparison.
+    prob_rows = [p for p in rows if p.get("over_prob") is not None]
+    top_props = sorted(prob_rows, key=_prop_confidence, reverse=True)[:3]
+    return {"total": len(rows), "sections": sections, "chips": chips, "top_props": top_props}
 
 
 def _props_by_game_id(sport: str, slate_key: str, games: list[dict]) -> dict[str, dict]:

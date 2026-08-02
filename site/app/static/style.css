@@ -8,8 +8,8 @@
   --text: #f2f4f7;
   --text-dim: #8b93a3;
   --text-faint: #5a6274;
-  --accent: #e8b93f;
-  --accent-2: #f4d67a;
+  --accent: #4ba3e3;
+  --accent-2: #8ecdf5;
   --favorite: #f2f4f7;
   --underdog: #6b7280;
   --mlb: #b7333f;
@@ -362,6 +362,44 @@ h2 {
   padding-top: var(--sp-1);
 }
 
+/* ---------- top plays (always visible, no expand needed) ---------- */
+
+.top-props {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px dashed var(--border);
+}
+.top-props-label {
+  font-size: var(--fs-meta);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.top-props-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.2rem var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-2));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  font-size: 0.78rem;
+}
+.top-props-name { font-weight: 600; color: var(--text); }
+.top-props-market { color: var(--text-faint); font-size: var(--fs-meta); }
+.top-props-value {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--accent-2);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- props ---------- */
 
 .props-toggle {
@@ -399,6 +437,37 @@ h2 {
   flex-direction: column;
   gap: var(--sp-4);
 }
+
+.prop-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-1);
+}
+.prop-filter-chip {
+  font-family: var(--font-body);
+  padding: 0.25rem var(--sp-3);
+  border-radius: var(--radius-pill);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+.prop-filter-chip:hover { color: var(--text); border-color: var(--border-strong); }
+.prop-filter-chip.active {
+  /* fixed near-black text regardless of theme -- var(--bg) text against
+     the accent background fails contrast in light mode (~2.6:1, below
+     WCAG AA's 4.5:1); black holds ~4.9:1 against the light-mode accent
+     and ~7.6:1 against the dark-mode one, since --accent itself is a
+     different shade per theme (see the light-mode override below). */
+  color: #000;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.prop-filter-count { opacity: 0.7; font-weight: 500; }
 
 .prop-role-section {
   display: flex;
@@ -532,7 +601,7 @@ h2 {
   border-radius: 6px;
   border: none;
   background: var(--accent);
-  color: #17130a;
+  color: #000;
   font-weight: 700;
   cursor: pointer;
   transition: background 150ms ease;
@@ -552,6 +621,11 @@ h2 {
     --text-dim: #5b6472;
     --text-faint: #838c99;
     --favorite: #14161b;
+    /* Darker than the dark-theme accent pair -- the same hue tuned for a
+       near-black panel reads as near-invisible on a white one (measured
+       ~1.7:1 contrast, well under WCAG AA's 4.5:1 for text). */
+    --accent: #1f7dd1;
+    --accent-2: #0f5fa3;
   }
 }
 
