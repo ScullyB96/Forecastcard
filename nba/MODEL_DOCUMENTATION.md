@@ -2777,3 +2777,25 @@ consistent across both, with 2024's total_mae simply not reaching significance a
 smaller per-season sample size. No code change from this check -- purely a confirmatory read on
 already-adopted configurations, addressing a real methodological risk the audit raised rather than
 leaving it unverified.
+
+## 39. Opponent-familiarity/rematch effects: diagnostic checked, negligible -- not pursued
+
+An untried domain-signal lever from the audit: does knowing the outcome of an earlier meeting
+between the same two teams THIS season carry residual signal for a rematch, beyond what Phase 1's
+walk-forward ratings already capture (each team's rating already reflects everything learned from
+that earlier meeting)? Quick walk-forward-safe diagnostic: for every rematch game (6,827 of 10,737
+dev games have at least one prior meeting that season), computed `prior_meeting_margin` (the
+earlier game's actual margin, sign-normalized to the CURRENT home team's perspective) and checked
+its correlation with the CURRENT game's residual (actual - predicted margin).
+
+**Result: r=-0.0250 (p=0.0385)** -- nominally significant at n=6,827, but the effect size is
+negligible (explains roughly 0.06% of residual variance) and the p-value is borderline given how
+many candidate levers have been checked this session (the audit's own multiple-comparisons concern
+applies directly here). For comparison, `prior_meeting_margin`'s raw correlation with the CURRENT
+game's actual margin is r=0.169 (p=9.8e-45) -- confirming the ratings model already absorbs nearly
+all of the real information a prior meeting carries; almost nothing distinctive is left in the
+residual. Unlike the B2B adjustment (Sec32, a genuinely strong diagnostic at p=8.0e-7 that still
+didn't survive adoption), this diagnostic itself is too weak to justify building and testing a
+correction on top of it. Not pursued further -- no dev/holdout sweep spent, consistent with this
+project's discipline of checking a lever's premise cheaply before spending real validation effort
+on it (same reasoning applied to the 3PT detrend-retrend lever in Sec31).
