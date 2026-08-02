@@ -99,6 +99,32 @@ h2 { font-size: 1.15rem; margin: 2rem 0 0.75rem; color: var(--text-dim); font-we
   gap: 0.75rem;
 }
 
+.opener-countdown {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.opener-timer {
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  margin: 0 0 0.4rem;
+}
+
+.opener-label {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.opener-unconfirmed {
+  font-style: italic;
+}
+
 .game-card {
   background: var(--panel);
   border: 1px solid var(--panel-border);

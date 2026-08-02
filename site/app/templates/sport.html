@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% import "_game_card.html" as cards %}
+{% import "_countdown.html" as opener_ui %}
 {% block title %}{{ sport|upper }} Predictions{% endblock %}
 {% block content %}
 <h1>{{ sport|upper }}</h1>
@@ -12,6 +13,8 @@
       <p class="empty-state">No games in this slate.</p>
     {% endfor %}
   </div>
+{% elif opener %}
+  {{ opener_ui.countdown(opener) }}
 {% else %}
   <p class="empty-state">No runs yet for {{ sport|upper }}.</p>
 {% endif %}

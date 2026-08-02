@@ -1,0 +1,9 @@
+{% macro countdown(opener) %}
+<div class="opener-countdown">
+  <p class="opener-timer" data-countdown="{{ opener.kickoff_utc }}">--</p>
+  <p class="opener-label">
+    {{ opener.label }}
+    {% if not opener.confirmed %}<span class="opener-unconfirmed">(estimated -- schedule not yet released)</span>{% endif %}
+  </p>
+</div>
+{% endmacro %}

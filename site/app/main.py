@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from app import db
 from app.access import AccessGateMiddleware, make_session_cookie_value, site_password
+from app.season_openers import OPENERS
 
 app = FastAPI()
 app.add_middleware(AccessGateMiddleware)
@@ -61,6 +62,7 @@ def home(request: Request):
     return templates.TemplateResponse(request, "index.html", {
         "sports": db.SPORTS, "slate_keys": slate_keys,
         "games_by_sport": games_by_sport, "props_by_sport": props_by_sport,
+        "openers": OPENERS,
     })
 
 
@@ -74,4 +76,5 @@ def sport_page(request: Request, sport: str):
     return templates.TemplateResponse(request, "sport.html", {
         "sports": db.SPORTS, "active_sport": sport, "sport": sport,
         "slate_key": slate_key, "games": games, "props_by_game_id": props_by_game_id,
+        "opener": OPENERS.get(sport),
     })
