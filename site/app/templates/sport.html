@@ -6,6 +6,7 @@
 <h1>{{ sport|upper }}</h1>
 {% if slate_key %}
   <p class="slate-meta">slate {{ slate_key }}</p>
+  {% if run %}<div class="run-status" title="{{ run.status }}{{ ': ' + run.notes if run.notes }}">Updated {{ run.run_at|relative_time }}</div>{% endif %}
   <div class="game-grid">
     {% for game in games %}
       {{ cards.game_card(game, props_by_game_id, sport) }}
