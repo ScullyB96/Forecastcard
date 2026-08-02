@@ -289,5 +289,7 @@ def run(game_date: str) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
+    from src.utils.nba_proxy import configure_proxy
+    configure_proxy()
     target_date = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
     run(target_date)
