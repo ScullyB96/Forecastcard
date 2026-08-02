@@ -179,6 +179,13 @@ h2 {
   background: var(--win);
   flex-shrink: 0;
 }
+.run-status--stale {
+  color: var(--lose);
+  border-color: var(--lose);
+}
+.run-status--stale::before {
+  background: var(--lose);
+}
 
 .date-nav {
   display: flex;

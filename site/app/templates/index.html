@@ -13,7 +13,12 @@
   {% set run = runs_by_sport.get(sport) %}
   {% if slate_key %}
     <div class="slate-meta">slate {{ slate_key }}</div>
-    {% if run %}<div class="run-status" title="{{ run.status }}{{ ': ' + run.notes if run.notes }}">Updated {{ run.run_at|relative_time }}</div>{% endif %}
+    {% set stale = run and run.run_at|is_stale %}
+    {% if run %}
+    <div class="run-status{{ ' run-status--stale' if stale }}" title="{{ run.status }}{{ ': ' + run.notes if run.notes }}">
+      Updated {{ run.run_at|relative_time }}{{ ' — showing last available data' if stale }}
+    </div>
+    {% endif %}
     <div class="game-grid">
       {% for game in games_by_sport.get(sport, []) %}
         {{ cards.game_card(game, props_by_sport.get(sport, {}), sport) }}

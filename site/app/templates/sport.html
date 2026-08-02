@@ -27,7 +27,12 @@
   {% if not is_latest %}
   <div class="past-slate-banner">Viewing a past slate -- <a href="/{{ sport }}">view latest</a></div>
   {% endif %}
-  {% if run %}<div class="run-status" title="{{ run.status }}{{ ': ' + run.notes if run.notes }}">Updated {{ run.run_at|relative_time }}</div>{% endif %}
+  {% set stale = is_latest and run and run.run_at|is_stale %}
+  {% if run %}
+  <div class="run-status{{ ' run-status--stale' if stale }}" title="{{ run.status }}{{ ': ' + run.notes if run.notes }}">
+    Updated {{ run.run_at|relative_time }}{{ ' — showing last available data' if stale }}
+  </div>
+  {% endif %}
   <div class="game-grid">
     {% for game in games %}
       {{ cards.game_card(game, props_by_game_id, sport) }}

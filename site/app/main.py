@@ -43,6 +43,19 @@ def _relative_time(dt: datetime) -> str:
 
 templates.env.filters["relative_time"] = _relative_time
 
+STALE_HOURS = 12
+
+
+def _is_stale(dt: datetime) -> bool:
+    """True once a run's data is old enough to warrant a visible warning
+    rather than a neutral timestamp. A single flat threshold, not tied to
+    first-pitch/lock time (that would need a game_time column this schema
+    doesn't have yet) -- reuses the run_at we already track."""
+    return (datetime.now(timezone.utc) - dt).total_seconds() > STALE_HOURS * 3600
+
+
+templates.env.filters["is_stale"] = _is_stale
+
 
 # Preferred on-page order for known markets (mirrors each sport's own
 # BATTER_MARKETS/PITCHER_MARKETS-style constants) -- anything not listed
