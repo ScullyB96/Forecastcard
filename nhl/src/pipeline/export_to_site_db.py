@@ -28,6 +28,7 @@ import psycopg2
 import psycopg2.extras
 
 from src.utils.paths import DATA_PROCESSED
+from src.utils.tz import default_slate_date
 
 SPORT = "nhl"
 
@@ -92,6 +93,6 @@ def export(target_date: str, database_url: str) -> None:
 
 
 if __name__ == "__main__":
-    target_date = sys.argv[1] if len(sys.argv) > 1 else str(_dt.date.today())
+    target_date = sys.argv[1] if len(sys.argv) > 1 else str(default_slate_date())
     database_url = os.environ["DATABASE_URL"]
     export(target_date, database_url)

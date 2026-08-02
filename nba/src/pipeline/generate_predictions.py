@@ -66,6 +66,7 @@ from src.pipeline.active_roster import (
 )
 from src.pipeline.refresh_data import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
+from src.utils.tz import default_slate_date
 
 INCLUDE_LINEUP_ADJUSTMENT = False  # disabled 2026-08-01 -- see module docstring and
 # MODEL_DOCUMENTATION.md Sec28.2: the dev/holdout result that justified adopting this had a real
@@ -291,5 +292,5 @@ def run(game_date: str) -> pd.DataFrame:
 if __name__ == "__main__":
     from src.utils.nba_proxy import configure_proxy
     configure_proxy()
-    target_date = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
+    target_date = sys.argv[1] if len(sys.argv) > 1 else str(default_slate_date())
     run(target_date)

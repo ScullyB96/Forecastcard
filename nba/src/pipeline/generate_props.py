@@ -99,6 +99,7 @@ from src.pipeline.active_roster import build_team_history, games_on_date, load_c
 from src.pipeline.generate_predictions import _fit_latest_player_ratings, run as generate_game_predictions
 from src.pipeline.refresh_data import refresh_all_data
 from src.utils.paths import DATA_PROCESSED
+from src.utils.tz import default_slate_date
 
 TEAM_MINUTES_PER_GAME = 240.0  # 5 players x 48 minutes; OT ignored for a PRE-game projection (see module docstring)
 PRIOR_MINUTES_EXPOSURE_UNIT = 100.0  # expanding-shrinkage prior for the chances/touches-per-minute unit-conversion rates
@@ -674,5 +675,5 @@ def run(game_date: str) -> pd.DataFrame:
 if __name__ == "__main__":
     from src.utils.nba_proxy import configure_proxy
     configure_proxy()
-    target_date = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
+    target_date = sys.argv[1] if len(sys.argv) > 1 else str(default_slate_date())
     run(target_date)

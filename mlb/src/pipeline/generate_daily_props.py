@@ -59,6 +59,7 @@ from src.models.props import build_pregame_context, generate_game_props
 from src.models.validate_game_simulator import predominant_hand
 from src.pipeline.daily_update import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
+from src.utils.tz import eastern_today, default_slate_date
 
 
 POSTSEASON_GAME_TYPES = {"F", "D", "L", "W"}  # wild card, division series, league
@@ -105,7 +106,7 @@ def lineup_for_game(schedule: pd.DataFrame, lineups: pd.DataFrame, pitcher_hand:
 
 
 if __name__ == "__main__":
-    target_date = sys.argv[1] if len(sys.argv) > 1 else str(_dt.date.today() + _dt.timedelta(days=1))
+    target_date = sys.argv[1] if len(sys.argv) > 1 else str(default_slate_date())
     n_trials = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
     season = int(target_date[:4])
     print(f"=== generating props for {target_date} ===", flush=True)
@@ -146,7 +147,7 @@ if __name__ == "__main__":
     # above: a network hiccup here must not break the whole daily run.
     print("fetching recent trades (trade-deadline hardening)...", flush=True)
     try:
-        lookback_start = str(_dt.date.today() - _dt.timedelta(days=TRADE_OVERRIDE_LOOKBACK_DAYS))
+        lookback_start = str(eastern_today() - _dt.timedelta(days=TRADE_OVERRIDE_LOOKBACK_DAYS))
         transactions = fetch_transactions(lookback_start, target_date)
         team_id_to_abbrev = pd.concat([
             schedule[["home_team_id", "home_team"]].rename(columns={"home_team_id": "id", "home_team": "abbrev"}),
@@ -168,8 +169,8 @@ if __name__ == "__main__":
     # NOT break the whole daily run -- caught and treated as "unavailable
     # today," same resilience convention as weather_forecast.py's
     # climatological fallback.
-    today_str = str(_dt.date.today())
-    tomorrow_str = str(_dt.date.today() + _dt.timedelta(days=1))
+    today_str = str(eastern_today())
+    tomorrow_str = str(eastern_today() + _dt.timedelta(days=1))
     rotowire_df = None
     if target_date in (today_str, tomorrow_str):
         rw_date = "today" if target_date == today_str else "tomorrow"

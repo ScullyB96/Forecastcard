@@ -34,6 +34,7 @@ from src.models.predict_game import _global_constants, _load_schedule, predict_g
 from src.models.prediction_log import append_prediction
 from src.pipeline.refresh_data import refresh_all
 from src.utils.paths import DATA_PROCESSED
+from src.utils.tz import default_slate_date
 
 
 def games_on_date(game_date: str) -> pd.DataFrame:
@@ -99,5 +100,5 @@ def run(game_date: str) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    target_date = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
+    target_date = sys.argv[1] if len(sys.argv) > 1 else str(default_slate_date())
     run(target_date)

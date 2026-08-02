@@ -27,6 +27,7 @@ import psycopg2.extras
 import pybaseball as pb
 
 from src.utils.paths import DATA_PROCESSED
+from src.utils.tz import default_slate_date
 
 SPORT = "mlb"
 
@@ -196,6 +197,6 @@ def export(target_date: str, database_url: str) -> None:
 
 
 if __name__ == "__main__":
-    target_date = sys.argv[1] if len(sys.argv) > 1 else str(_dt.date.today() + _dt.timedelta(days=1))
+    target_date = sys.argv[1] if len(sys.argv) > 1 else str(default_slate_date())
     database_url = os.environ["DATABASE_URL"]
     export(target_date, database_url)
