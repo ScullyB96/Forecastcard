@@ -7,6 +7,8 @@ each. Plain assertions, no pytest (matching this project's own
 Run: `python -m tests.test_regression_bugs`
 """
 
+import datetime as _dt_module
+
 import numpy as np
 import pandas as pd
 
@@ -1162,6 +1164,49 @@ def test_season_for_date_resolves_purely_from_calendar():
           season_for_date("2025-08-01") == 2025, f"got {season_for_date('2025-08-01')}")
 
 
+def test_current_nba_season_falls_back_when_newest_candidate_fails_entirely():
+    """REAL BUG FOUND AND FIXED (2026-08-02): confirmed live from a crashed Railway nba-worker --
+    `current_nba_season`'s loop tries the newest candidate year first, then falls back to the prior
+    year, but a hard failure (not just an empty season) fetching the NEWEST candidate used to
+    propagate straight out of the function via an uncaught RuntimeError, so the fallback candidate
+    was never even attempted. Confirmed live: stats.nba.com times out fetching the 2026-27 season
+    (zero real games yet) from Railway's blocked datacenter IP on every retry, crashing the whole
+    worker instead of falling through to 2025-26 (a season with real data). Mocks
+    `_fetch_with_retry` to raise for the newest candidate and succeed for the prior one, confirming
+    the function now returns the FALLBACK year instead of raising."""
+    import src.ingest.fetch_schedule as fetch_schedule_module
+
+    original_fetch = fetch_schedule_module._fetch_with_retry
+    guess_year = _dt_module.date.today().year
+
+    def fake_fetch_with_retry(start_year, season_type):
+        if start_year == guess_year:
+            raise RuntimeError("LeagueGameLog fetch failed after 3 attempts: simulated Railway timeout")
+        return pd.DataFrame({"GAME_ID": ["1"]})  # non-empty: the fallback candidate "has games"
+
+    fetch_schedule_module._fetch_with_retry = fake_fetch_with_retry
+    try:
+        result = fetch_schedule_module.current_nba_season()
+        check("falls back to the prior year when the newest candidate fails entirely (not a crash)",
+              result == guess_year - 1, f"got {result}, expected {guess_year - 1}")
+    finally:
+        fetch_schedule_module._fetch_with_retry = original_fetch
+
+    def fake_fetch_always_fails(start_year, season_type):
+        raise RuntimeError("simulated total outage")
+
+    fetch_schedule_module._fetch_with_retry = fake_fetch_always_fails
+    try:
+        raised = False
+        try:
+            fetch_schedule_module.current_nba_season()
+        except RuntimeError:
+            raised = True
+        check("still raises (doesn't silently return a bogus season) when EVERY candidate fails", raised)
+    finally:
+        fetch_schedule_module._fetch_with_retry = original_fetch
+
+
 def test_generate_props_before_filter_excludes_on_and_after_date():
     """`generate_props._before` (2026-08-01) is the fix for the real bug
     found via a 2025-01-15 spot-check: a star player's trailing-minutes
@@ -1429,6 +1474,7 @@ if __name__ == "__main__":
     test_defender_total_minutes_asof_excludes_future_games()
     test_position_group_expanding_variant_pools_by_team_posgroup()
     test_season_for_date_resolves_purely_from_calendar()
+    test_current_nba_season_falls_back_when_newest_candidate_fails_entirely()
     test_generate_props_before_filter_excludes_on_and_after_date()
     test_team_history_season_filter_excludes_prior_season_games()
     test_team_stat_game_log_for_against_symmetry()

@@ -132,14 +132,36 @@ def current_nba_season() -> int:
     shifted opener). An NBA season labeled "2015-16" is queried as start_year
     2015 regardless of which calendar year today falls in, so the two
     plausible candidates (this calendar year and last) are checked newest
-    first and the first one with any regular-season row wins."""
+    first and the first one with any regular-season row wins.
+
+    REAL BUG FOUND AND FIXED (2026-08-02, confirmed live from the Railway
+    nba-worker crash): a hard failure (not just an empty season) fetching
+    the NEWEST candidate used to propagate straight out of this function --
+    `_fetch_with_retry` raises `RuntimeError` after exhausting its own
+    retries, and that exception was never caught here, so the function
+    crashed before ever trying `guess - 1`, the exact fallback candidate
+    this loop exists for. Confirmed live: querying "2026-27" (a season with
+    zero real games yet) from Railway's blocked datacenter IP times out on
+    every attempt, while the SAME query from an unblocked machine returns an
+    empty frame in under a second -- so the fallback candidate (2025-26,
+    which has real data and might succeed even under the same IP block) was
+    never even attempted. Each candidate's fetch failure is now caught and
+    logged, letting the loop continue to the next candidate; only if EVERY
+    candidate fails do we raise."""
     guess = _dt.date.today().year
+    last_err = None
     for candidate in (guess, guess - 1):
-        df = _fetch_with_retry(candidate, "Regular Season")
+        try:
+            df = _fetch_with_retry(candidate, "Regular Season")
+        except RuntimeError as e:
+            last_err = e
+            print(f"  current_nba_season: candidate {season_str(candidate)} failed entirely ({e}), "
+                  f"trying next candidate...", flush=True)
+            continue
         time.sleep(REQUEST_DELAY_SECONDS)
         if len(df) > 0:
             return candidate
-    raise RuntimeError("could not resolve current NBA season from live schedule")
+    raise RuntimeError(f"could not resolve current NBA season from live schedule (last error: {last_err})")
 
 
 def fetch_all_seasons(end_year: int, force: bool = False) -> dict[int, pd.DataFrame]:

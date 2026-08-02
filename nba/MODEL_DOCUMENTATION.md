@@ -2848,3 +2848,48 @@ passed their own two-stage dev screen plus a real 95% holdout gate, and Bonferro
 deliberately conservative worst-case bound, not the project's adoption standard) -- but honestly
 flagged here as the least statistically robust of this session's adopted changes, should a future
 pass want to revisit them specifically.
+
+## 41. Production incident: nba-worker crashing on every Railway deploy, real bug found and fixed (2026-08-02)
+
+User asked to confirm NBA was live on Railway. It was not: `nba-worker` showed CRASHED on every
+recent deployment, while every sibling service (mlb-worker, nhl-worker, both nfl-workers, web,
+Postgres) showed SUCCESS. Traced via Railway deploy logs to the exact same crash on every attempt:
+
+```
+fetch 2026-27 Regular Season failed (attempt 1-3/3): HTTPSConnectionPool(host='stats.nba.com',
+port=443): Read timed out. (read timeout=30)
+RuntimeError: LeagueGameLog fetch failed after 3 attempts: ...
+  File ".../fetch_schedule.py", line 138, in current_nba_season
+    df = _fetch_with_retry(candidate, "Regular Season")
+```
+
+**Root cause, confirmed two ways at once.** First, a genuine environment difference: querying
+season "2026-27" (a season with zero real games yet, since it's currently the 2026 off-season)
+returned in under a second locally with an empty frame, but times out on every attempt from
+Railway -- consistent with the datacenter-IP block already diagnosed and partially addressed
+earlier this session (`e6da912`, "wire in optional residential-proxy support for stats.nba.com"),
+whose dormant `NBA_STATS_PROXY_URL` mechanism was never actually activated with real credentials.
+Second, and independently: `current_nba_season()`'s own fallback logic never got a chance to run.
+Its loop is supposed to try `guess` (2026) then fall back to `guess - 1` (2025, a season with real
+data that might well succeed even under the same IP block) -- but `_fetch_with_retry` raises a
+`RuntimeError` after exhausting its own retries, and that exception was never caught inside the
+loop, so it propagated straight out of `current_nba_season()` and crashed the whole worker before
+the fallback candidate was ever attempted. This second bug is real regardless of the IP-block
+question: even a genuinely transient timeout on the newest candidate should fall through to the
+prior one, not take down the entire pipeline.
+
+**Fixed**: wrapped each candidate's fetch in a `try`/`except RuntimeError`, logging the failure and
+`continue`-ing to the next candidate; only raises if every candidate fails. Regression-tested via
+`test_current_nba_season_falls_back_when_newest_candidate_fails_entirely` (mocks `_fetch_with_retry`
+to fail for the newest candidate and succeed for the prior one, confirming the function now returns
+the fallback year instead of crashing; a second check confirms it still raises, rather than
+silently returning a bogus season, when EVERY candidate fails).
+
+**Proxy activation**: asked the user directly before touching anything here, since it's adjacent to
+this project's standing "never use a proxy to evade stats.nba.com's rate-limiting" rule -- the
+user's own `e6da912` commit message frames this specifically as a datacenter-IP-block workaround,
+not rate-limit evasion, and the user confirmed wanting to proceed with activation. Signing up for a
+residential-proxy provider and obtaining real credentials is the user's own action (creating
+third-party accounts / entering payment details isn't something this assistant can do); once a real
+`http://user:pass@host:port`-style URL exists, setting it as `NBA_STATS_PROXY_URL` on Railway is a
+regular config change.
