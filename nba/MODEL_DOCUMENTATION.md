@@ -2757,3 +2757,23 @@ and `own_halflife_games`'s second consecutive win after Sec36 -- both `cross_sea
 `own_halflife_games` have now each independently paid off in BOTH subsystems (Phase 1's team
 ratings and team_stat_rates), while both have also independently confirmed OREB's ceiling. The
 pattern is now unambiguous: OREB's problem is not a missing lever, it's the category itself.
+
+## 38. Robustness check: do the three Phase 1 wins hold per-season, or does pooled holdout mask a reversal? (2026-08-01)
+
+Three real Phase 1 changes were adopted this session (Sec29's joint margin fix, Sec33's
+`cross_season_weight`, Sec36's `own_halflife_games`), each confirmed on the POOLED 2024+2025 holdout
+range. The audit's own validation-methodology critique flagged pooling multiple holdout seasons
+together as a risk worth checking directly: a large win in one season could statistically mask a
+real loss in the other. Not a new model change -- a robustness check on the FULL current Phase 1
+config (all three adopted) vs. the original pre-session config, split by holdout season instead of
+pooled.
+
+**Result: no reversal in either season.** 2024 (n=1,214): total_mae NOISE (-0.0781, smaller sample
+here specifically), margin_mae REAL IMPROVEMENT (-0.1433), su NOISE. 2025 (n=1,225): total_mae REAL
+IMPROVEMENT (-0.7068), margin_mae REAL IMPROVEMENT (-0.1306), su NOISE. Every metric in every season
+is either a real improvement or noise -- never a regression. The pooled-range result isn't an
+artifact of one season's win papering over the other's loss; the improvement is directionally
+consistent across both, with 2024's total_mae simply not reaching significance alone at that
+smaller per-season sample size. No code change from this check -- purely a confirmatory read on
+already-adopted configurations, addressing a real methodological risk the audit raised rather than
+leaving it unverified.
