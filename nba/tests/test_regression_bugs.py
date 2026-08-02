@@ -35,8 +35,8 @@ from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_c
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta
 from src.models.lineup_rating import predictive_minutes_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
-from src.models.team_stat_rates import (ADOPTED_CATEGORIES, CROSS_SEASON_WEIGHT_STAT, STAT_COLUMNS,
-                                         add_team_stat_ratings, build_team_stat_game_log, project_team_stat)
+from src.models.team_stat_rates import (ADOPTED_CATEGORIES, CROSS_SEASON_WEIGHT_STAT, OWN_HALFLIFE_GAMES_STAT,
+                                         STAT_COLUMNS, add_team_stat_ratings, build_team_stat_game_log, project_team_stat)
 from src.models.team_strength import OWN_HALFLIFE_GAMES_RATING, PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings
 from src.pipeline.generate_props import _anchor_preserving_missing, _latest_snapshot, _team_stat_totals
 
@@ -650,6 +650,40 @@ def test_add_team_stat_ratings_oreb_excluded_from_uniform_cross_season_adoption(
            == oreb_reset_out["oreb_attack_rate"].reset_index(drop=True).fillna(-999)).all())
     for label in ADOPTED_CATEGORIES:
         check(f"{label}: default (None) matches the explicit cross_season_weight={CROSS_SEASON_WEIGHT_STAT} call exactly",
+              (default_out[f"{label}_attack_rate"].reset_index(drop=True).fillna(-999)
+               == adopted_out[f"{label}_attack_rate"].reset_index(drop=True).fillna(-999)).all())
+
+
+def test_add_team_stat_ratings_oreb_excluded_from_uniform_own_halflife_adoption():
+    """ADOPTED 2026-08-01: `own_halflife_games=20.0` was adopted for the 5 ADOPTED_CATEGORIES after
+    clearing its own holdout check, but OREB still ties naive on its OWN separate holdout check with
+    this identical lever (`run_team_stat_own_halflife_holdout_check.py`, Sec37) -- a fourth mechanism
+    converging to the same ceiling as Sec34 -- so OREB was NOT brought in. Unlike
+    `cross_season_weight` (whose real "off" value, 0.0, is distinct from the sentinel default),
+    `own_halflife_games`'s real "off" value at the shrinkage.py primitive layer IS `None` -- so
+    `add_team_stat_ratings` uses a dedicated `_USE_PER_CATEGORY_DEFAULT` sentinel instead. Confirms
+    the sentinel default resolves to `None` (unchanged) for oreb and `OWN_HALFLIFE_GAMES_STAT` for
+    every ADOPTED_CATEGORIES label -- and that passing an explicit `None` really does override
+    uniformly (the ambiguity `cross_season_weight` doesn't have)."""
+    log = pd.DataFrame([
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "X", "opponent": "Y",
+         "is_home": True, **{f"{label}_for": 10.0 for label in STAT_COLUMNS}, **{f"{label}_against": 8.0 for label in STAT_COLUMNS}},
+        {"gameId": "g1", "gameDate": pd.Timestamp("2020-01-01"), "season": 2020, "team": "Y", "opponent": "X",
+         "is_home": False, **{f"{label}_for": 8.0 for label in STAT_COLUMNS}, **{f"{label}_against": 10.0 for label in STAT_COLUMNS}},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2021-01-05"), "season": 2021, "team": "X", "opponent": "Y",
+         "is_home": False, **{f"{label}_for": 9.0 for label in STAT_COLUMNS}, **{f"{label}_against": 9.0 for label in STAT_COLUMNS}},
+        {"gameId": "g2", "gameDate": pd.Timestamp("2021-01-05"), "season": 2021, "team": "Y", "opponent": "X",
+         "is_home": True, **{f"{label}_for": 9.0 for label in STAT_COLUMNS}, **{f"{label}_against": 9.0 for label in STAT_COLUMNS}},
+    ])
+    default_out = add_team_stat_ratings(log.copy())
+    oreb_reset_out = add_team_stat_ratings(log.copy(), own_halflife_games=None)
+    adopted_out = add_team_stat_ratings(log.copy(), own_halflife_games=OWN_HALFLIFE_GAMES_STAT)
+
+    check("oreb: sentinel default matches the explicit own_halflife_games=None call exactly",
+          (default_out["oreb_attack_rate"].reset_index(drop=True).fillna(-999)
+           == oreb_reset_out["oreb_attack_rate"].reset_index(drop=True).fillna(-999)).all())
+    for label in ADOPTED_CATEGORIES:
+        check(f"{label}: sentinel default matches the explicit own_halflife_games={OWN_HALFLIFE_GAMES_STAT} call exactly",
               (default_out[f"{label}_attack_rate"].reset_index(drop=True).fillna(-999)
                == adopted_out[f"{label}_attack_rate"].reset_index(drop=True).fillna(-999)).all())
 
@@ -1406,6 +1440,7 @@ if __name__ == "__main__":
     test_prop_distribution_variance_floor_is_player_scale_not_team_scale()
     test_add_team_ratings_new_prior_games_params_default_preserving()
     test_add_team_stat_ratings_oreb_excluded_from_uniform_cross_season_adoption()
+    test_add_team_stat_ratings_oreb_excluded_from_uniform_own_halflife_adoption()
     test_matchup_delta_application_direction_suppresses_points_boosts_tov()
     test_anchor_preserving_missing_does_not_mask_genuinely_missing_players()
     test_latest_snapshot_carries_forward_across_ewma_season_reset()

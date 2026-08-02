@@ -110,6 +110,28 @@ def build_team_stat_game_log(start_year: int, end_year: int) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 
+OWN_HALFLIFE_GAMES_STAT = 20.0  # ADOPTED 2026-08-01 (was None, flat equally-weighted in-season mean)
+# -- the same lever that gave team_strength.add_team_ratings a fifth real win (Sec36), tested here
+# for the first time on ALL 6 team_stat_rates categories including OREB (a structurally different
+# lever from cross_season_weight, which only changes the early-season prior -- OREB's holdout result
+# differs from its cross_season_weight result, so it earns its own separate check rather than being
+# assumed to fail the same way). Dev-only Stage 1 (recent-dev slice, 20 vs 40 games) and Stage 2
+# (full dev range) both showed all 6 categories beating BOTH the current config AND the naive floor
+# at 20. Confirmed on real holdout (vs current config): dreb/tov/stl/blk REAL IMPROVEMENT, oreb/ast
+# NOISE (no harm) -- net positive, no regression on any category, adopted uniformly for the 5
+# ADOPTED_CATEGORIES. OREB checked separately vs naive on holdout: still NOISE (statistical tie,
+# delta +0.0233 CI includes zero) -- a FOURTH mechanism (after shrinkage strength, adaptive league
+# average, cross_season_weight) converging to the same ceiling, reinforcing Sec34's conclusion that
+# OREB has a genuine structural limit, not a tuning problem -- OREB's own_halflife_games therefore
+# stays at None (unchanged), consistent with its cross_season_weight treatment. See
+# run_team_stat_own_halflife_holdout_check.py / MODEL_DOCUMENTATION.md Sec37.
+
+_USE_PER_CATEGORY_DEFAULT = "_use_per_category_default"  # sentinel distinct from a real override of
+# None: unlike cross_season_weight (whose real "off" value is 0.0, freeing up None as the "use
+# per-category default" signal), own_halflife_games's real "off" value at the shrinkage.py primitive
+# layer IS None -- so a plain `= None` default here would be ambiguous between "caller wants no
+# recency-weighting" and "caller wants whatever this module's own per-category default is."
+
 # Per-category cross_season_weight default: CROSS_SEASON_WEIGHT_STAT (0.25) for the 5
 # ADOPTED_CATEGORIES, but 0.0 (unchanged full reset) for oreb -- OREB's OWN holdout check with this
 # identical lever showed a real regression/veto (run_oreb_cross_season_holdout_check.py, Sec34), so
@@ -119,8 +141,16 @@ def build_team_stat_game_log(start_year: int, end_year: int) -> pd.DataFrame:
 DEFAULT_CROSS_SEASON_WEIGHTS = {label: (CROSS_SEASON_WEIGHT_STAT if label in ADOPTED_CATEGORIES else 0.0)
                                  for label in STAT_COLUMNS}
 
+# Per-category own_halflife_games default: OWN_HALFLIFE_GAMES_STAT (20.0) for the 5
+# ADOPTED_CATEGORIES, None (unchanged flat mean) for oreb -- see OWN_HALFLIFE_GAMES_STAT's own
+# docstring: OREB still ties naive on its own dedicated holdout check with this lever, so it isn't
+# brought in despite not regressing vs its own current config.
+DEFAULT_OWN_HALFLIFE_GAMES = {label: (OWN_HALFLIFE_GAMES_STAT if label in ADOPTED_CATEGORIES else None)
+                               for label in STAT_COLUMNS}
 
-def add_team_stat_ratings(log: pd.DataFrame, cross_season_weight: float | None = None) -> pd.DataFrame:
+
+def add_team_stat_ratings(log: pd.DataFrame, cross_season_weight: float | None = None,
+                           own_halflife_games=_USE_PER_CATEGORY_DEFAULT) -> pd.DataFrame:
     """Adds, per category, f"{label}_attack_rate"/f"{label}_defense_rate"
     (walk-forward shrunk toward the trailing league average, same
     primitive and season-reset convention as OFF_RATING/DEF_RATING).
@@ -132,11 +162,23 @@ def add_team_stat_ratings(log: pd.DataFrame, cross_season_weight: float | None =
     this lever). Pass an explicit float to apply that value UNIFORMLY
     across all 6 categories instead -- e.g. for a sweep test that wants a
     single controlled value everywhere, as `run_oreb_cross_season_holdout_check.py`
-    and this module's own dev-sweep scripts do."""
+    and this module's own dev-sweep scripts do.
+
+    `own_halflife_games` (default the `_USE_PER_CATEGORY_DEFAULT` sentinel ->
+    per-category `DEFAULT_OWN_HALFLIFE_GAMES`: 20.0 for the 5
+    ADOPTED_CATEGORIES, ADOPTED 2026-08-01, see `OWN_HALFLIFE_GAMES_STAT`'s
+    own docstring; `None`/unchanged for oreb). Pass an explicit float OR
+    `None` to apply that value UNIFORMLY across all 6 categories instead --
+    `None` is a legitimate override here (unlike the sentinel default), since
+    it means "disable recency-weighting everywhere," not "use the
+    per-category default"."""
     log = log.copy()
     for label, prior in PRIOR_GAMES.items():
         csw = cross_season_weight if cross_season_weight is not None else DEFAULT_CROSS_SEASON_WEIGHTS[label]
+        ohl = (own_halflife_games if own_halflife_games is not _USE_PER_CATEGORY_DEFAULT
+               else DEFAULT_OWN_HALFLIFE_GAMES[label])
         log = add_walk_forward_rate(log, f"{label}_for", f"{label}_against", prior, prefix=label,
+                                     own_halflife_games=ohl,
                                      cross_season_weight=csw)
     return log
 

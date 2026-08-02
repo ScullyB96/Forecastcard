@@ -304,6 +304,15 @@ regression), 20/40 cleared the net-win bar most cleanly. Confirmed on real holdo
 current config, su NOISE (no harm). Adopted as `team_strength.OWN_HALFLIFE_GAMES_RATING = 40.0`;
 reaches the live pipeline automatically via `add_team_ratings`'s default. See Sec36 for full detail.
 
+**A sixth real win: `own_halflife_games` extended to team_stat_rates (Sec37, 2026-08-01).** Tested
+across all 6 categories including OREB (a structurally different lever from `cross_season_weight`,
+so OREB wasn't assumed to fail the same way). All 6 cleared both dev stages; on holdout, 4/6
+(dreb/tov/stl/blk) REAL IMPROVEMENT vs. current config, oreb/ast NOISE (no regression anywhere).
+Adopted `OWN_HALFLIFE_GAMES_STAT = 20.0` for the 5 ADOPTED_CATEGORIES. OREB checked separately vs.
+naive on holdout: still NOISE -- the FOURTH structurally distinct mechanism to converge on the same
+ceiling, further confirming Sec34's conclusion that OREB's limit is structural, not a missing
+parameter. See Sec37 for full detail.
+
 **Phase 1 (team-strength engine) -- DONE. Real, full 9-season dev-range result, confirmed
 adopted.** `validate_team_strength_baseline.py` ran against the complete dev range (2015-16
 through 2023-24, 10,737 games after dropping 1 game with no prior history yet) once the box-score
@@ -2690,3 +2699,61 @@ This is the fifth genuine, holdout-confirmed win found via the audit's research 
 own-history) to independently pay off for Phase 1's rating engine specifically -- strong evidence
 that `shrinkage.py`'s walk-forward primitive had a lot of genuinely unexplored surface area, not
 just one lucky fix.
+
+## 37. `own_halflife_games` extended to team_stat_rates -- a sixth real win, and a fourth confirmation of OREB's structural ceiling
+
+Given `cross_season_weight` won for both Phase 1 (Sec33) and 5/6 team_stat_rates categories
+(Sec35), the natural next check was whether `own_halflife_games` (Sec36) generalizes the same way.
+Tested independently across all 6 categories, including OREB -- since `own_halflife_games` is a
+structurally different lever from `cross_season_weight` (recency-weights the team's own history,
+not the early-season prior), OREB wasn't assumed to fail the same way it did in Sec34/35.
+
+**Dev-only Stage 1** (recent-dev slice, sweeping 20/40 games on top of each category's already-
+adopted `cross_season_weight`): all 6 categories -- oreb included -- showed REAL IMPROVEMENT or
+NOISE (never regression) at both values; 20 the stronger candidate for most (oreb -0.0069, dreb
+-0.0208, tov -0.0190, blk -0.0063 real improvement at 20; ast/stl noise-to-mixed).
+
+**Stage 2** (full dev range, n=21,476 games, `own_halflife_games=20`): all 6 categories, including
+OREB, beat BOTH the current config AND the naive floor -- a clean sweep.
+
+**One-time confirmatory holdout read** (`run_team_stat_own_halflife_holdout_check.py`), candidate
+vs. current config, holdout-only:
+
+| category | delta | verdict |
+|---|---|---|
+| oreb | -0.0026 | NOISE |
+| dreb | -0.0146 | REAL IMPROVEMENT |
+| ast | +0.0023 | NOISE |
+| tov | -0.0358 | REAL IMPROVEMENT |
+| stl | -0.0111 | REAL IMPROVEMENT |
+| blk | -0.0108 | REAL IMPROVEMENT |
+
+No category regressed; 4/6 show a real holdout improvement. **Adopted `OWN_HALFLIFE_GAMES_STAT =
+20.0` for the 5 ADOPTED_CATEGORIES** (dreb/ast/tov/stl/blk), via a new
+`DEFAULT_OWN_HALFLIFE_GAMES` per-category dict mirroring `DEFAULT_CROSS_SEASON_WEIGHTS`'s pattern.
+
+**A genuinely new wrinkle required a different implementation than `cross_season_weight`'s**:
+`cross_season_weight`'s real "off" value is `0.0`, which left `None` free to mean "use this
+module's per-category default" with no ambiguity. `own_halflife_games`'s real "off" value at the
+`shrinkage.py` primitive layer IS `None` itself -- so a plain `= None` default on
+`add_team_stat_ratings` would be ambiguous between "caller wants no recency-weighting" and "caller
+wants the per-category default." Resolved with a dedicated `_USE_PER_CATEGORY_DEFAULT` sentinel
+string as the parameter's actual default, distinct from any legitimate value (float or `None`) a
+caller might pass explicitly. Covered by
+`test_add_team_stat_ratings_oreb_excluded_from_uniform_own_halflife_adoption`.
+
+**OREB checked separately, since it looked promising on both dev stages here (unlike
+`cross_season_weight`)**: does `own_halflife_games=20` let OREB finally beat naive on holdout? No --
+still NOISE (3.0634 vs. naive's 3.0401, delta +0.0233, CI includes zero). This is the **fourth**
+structurally distinct mechanism (after shrinkage strength/Sec30, adaptive league average/Sec26,
+`cross_season_weight`/Sec34) to converge on the exact same "statistical tie with naive" ceiling for
+OREB -- further reinforcing Sec34's conclusion that this is a genuine structural limit with the
+`add_walk_forward_rate` primitive as currently built, not a parameter left untried. OREB's
+`own_halflife_games` therefore stays at `None` (unchanged), the same treatment as its
+`cross_season_weight`.
+
+This is the sixth genuine, holdout-confirmed win found via the audit's research levers this session,
+and `own_halflife_games`'s second consecutive win after Sec36 -- both `cross_season_weight` and
+`own_halflife_games` have now each independently paid off in BOTH subsystems (Phase 1's team
+ratings and team_stat_rates), while both have also independently confirmed OREB's ceiling. The
+pattern is now unambiguous: OREB's problem is not a missing lever, it's the category itself.
