@@ -6,6 +6,7 @@ statsmodels==0.14.6
 pyarrow==25.0.0
 fastparquet==2026.5.0
 requests==2.34.2
+curl_cffi==0.16.0
 beautifulsoup4==4.15.0
 lxml==6.1.1
 scikit-learn==1.9.0
