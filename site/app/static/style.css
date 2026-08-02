@@ -461,10 +461,10 @@ h2 {
 
 /* ---------- props ---------- */
 
-.props-toggle {
+.props-toggle, .factors-toggle {
   margin-top: var(--sp-3);
 }
-.props-toggle summary {
+.props-toggle summary, .factors-toggle summary {
   cursor: pointer;
   list-style: none;
   display: inline-flex;
@@ -481,14 +481,14 @@ h2 {
   text-transform: uppercase;
   transition: color 150ms ease, border-color 150ms ease;
 }
-.props-toggle summary::-webkit-details-marker { display: none; }
-.props-toggle summary::after {
+.props-toggle summary::-webkit-details-marker, .factors-toggle summary::-webkit-details-marker { display: none; }
+.props-toggle summary::after, .factors-toggle summary::after {
   content: "▾";
   font-size: 0.65rem;
   transition: transform 150ms ease;
 }
-.props-toggle[open] summary::after { transform: rotate(180deg); }
-.props-toggle summary:hover { color: var(--text); border-color: var(--border-strong); }
+.props-toggle[open] summary::after, .factors-toggle[open] summary::after { transform: rotate(180deg); }
+.props-toggle summary:hover, .factors-toggle summary:hover { color: var(--text); border-color: var(--border-strong); }
 
 .prop-panel {
   margin-top: var(--sp-3);
@@ -632,6 +632,54 @@ h2 {
   color: var(--text-dim);
   font-style: italic;
   padding: var(--sp-6) 0;
+}
+
+/* ---------- factors (debug/math panel) ---------- */
+
+.factors-panel {
+  margin-top: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.factors-side-title {
+  margin: 0 0 var(--sp-2);
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-label);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.factor-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.factor-row:last-child { margin-bottom: 0; }
+.factor-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.3rem var(--sp-3);
+  border-radius: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  min-width: 8rem;
+}
+.factor-chip-label {
+  font-size: var(--fs-meta);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.factor-chip-value {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- login ---------- */

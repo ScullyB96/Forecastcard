@@ -312,6 +312,41 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
     )
 
 
+# Outcome categories surfaced in the debug/factors panel -- a representative
+# subset of the full 16-category OUTCOMES list (see true_talent.py), not all
+# of them: these are the ones a reader actually wants to see ("how often does
+# this lineup homer/strike out"), not every fielding-detail category.
+_DEBUG_OUTCOMES = ("home_run", "single", "double", "triple", "walk", "strikeout")
+
+
+def _lineup_summary(lineup: list[dict]) -> dict:
+    """Average FINAL per-PA rate (post-platoon, post-contact-quality/bat-speed,
+    post-age-adjustment -- whatever build_profile already baked in) across the
+    9 starters, as a simple 'how strong is this lineup' proxy. Reads only
+    values build_profile already computed; no new modeling here."""
+    return {o: float(np.mean([p["rates"].get(o, 0.0) for p in lineup])) for o in _DEBUG_OUTCOMES}
+
+
+def _pitcher_summary(pitcher: dict) -> dict:
+    """Same idea as _lineup_summary but for a single starter's own final
+    per-PA-allowed rates."""
+    return {o: float(pitcher["rates"].get(o, 0.0)) for o in _DEBUG_OUTCOMES}
+
+
+def _weather_headline(weather_factors: dict | None, outcome: str) -> float | None:
+    """A single representative scalar for the debug panel. weather_factors
+    is keyed by '{batter_stand}_{pull_tercile}' (each batter is looked up by
+    their OWN bucket when the simulator applies it, see combine_matchup_
+    distribution's caller) -- not a flat {outcome: factor} dict like park/
+    hfa -- so there's no single 'the' weather factor for this game. Averages
+    across every bucket as a representative magnitude to display; not itself
+    a value the model ever computes or uses directly."""
+    if not weather_factors:
+        return None
+    vals = [bucket.get(outcome) for bucket in weather_factors.values() if bucket]
+    return float(np.mean(vals)) if vals else None
+
+
 def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, away_team: str, game_date: str,
                          home_ids: list, away_ids: list, home_pitcher_id: int, away_pitcher_id: int,
                          venue_name: str | None = None,
@@ -553,6 +588,44 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
     home_catcher_factor = {**home_catcher_factor, **home_defense_factor}
     away_catcher_factor = {**away_catcher_factor, **away_defense_factor}
 
+    # Task #167 (site "Factors" debug panel): a game-level snapshot of the
+    # already-resolved factors above, captured here rather than recomputed --
+    # every value below is a local variable that already exists at this point
+    # in the function. Deliberately does NOT include per-trial-stochastic
+    # elements (bullpen sequence, weather bucket when unposted, hook timing,
+    # latent pitcher shock -- see game_simulator.py/bullpen.py docstrings)
+    # since those vary trial-to-trial by design and have no single "the model
+    # used X" value; this only surfaces the FIXED pregame inputs every trial
+    # shares. home_catcher_factor/away_catcher_factor are already
+    # catcher+umpire+defense multiplied together (see above) -- labeled as
+    # such rather than re-split, since re-splitting would need recomputation.
+    debug = {
+        "park_factors": park_factors,
+        "hfa_factors": hfa_factors,
+        "weather_factors": weather_factors,
+        "weather_headline_home_run": _weather_headline(weather_factors, "home_run"),
+        "weather_is_forecast": weather_factors is None and weather_dist is not None,
+        "umpire_factor": umpire_factor,
+        "home": {
+            "lineup_summary": _lineup_summary(home_lineup),
+            "pitcher_summary": _pitcher_summary(home_pitcher),
+            "catcher_id": home_catcher_id,
+            "catcher_defense_umpire_factor": home_catcher_factor,
+            "closer_id": home_closer_id,
+            "expected_starter_innings": home_exp_ip,
+            "sb_rates": home_sb_rates,
+        },
+        "away": {
+            "lineup_summary": _lineup_summary(away_lineup),
+            "pitcher_summary": _pitcher_summary(away_pitcher),
+            "catcher_id": away_catcher_id,
+            "catcher_defense_umpire_factor": away_catcher_factor,
+            "closer_id": away_closer_id,
+            "expected_starter_innings": away_exp_ip,
+            "sb_rates": away_sb_rates,
+        },
+    }
+
     transitions, league_rates, state_factors = ctx["transitions"], ctx["league_rates"], ctx["state_factors"]
     sim = GameSimulator(transitions, league_rates[season], rng, state_factors=state_factors[season],
                         ttop_factors=ctx["ttop_factors"][season], shock_sigma=SHOCK_SIGMA)
@@ -652,6 +725,7 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         "inning_props": _inning_props(events_df, n_trials),
         "game_props": _game_props(scores_df, n_trials),
         "debut_fallback_pids": sorted(set(debut_fallback_pids)),
+        "debug": debug,
     }
 
 

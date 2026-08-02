@@ -92,6 +92,63 @@
 </div>
 {% endmacro %}
 
+{% macro factor_chip(label, value, kind='mult') %}
+{% if value is not none %}
+<div class="factor-chip">
+  <span class="factor-chip-label">{{ label }}</span>
+  <span class="factor-chip-value">
+    {%- if kind == 'pct' -%}{{ (value * 100)|round(1) }}%
+    {%- elif kind == 'mult' -%}{{ '%+.0f%%'|format((value - 1) * 100) }}
+    {%- elif kind == 'ip' -%}{{ '%.1f'|format(value) }} IP
+    {%- else -%}{{ value }}
+    {%- endif -%}
+  </span>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro side_factors(label, side) %}
+<div class="factors-side">
+  <h4 class="factors-side-title">{{ label }}</h4>
+  <div class="factor-row">
+    {{ factor_chip('Lineup HR rate', side.lineup_summary.home_run if side.lineup_summary, 'pct') }}
+    {{ factor_chip('Lineup BB rate', side.lineup_summary.walk if side.lineup_summary, 'pct') }}
+    {{ factor_chip('Lineup K rate', side.lineup_summary.strikeout if side.lineup_summary, 'pct') }}
+  </div>
+  <div class="factor-row">
+    {{ factor_chip('Starter HR rate', side.pitcher_summary.home_run if side.pitcher_summary, 'pct') }}
+    {{ factor_chip('Starter BB rate', side.pitcher_summary.walk if side.pitcher_summary, 'pct') }}
+    {{ factor_chip('Starter K rate', side.pitcher_summary.strikeout if side.pitcher_summary, 'pct') }}
+  </div>
+  <div class="factor-row">
+    {{ factor_chip('Expected starter innings', side.expected_starter_innings, 'ip') }}
+    {{ factor_chip('Catcher framing (K)', side.catcher_defense_umpire_factor.strikeout if side.catcher_defense_umpire_factor, 'mult') }}
+    {{ factor_chip('Defense (hits)', side.catcher_defense_umpire_factor.single if side.catcher_defense_umpire_factor, 'mult') }}
+  </div>
+</div>
+{% endmacro %}
+
+{% macro factors_panel(game) %}
+{% set d = game.debug %}
+<div class="factors-panel">
+  <div class="factors-side">
+    <h4 class="factors-side-title">Game conditions</h4>
+    <div class="factor-row">
+      {{ factor_chip('Park (HR)', d.park_factors.home_run if d.park_factors, 'mult') }}
+      {% if d.weather_is_forecast %}
+      <div class="factor-chip"><span class="factor-chip-label">Weather</span><span class="factor-chip-value">Forecast-based</span></div>
+      {% else %}
+      {{ factor_chip('Weather (HR)', d.weather_headline_home_run, 'mult') }}
+      {% endif %}
+      {{ factor_chip('Umpire (K)', d.umpire_factor.strikeout if d.umpire_factor, 'mult') }}
+      {{ factor_chip('Home-field (HR)', d.hfa_factors.home_run if d.hfa_factors, 'mult') }}
+    </div>
+  </div>
+  {{ side_factors(game.away_team + ' (away)', d.away) }}
+  {{ side_factors(game.home_team + ' (home)', d.home) }}
+</div>
+{% endmacro %}
+
 {% macro game_card(game, props_by_game_id, sport) %}
 {% set has_data = game.home_win_prob is not none %}
 {% set home_is_fav = has_data and game.home_win_prob >= 0.5 %}
@@ -120,6 +177,12 @@
   <details class="props-toggle">
     <summary>{{ grouped.total }} prop{{ 's' if grouped.total != 1 }}</summary>
     {{ prop_panel(grouped) }}
+  </details>
+  {% endif %}
+  {% if game.debug %}
+  <details class="factors-toggle">
+    <summary>Factors</summary>
+    {{ factors_panel(game) }}
   </details>
   {% endif %}
 </div>

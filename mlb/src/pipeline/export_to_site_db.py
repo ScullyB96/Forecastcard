@@ -18,6 +18,7 @@ The site can still group props by game (game_id) without it.
 """
 
 import datetime as _dt
+import json
 import os
 import sys
 
@@ -138,12 +139,21 @@ def export(target_date: str, database_url: str) -> None:
     games = []
     for _, row in summary.iterrows():
         away_team, home_team = row["matchup"].split(" @ ")
+        # "debug" is stored in the parquet as a JSON string (see
+        # generate_daily_props.py's own comment on why -- pyarrow struct
+        # inference breaks across games whose factor dicts don't all share
+        # identical nested shapes), so it needs parsing back here rather
+        # than a plain column select like GAME_EXTRA_COLUMNS. Missing/older
+        # parquet files without this column (pre-dating this feature) fall
+        # back to {} -- same graceful-degradation convention as extra.
+        debug_raw = row.get("debug") if "debug" in summary.columns else None
         games.append({
             "game_id": str(row["game_pk"]), "home_team": home_team, "away_team": away_team,
             "matchup": row["matchup"], "home_win_prob": row["home_win_prob"],
             "away_win_prob": row["away_win_prob"], "projected_home_score": row["mean_home_score"],
             "projected_away_score": row["mean_away_score"], "projected_total": row["mean_total"],
             "extra": {c: row[c] for c in GAME_EXTRA_COLUMNS if c in summary.columns},
+            "debug": json.loads(debug_raw) if isinstance(debug_raw, str) else {},
         })
 
     batter_path = DATA_PROCESSED / f"batter_props_{target_date}.parquet"
@@ -175,8 +185,8 @@ def export(target_date: str, database_url: str) -> None:
                     """
                     INSERT INTO games (sport, slate_key, game_id, home_team, away_team, matchup,
                                         home_win_prob, away_win_prob, projected_home_score,
-                                        projected_away_score, projected_total, extra, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                                        projected_away_score, projected_total, extra, debug, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                     ON CONFLICT (sport, slate_key, game_id) DO UPDATE SET
                         home_team = EXCLUDED.home_team, away_team = EXCLUDED.away_team,
                         matchup = EXCLUDED.matchup, home_win_prob = EXCLUDED.home_win_prob,
@@ -184,12 +194,12 @@ def export(target_date: str, database_url: str) -> None:
                         projected_home_score = EXCLUDED.projected_home_score,
                         projected_away_score = EXCLUDED.projected_away_score,
                         projected_total = EXCLUDED.projected_total,
-                        extra = EXCLUDED.extra, updated_at = now()
+                        extra = EXCLUDED.extra, debug = EXCLUDED.debug, updated_at = now()
                     """,
                     (SPORT, target_date, g["game_id"], g["home_team"], g["away_team"], g["matchup"],
                      g["home_win_prob"], g["away_win_prob"], g["projected_home_score"],
                      g["projected_away_score"], g["projected_total"],
-                     psycopg2.extras.Json(g["extra"])),
+                     psycopg2.extras.Json(g["extra"]), psycopg2.extras.Json(g["debug"])),
                 )
             for p in props:
                 cur.execute(

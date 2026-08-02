@@ -45,6 +45,7 @@ itself just because the raw cache did) at the start of every run.
 """
 
 import datetime as _dt
+import json
 import sys
 
 import numpy as np
@@ -70,6 +71,21 @@ POSTSEASON_GAME_TYPES = {"F", "D", "L", "W"}  # wild card, division series, leag
                                                 # "E"(exhibition)/"A"(all-star) -- real games
                                                 # this project has never modeled or intends to.
 GAME_TYPES_TO_PREDICT = {"R"} | POSTSEASON_GAME_TYPES
+
+
+def _json_default(obj):
+    """json.dumps default hook for the debug dict -- most of its values trace
+    back to a pandas Series/DataFrame lookup (park factors, catcher/closer
+    ids, sb_rates, etc.), so they're numpy scalars (int64/float64), not
+    plain Python numbers, and the stdlib json module doesn't know how to
+    encode those on its own."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 
 def games_for_date(target_date: str) -> pd.DataFrame:
@@ -244,6 +260,13 @@ if __name__ == "__main__":
             "home_lineup_source": home_source, "away_lineup_source": away_source,
             "real_weather": has_real_weather, "postseason": is_postseason,
             "used_debut_fallback": bool(props["debut_fallback_pids"]), **props["game_props"],
+            # JSON-encoded (not a raw dict column) -- pyarrow infers a
+            # per-column struct schema from a dict column, which breaks the
+            # moment two games' debug dicts don't share identical nested
+            # shapes (e.g. one game's weather_factors is None, another's is a
+            # populated dict). A plain string column sidesteps that entirely;
+            # export_to_site_db.py parses it back with json.loads.
+            "debug": json.dumps(props["debug"], default=_json_default),
         })
         # task #163 (combined-site export prerequisite, 2026-08): generate_game_props
         # already computes batter_props/pitcher_props per game -- previously discarded,

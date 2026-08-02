@@ -38,9 +38,22 @@ CREATE TABLE IF NOT EXISTS games (
     projected_away_score    DOUBLE PRECISION,
     projected_total         DOUBLE PRECISION,
     extra                   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- Per-game factor breakdown (park/weather/umpire/HFA/lineup+pitcher
+    -- summaries/bullpen/etc.) powering the site's "Factors" debug panel.
+    -- Separate from `extra` (small flag-shaped values) because this is a
+    -- larger structured payload and, unlike `extra`, only some sports
+    -- populate it -- keeping it its own column lets a sport opt in without
+    -- reshaping extra's existing contract. Empty object (not present) means
+    -- this sport/row hasn't wired the factor breakdown through yet.
+    debug                   JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (sport, slate_key, game_id)
 );
+
+-- Safe to re-run: adds `debug` to a games table that already existed
+-- before this column was introduced (schema.sql has no separate migration
+-- runner -- this file IS the migration, applied idempotently).
+ALTER TABLE games ADD COLUMN IF NOT EXISTS debug JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_games_sport_slate ON games (sport, slate_key);
 
