@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app import db
-from app.access import AccessGateMiddleware, make_session_cookie_value, site_password
+from app.access import AccessGateMiddleware, COOKIE_NAME, make_session_cookie_value, site_password
 from app.season_openers import OPENERS
 from app.team_meta import team_info
 
@@ -21,6 +21,7 @@ app.add_middleware(AccessGateMiddleware)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 templates.env.globals["team_info"] = team_info
+templates.env.globals["site_password"] = site_password
 
 
 def _relative_time(dt: datetime) -> str:
@@ -152,6 +153,13 @@ def login_submit(request: Request, password: str = Form(...), next: str = Form("
         response.set_cookie("site_session", make_session_cookie_value(), httponly=True, samesite="lax")
         return response
     return templates.TemplateResponse(request, "login.html", {"next": next, "error": True}, status_code=401)
+
+
+@app.get("/logout")
+def logout():
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(COOKIE_NAME)
+    return response
 
 
 

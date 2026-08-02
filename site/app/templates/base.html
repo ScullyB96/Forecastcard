@@ -20,6 +20,9 @@
       <a href="/{{ s }}" class="{{ s }} {{ 'active' if active_sport == s else '' }}">{{ s|upper }}</a>
       {% endfor %}
     </nav>
+    {% if site_password() %}
+    <a class="sign-out" href="/logout">Sign out</a>
+    {% endif %}
   </header>
   <main>
     {% block content %}{% endblock %}

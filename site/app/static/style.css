@@ -113,6 +113,18 @@ nav.sport-nav a.active {
   background: var(--panel);
 }
 
+.sign-out {
+  margin-left: auto;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-faint);
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+.sign-out:hover { color: var(--text-dim); border-color: var(--border); }
+
 nav.sport-nav a.active::after {
   content: "";
   position: absolute;
