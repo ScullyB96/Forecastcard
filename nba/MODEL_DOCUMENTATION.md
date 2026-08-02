@@ -2893,3 +2893,51 @@ residential-proxy provider and obtaining real credentials is the user's own acti
 third-party accounts / entering payment details isn't something this assistant can do); once a real
 `http://user:pass@host:port`-style URL exists, setting it as `NBA_STATS_PROXY_URL` on Railway is a
 regular config change.
+
+**Confirmed live after deploying the fix (2026-08-02, same day)**: the fallback logic itself now
+works exactly as designed -- watched the redeploy in real time via Railway's logs. 2026-27 failed
+all 3 attempts, then (for the first time) the loop actually tried the fallback candidate: `fetch
+2025-26 Regular Season failed (attempt 1/3)... (attempt 2/3)... (attempt 3/3)`, ALSO timing out on
+every attempt, and the function correctly raised its final, now-more-informative error instead of
+silently only having tried one candidate. This resolves the open question from earlier in this
+section: the datacenter-IP block is **blanket** (every stats.nba.com call from Railway's IP fails,
+not just a query for an empty/new season specifically) -- so the code fix alone cannot restore
+service; proxy activation is the only real fix. `nba-worker` remains CRASHED pending real proxy
+credentials.
+
+## 42. Rolling-window walk-forward backtest infrastructure (2026-08-02)
+
+The audit flagged a rolling-window backtest as a bigger validation-methodology upgrade, not a quick
+test. Turned out smaller than expected: this project's rate models (`shrinkage.add_walk_forward_rate`
+and friends) are ALREADY walk-forward-safe end to end -- every prediction across the full dev range
+already uses only strictly-prior games (shift-based cumulative sums), so there's no leakage to guard
+against by literally re-fitting per rolling origin the way a non-walk-forward model would need. The
+real gap was REPORTING: the existing Stage 2 check runs one `bootstrap_compare` over the WHOLE dev
+range, producing a single pooled number that could in principle hide a season-specific regression
+inside a favorable aggregate.
+
+**New module**: `rolling_window_backtest.py` -- `rolling_window_report(cand_df, baseline_df, ...)`
+slices an already-computed, already-walk-forward-safe prediction set by season and runs the
+identical bootstrap comparison independently per season (excluding the very first dev season by
+default, the thinnest walk-forward history). `summarize_rolling_report` rolls that up into a count
+of real-improvement/noise/real-regression seasons, explicitly surfacing `any_season_regressed` --
+the exact "hidden by the average" failure mode this tool exists to catch. Regression-tested with a
+synthetic 3-season dataset (first season worse-but-excluded, one season with a clear real
+improvement, one season with identical values guaranteeing an unambiguous noise verdict) confirming
+per-season isolation and the exclusion default both work correctly.
+
+**Applied retroactively to this session's 3 Phase 1 wins** (the joint margin fix + `cross_season_weight`
++ `own_halflife_games`, i.e. the full current adopted config vs. the original pre-session config),
+across all 8 dev seasons (2016-2023, 2015 excluded as the first season):
+
+- total_mae: 6 of 8 seasons REAL IMPROVEMENT, 2 NOISE (2019, 2021), **0 real regression**.
+- margin_mae: 7 of 8 seasons REAL IMPROVEMENT, 1 NOISE (2019), **0 real regression**.
+
+No season shows a real regression on either metric -- consistent with (and now backed by a
+genuinely new lens on) the full-dev-range aggregate result and the per-season HOLDOUT check from
+Sec38. Three independent views (full-dev aggregate, per-season dev rolling window, per-season
+holdout) all agree: these wins are stable across time, not an artifact of one favorable period.
+This tool is now available for screening future candidates too -- a genuinely promising candidate
+should show this same pattern (no season regressing) before ever spending the one-time holdout
+read, one more filter ahead of Stage 1/Stage 2, never a replacement for the confirmatory-veto
+protocol itself.

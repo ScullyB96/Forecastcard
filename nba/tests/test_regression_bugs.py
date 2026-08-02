@@ -17,6 +17,7 @@ from src.ingest.fetch_schedule import season_for_date
 from src.ingest.player_name_crosswalk import _build_name_index
 from src.pipeline.active_roster import build_team_history, resolve_active_lineup
 from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, bootstrap_compare
+from src.models.rolling_window_backtest import rolling_window_report, summarize_rolling_report
 from src.models.garbage_time import add_garbage_time_weight
 from src.models.home_court import _baseline_log_ratios
 from src.models.player_rate_shrinkage import (
@@ -1207,6 +1208,49 @@ def test_current_nba_season_falls_back_when_newest_candidate_fails_entirely():
         fetch_schedule_module._fetch_with_retry = original_fetch
 
 
+def test_rolling_window_report_isolates_per_season_and_excludes_first_season_by_default():
+    """`rolling_window_backtest.rolling_window_report`/`summarize_rolling_report` (2026-08-02,
+    the audit's flagged rolling-window validation-methodology lever): must slice a candidate-vs-
+    baseline comparison PER SEASON rather than pooling, so a season-specific regression can't hide
+    inside an aggregate average, and must exclude the very first season present by default (the
+    thinnest walk-forward history, same reasoning as the row-level season-reset convention).
+    Synthetic 3-season dev-only dataset: season 2019 (first -> excluded by default) has candidate
+    WORSE than baseline; season 2020 has candidate clearly BETTER; season 2021 has candidate and
+    baseline IDENTICAL (guaranteed exact-zero delta, unambiguous NOISE)."""
+    rows_cand, rows_base = [], []
+    for i in range(40):
+        rows_cand.append({"gameId": f"2019_{i}", "season": 2019, "abs_err": 10.0 + 0.01 * (i % 3)})
+        rows_base.append({"gameId": f"2019_{i}", "season": 2019, "abs_err": 5.0 + 0.01 * (i % 3)})
+    for i in range(40):
+        rows_cand.append({"gameId": f"2020_{i}", "season": 2020, "abs_err": 5.0 + 0.01 * (i % 3)})
+        rows_base.append({"gameId": f"2020_{i}", "season": 2020, "abs_err": 6.0 + 0.01 * (i % 3)})
+    for i in range(40):
+        v = 5.0 + 0.01 * (i % 3)
+        rows_cand.append({"gameId": f"2021_{i}", "season": 2021, "abs_err": v})
+        rows_base.append({"gameId": f"2021_{i}", "season": 2021, "abs_err": v})
+    cand_df = pd.DataFrame(rows_cand)
+    base_df = pd.DataFrame(rows_base)
+
+    results = rolling_window_report(
+        cand_df, base_df, game_id_col="gameId",
+        metrics=[{"name": "mae", "col": "abs_err", "higher_is_better": False}], n_bootstrap=500)
+
+    check("first season (2019) excluded from the default rolling report",
+          2019 not in results, f"got seasons {sorted(results.keys())}")
+    check("2020 (candidate clearly better) correctly shows real improvement",
+          "REAL IMPROVEMENT" in results[2020]["mae"]["verdict"], f"got {results[2020]['mae']['verdict']}")
+    check("2021 (identical values) correctly shows noise, not a false regression",
+          "NOISE" in results[2021]["mae"]["verdict"], f"got {results[2021]['mae']['verdict']}")
+
+    summary = summarize_rolling_report(results, "mae")
+    check("summary reports exactly the 2 non-excluded test seasons", summary["n_seasons"] == 2,
+          f"got {summary['n_seasons']}")
+    check("no season falsely flagged as a regression", not summary["any_season_regressed"])
+    check("summary counts exactly 1 real improvement and 1 noise season",
+          summary["n_real_improvement"] == 1 and summary["n_noise"] == 1,
+          f"got improvement={summary['n_real_improvement']}, noise={summary['n_noise']}")
+
+
 def test_generate_props_before_filter_excludes_on_and_after_date():
     """`generate_props._before` (2026-08-01) is the fix for the real bug
     found via a 2025-01-15 spot-check: a star player's trailing-minutes
@@ -1475,6 +1519,7 @@ if __name__ == "__main__":
     test_position_group_expanding_variant_pools_by_team_posgroup()
     test_season_for_date_resolves_purely_from_calendar()
     test_current_nba_season_falls_back_when_newest_candidate_fails_entirely()
+    test_rolling_window_report_isolates_per_season_and_excludes_first_season_by_default()
     test_generate_props_before_filter_excludes_on_and_after_date()
     test_team_history_season_filter_excludes_prior_season_games()
     test_team_stat_game_log_for_against_symmetry()
