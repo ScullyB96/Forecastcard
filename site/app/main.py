@@ -4,6 +4,7 @@ never imports model code from mlb/nfl/nba/nhl directly (see site/README.md
 for the full contract)."""
 
 import hmac
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import RedirectResponse
@@ -13,11 +14,34 @@ from fastapi.templating import Jinja2Templates
 from app import db
 from app.access import AccessGateMiddleware, make_session_cookie_value, site_password
 from app.season_openers import OPENERS
+from app.team_meta import team_info
 
 app = FastAPI()
 app.add_middleware(AccessGateMiddleware)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
+templates.env.globals["team_info"] = team_info
+
+
+def _relative_time(dt: datetime) -> str:
+    """'Updated 38m ago' style label for a run_at timestamp. Server-rendered
+    once per request rather than a JS ticker -- run freshness only needs to
+    be roughly right, not live-updating like the season-opener countdown."""
+    delta = datetime.now(timezone.utc) - dt
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    return f"{days}d ago"
+
+
+templates.env.filters["relative_time"] = _relative_time
 
 
 def _props_by_game_id(sport: str, slate_key: str, games: list[dict]) -> dict[str, list[dict]]:
@@ -59,10 +83,11 @@ def home(request: Request):
         games = db.games_for_slate(sport, slate_key)
         games_by_sport[sport] = games
         props_by_sport[sport] = _props_by_game_id(sport, slate_key, games)
+    runs_by_sport = {r["sport"]: r for r in db.latest_runs()}
     return templates.TemplateResponse(request, "index.html", {
         "sports": db.SPORTS, "slate_keys": slate_keys,
         "games_by_sport": games_by_sport, "props_by_sport": props_by_sport,
-        "openers": OPENERS,
+        "openers": OPENERS, "runs_by_sport": runs_by_sport,
     })
 
 
@@ -73,8 +98,9 @@ def sport_page(request: Request, sport: str):
     slate_key = db.latest_slate_key(sport)
     games = db.games_for_slate(sport, slate_key) if slate_key else []
     props_by_game_id = _props_by_game_id(sport, slate_key, games) if slate_key else {}
+    run = next((r for r in db.latest_runs() if r["sport"] == sport), None)
     return templates.TemplateResponse(request, "sport.html", {
         "sports": db.SPORTS, "active_sport": sport, "sport": sport,
         "slate_key": slate_key, "games": games, "props_by_game_id": props_by_game_id,
-        "opener": OPENERS.get(sport),
+        "opener": OPENERS.get(sport), "run": run,
     })
