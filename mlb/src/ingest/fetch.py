@@ -233,6 +233,23 @@ def _schedule_day_with_retry(date: str) -> list[dict]:
     raise RuntimeError(f"schedule fetch failed for {date} after {MAX_FETCH_RETRIES + 1} attempts: {last_err}")
 
 
+# Canonical team-code aliases (2026-08-03 audit, finding M8): Statcast codes
+# the 2023-24 Athletics "ATH" RETROACTIVELY (matching their current code),
+# while the MLB Stats API schedule returns the era-accurate "OAK". The PA
+# table (Statcast-derived) and the schedule therefore disagreed on the same
+# franchise: the park-factor venue-continuity merge on (season, team) found
+# no (2023/2024, ATH) venue row -> NaN -> the A's same-venue rolling history
+# never worked, and the backtest's ("OAK", 2024) park lookup missed entirely
+# -> every 2023-24 Coliseum backtest game ran with NO park adjustment. One
+# canonical convention (Statcast's, since the PA table is the model's spine)
+# applied at parse time; cached parquets migrated once in the same fix.
+TEAM_CODE_ALIASES = {"OAK": "ATH"}
+
+
+def _canonical_team(abbrev):
+    return TEAM_CODE_ALIASES.get(abbrev, abbrev)
+
+
 def _parse_games(games: list[dict], date: str) -> tuple[list[dict], list[dict]]:
     game_rows, lineup_rows = [], []
     for g in games:
@@ -242,8 +259,8 @@ def _parse_games(games: list[dict], date: str) -> tuple[list[dict], list[dict]]:
         game_rows.append({
             "game_pk": g["gamePk"], "date": date, "season": int(g.get("season", date[:4])),
             "game_type": g.get("gameType"), "status": g.get("status", {}).get("detailedState"),
-            "home_team_id": home["team"]["id"], "home_team": home["team"].get("abbreviation"),
-            "away_team_id": away["team"]["id"], "away_team": away["team"].get("abbreviation"),
+            "home_team_id": home["team"]["id"], "home_team": _canonical_team(home["team"].get("abbreviation")),
+            "away_team_id": away["team"]["id"], "away_team": _canonical_team(away["team"].get("abbreviation")),
             "home_score": home.get("score"), "away_score": away.get("score"),
             "venue_id": venue.get("id"), "venue_name": venue.get("name"),
             "weather_condition": weather.get("condition"), "weather_temp": weather.get("temp"),
