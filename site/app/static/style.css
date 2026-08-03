@@ -1,17 +1,23 @@
 :root {
-  --bg: #0a0c10;
-  --bg-elev: #12151b;
-  --panel: #181c24;
-  --panel-2: #20242e;
-  --border: #2a3040;
-  --border-strong: #3a4256;
-  --text: #f2f4f7;
-  --text-dim: #8b93a3;
-  --text-faint: #5a6274;
-  --accent: #4ba3e3;
-  --accent-2: #8ecdf5;
-  --favorite: #f2f4f7;
-  --underdog: #6b7280;
+  /* Warm near-black + burnished gold -- replaces a generic safe blue with
+     something that actually reads as premium/elite for a sports-prediction
+     product (gold-on-black is a deliberate, well-worn "high-tier" signal --
+     watches, VIP tiers, casino/sportsbook branding -- and it's distinct
+     from every competitor's blue/green). Neutrals get a slight warm tilt
+     to match rather than staying a cool blue-grey next to a warm accent. */
+  --bg: #0a0a0c;
+  --bg-elev: #131316;
+  --panel: #18181b;
+  --panel-2: #202023;
+  --border: #2b2b2f;
+  --border-strong: #3e3e44;
+  --text: #f5f3ee;
+  --text-dim: #9c988d;
+  --text-faint: #67635a;
+  --accent: #d9a94a;
+  --accent-2: #f0c979;
+  --favorite: #f5f3ee;
+  --underdog: #6e6b62;
   --mlb: #b7333f;
   --nfl: #8a5a2b;
   --nba: #c76a1f;
@@ -21,7 +27,10 @@
 
   --radius-card: 14px;
   --radius-pill: 999px;
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.5);
+  /* Faint inner top highlight -- the "beveled glass" edge premium dark
+     dashboards (Linear, Stripe, Vercel) use to make a flat panel read as
+     a lifted physical surface rather than a plain rectangle. */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5), 0 12px 32px -16px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 
   --font-body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-display: "Barlow Condensed", "Inter", sans-serif;
@@ -409,7 +418,7 @@ h2 {
 .win-prob-bar > span {
   display: block;
   height: 100%;
-  background: var(--accent);
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
   border-radius: 3px;
 }
 
@@ -784,21 +793,28 @@ h2 {
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f6f7f9;
+    --bg: #f7f6f3;
     --bg-elev: #ffffff;
     --panel: #ffffff;
-    --panel-2: #f0f2f5;
-    --border: #e2e5ea;
-    --border-strong: #cbd1db;
-    --text: #1c2027;
-    --text-dim: #5b6472;
-    --text-faint: #838c99;
-    --favorite: #14161b;
-    /* Darker than the dark-theme accent pair -- the same hue tuned for a
-       near-black panel reads as near-invisible on a white one (measured
-       ~1.7:1 contrast, well under WCAG AA's 4.5:1 for text). */
-    --accent: #1f7dd1;
-    --accent-2: #0f5fa3;
+    --panel-2: #f1efe9;
+    --border: #e4e1d9;
+    --border-strong: #cdc8ba;
+    --text: #211f1a;
+    --text-dim: #6b6357;
+    --text-faint: #948c7d;
+    --favorite: #14130f;
+    --underdog: #948c7d;
+    /* Darker/deeper than the dark-theme gold pair -- the same hue tuned
+       for a near-black panel reads as too light/washed-out on a white one
+       (measured ~1.8:1 contrast, well under WCAG AA's 4.5:1 for text). A
+       deep bronze holds the same "premium" read while staying legible.
+       accent-2 is DARKER than accent here (the inverse of dark mode,
+       where it's lighter) -- .past-slate-banner uses accent-2 as text on
+       a light accent-tinted wash, and the lighter dark-mode-style value
+       fails contrast there (measured ~3.1:1) while this passes (~7.6:1). */
+    --accent: #96701f;
+    --accent-2: #6b4f16;
+    --shadow-card: 0 1px 2px rgba(20, 18, 14, 0.08), 0 8px 24px -12px rgba(20, 18, 14, 0.16);
   }
 }
 
