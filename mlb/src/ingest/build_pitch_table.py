@@ -60,6 +60,12 @@ PITCH_COLUMNS = [
 def build_pitch_table(statcast: pd.DataFrame) -> pd.DataFrame:
     df = statcast[statcast["game_type"] == "R"][PITCH_COLUMNS].copy()
     df["result"] = df["description"].map(DESC_TO_RESULT)
+    # 2-strike foul bunt is a STRIKEOUT under MLB rules, not a no-op foul
+    # (2026-08-03 audit, minor finding: 15 real 2025 pitches, all with
+    # events=='strikeout'). Reclassify as swinging_strike so count-
+    # progression consumers (which treat "foul" at 2 strikes as a no-op)
+    # correctly terminate the PA; is_swing stays True either way.
+    df.loc[(df["description"] == "foul_bunt") & (df["strikes"] == 2), "result"] = "swinging_strike"
     unmapped = df["result"].isna().sum()
     if unmapped:
         print(f"WARNING: {unmapped} pitches have an unrecognized description value not in "

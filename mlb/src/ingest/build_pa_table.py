@@ -114,11 +114,35 @@ def build_pa_table(statcast: pd.DataFrame) -> pd.DataFrame:
     pa["pre_state"] = pa["pre_bases"] * 10 + pa["outs_when_up"]  # e.g. 5 outs_when_up=1, runners on 1st+3rd -> 51
     pa = pa.rename(columns={"fielder_2": "catcher"})  # Statcast's raw name for the catcher's player id
 
-    pa = pa.sort_values(["game_pk", "inning", "inning_topbot", "at_bat_number"]).reset_index(drop=True)
+    # post_state from the COMPLETE at-bat timeline, not the filtered frame
+    # (2026-08-03 audit, minor finding): ~0.24% of ABs are dropped above
+    # (no `events` row, truncated_pa, unmapped) -- computing the shift on
+    # the already-filtered frame made the PRECEDING PA's post_state jump
+    # over the dropped AB to the one after it (or spuriously marked it
+    # terminal when the dropped AB ended the half-inning), contaminating
+    # ~370 transitions per season with base-out changes that belong to the
+    # dropped AB. The sequence below is built from `first` (every AB,
+    # before any filtering), so a surviving PA's post_state is always the
+    # true next AB's start state -- the dropped AB itself simply vanishes,
+    # which is the only correct loss.
+    seq = first[["game_pk", "inning", "inning_topbot", "at_bat_number",
+                 "on_1b", "on_2b", "on_3b", "outs_when_up"]].copy()
+    seq["seq_pre_bases"] = (
+        seq["on_1b"].notna().astype(int) * 1
+        + seq["on_2b"].notna().astype(int) * 2
+        + seq["on_3b"].notna().astype(int) * 4
+    )
+    seq = seq.sort_values(["game_pk", "inning", "inning_topbot", "at_bat_number"])
     half_inning = ["game_pk", "inning", "inning_topbot"]
-    pa["next_pre_bases"] = pa.groupby(half_inning)["pre_bases"].shift(-1)
-    pa["next_outs_when_up"] = pa.groupby(half_inning)["outs_when_up"].shift(-1)
-    pa["terminal"] = pa["next_pre_bases"].isna()  # no next PA in this half-inning -> it ended here
+    seq["next_pre_bases"] = seq.groupby(half_inning)["seq_pre_bases"].shift(-1)
+    seq["next_outs_when_up"] = seq.groupby(half_inning)["outs_when_up"].shift(-1)
+
+    pa = pa.merge(
+        seq[["game_pk", "at_bat_number", "next_pre_bases", "next_outs_when_up"]],
+        on=["game_pk", "at_bat_number"], how="left",
+    )
+    pa = pa.sort_values(["game_pk", "inning", "inning_topbot", "at_bat_number"]).reset_index(drop=True)
+    pa["terminal"] = pa["next_pre_bases"].isna()  # no next AB in this half-inning -> it ended here
     pa["post_state"] = pa["next_pre_bases"] * 10 + pa["next_outs_when_up"]
 
     return pa.drop(columns=["next_pre_bases", "next_outs_when_up"])

@@ -550,7 +550,10 @@ def fetch_umpires_for_seasons(seasons: list[int], checkpoint_every: int = 100) -
         if not sched_path.exists():
             continue
         sched = pd.read_parquet(sched_path)
-        reg = sched[(sched["game_type"] == "R") & (sched["status"] == "Final")]
+        # "Completed Early" included (2026-08-03 audit): rain-shortened games are
+        # official, have real PAs in the PA table, and were silently excluded
+        # here -- their SB/umpire data never backfilled while their PAs counted.
+        reg = sched[(sched["game_type"] == "R") & (sched["status"].isin(["Final", "Completed Early"]))]
         frames.append(reg[["game_pk"]])
     all_games = pd.concat(frames, ignore_index=True)["game_pk"].unique() if frames else []
     todo = [g for g in all_games if g not in already_have]
@@ -619,7 +622,10 @@ def fetch_stolen_base_stats_for_seasons(seasons: list[int], checkpoint_every: in
         if not sched_path.exists():
             continue
         sched = pd.read_parquet(sched_path)
-        reg = sched[(sched["game_type"] == "R") & (sched["status"] == "Final")]
+        # "Completed Early" included (2026-08-03 audit): rain-shortened games are
+        # official, have real PAs in the PA table, and were silently excluded
+        # here -- their SB/umpire data never backfilled while their PAs counted.
+        reg = sched[(sched["game_type"] == "R") & (sched["status"].isin(["Final", "Completed Early"]))]
         frames.append(reg[["game_pk"]])
     all_games = pd.concat(frames, ignore_index=True)["game_pk"].unique() if frames else []
     todo = [g for g in all_games if g not in already_have]

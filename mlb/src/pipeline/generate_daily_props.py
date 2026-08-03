@@ -250,7 +250,11 @@ if __name__ == "__main__":
     # above: a network hiccup here must not break the whole daily run.
     print("fetching recent trades (trade-deadline hardening)...", flush=True)
     try:
-        lookback_start = str(eastern_today() - _dt.timedelta(days=TRADE_OVERRIDE_LOOKBACK_DAYS))
+        # anchored to target_date, not eastern_today() (2026-08-03 audit): the
+        # evening full run targets TOMORROW, so an eastern_today() anchor
+        # skewed the lookback window one day short of the slate it serves.
+        _target = _dt.date.fromisoformat(target_date)
+        lookback_start = str(_target - _dt.timedelta(days=TRADE_OVERRIDE_LOOKBACK_DAYS))
         transactions = fetch_transactions(lookback_start, target_date)
         team_id_to_abbrev = pd.concat([
             schedule[["home_team_id", "home_team"]].rename(columns={"home_team_id": "id", "home_team": "abbrev"}),
