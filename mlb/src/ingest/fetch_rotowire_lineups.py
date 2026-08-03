@@ -30,6 +30,7 @@ and the MLB Stats API (RotoWire uses "ARI", this project's own data uses
 another mismatch is ever found.
 """
 
+import re
 import unicodedata
 
 import pandas as pd
@@ -111,14 +112,23 @@ def parse_rotowire_lineups(html: str) -> pd.DataFrame:
 
 
 def _normalize_name(name: str) -> str:
-    """Strip accents and punctuation for matching -- RotoWire and MLB Stats
-    API don't always agree on e.g. "Jose" vs "José", "Munetaka Murakami"
-    spelling of diacritics, or a trailing "Jr."/"II"."""
+    """Strip accents, punctuation, AND generational suffixes for matching --
+    RotoWire and MLB Stats API don't always agree on e.g. "Jose" vs "José",
+    diacritic spellings, or a trailing "Jr."/"II". The suffix strip was
+    claimed by this docstring but never implemented until the 2026-08-03
+    audit (finding M12): RotoWire "Luis Garcia" vs roster "Luis Garcia Jr."
+    failed to match, and because rotowire_lineup_for_team requires ALL 9
+    names to resolve, one suffix mismatch silently discarded the entire
+    team's published RotoWire lineup down to the lower-fidelity projection
+    tier (observed live for NYY on 2026-08-03). Collision check on real
+    2026 roster data before shipping: zero (team, stripped-name) pairs map
+    to more than one player_id."""
     if not isinstance(name, str):
         return ""
     stripped = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     stripped = stripped.replace(".", "").replace("'", "")
-    return " ".join(stripped.lower().split())
+    stripped = " ".join(stripped.lower().split())
+    return re.sub(r"\s+(jr|sr|ii|iii|iv|v)$", "", stripped)
 
 
 def build_team_roster_name_map(lineups: pd.DataFrame, schedule: pd.DataFrame) -> dict[tuple[str, str], int]:
