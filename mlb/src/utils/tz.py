@@ -35,3 +35,17 @@ def default_slate_date():
     if now.hour >= 17:
         return now.date() + timedelta(days=1)
     return now.date()
+
+
+def default_run_mode():
+    """The generate_daily_props.py run mode ("full" vs "light" -- see that
+    file's own docstring) an automated cron firing should use when it passes
+    "auto" instead of an explicit mode, same hour-aware, no-flag-needed
+    convention as default_slate_date() above and deliberately keyed off the
+    IDENTICAL hour>=17 ET boundary: the one evening firing that targets
+    TOMORROW's slate is also the one full historical rebuild each day (that
+    slate has no cached context yet to reuse); every other, same-day firing
+    targets an ALREADY-full-built slate and should just refresh what
+    actually changes intraday (lineups/pitchers/weather) via the light path
+    instead of redundantly rebuilding history it already has cached."""
+    return "full" if datetime.now(EASTERN).hour >= 17 else "light"

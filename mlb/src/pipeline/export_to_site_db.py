@@ -75,6 +75,7 @@ GAME_EXTRA_COLUMNS = [
     "p_over_8.5", "p_under_8.5", "home_covers_minus_1_5", "away_covers_plus_1_5",
     "real_weather", "postseason", "used_debut_fallback",
     "home_lineup_source", "away_lineup_source",
+    "home_pitcher_source", "away_pitcher_source",
 ]
 
 

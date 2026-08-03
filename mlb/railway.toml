@@ -1,24 +1,40 @@
 # Railway service config for the MLB daily worker (cron).
 # Root directory for this service in the Railway dashboard: mlb/
 #
-# DUAL-RUN (2026-08-02, task #163's follow-up): fires twice a day so
-# tomorrow's slate is ready the moment the site's displayed day flips at
-# midnight Eastern, not hours later once the morning cron happens to run.
-# Cron syntax supports comma-separated hours in one field -- both firings
-# share this one schedule, no second Railway service needed:
-#   01:00 UTC = ~9pm ET the night before (EDT) -- populates tomorrow's
-#     slate with best-available data (RotoWire's lineup-projection tiers
-#     already handle "lineups not confirmed yet", see generate_daily_props.py).
-#   14:00 UTC = ~10am ET same day (EDT) -- refreshes that same slate once
-#     real lineups are typically confirmed (unchanged from before).
-# src/utils/tz.py's default_slate_date() picks the right target
-# automatically based on the real Eastern hour at the moment each one
-# fires -- no mode flag or second command needed.
+# 4 FIRINGS/DAY (2026-08-03, follow-up to the original dual-run): one real
+# full rebuild each evening, then 3 cheap intraday refreshes bracketing when
+# real lineups/probable pitchers/weather actually post. Confirmed real
+# (2026-08-03): a single once-a-day daytime check missed 3 of 8 real games
+# because MLB's own probable-pitcher announcement (and RotoWire's editorial
+# expected-starter call) posts 2-4 hours before EACH GAME'S OWN first pitch,
+# not on a fixed daily clock -- a 1pm ET day game is typically set by ~11am,
+# a 7pm ET night game not until ~3-5pm. One morning check structurally can't
+# catch both.
+#   01:00 UTC = ~9pm ET the night before (EDT) -- mode=full: refreshes
+#     yesterday's completed games, rebuilds every walk-forward rate table
+#     from scratch, and caches that context to disk (see generate_daily_
+#     props.py) for the same-day light runs below to reuse. Populates
+#     tomorrow's slate with best-available data (RotoWire's lineup tiers
+#     already handle "lineups not confirmed yet").
+#   14:00 / 17:00 / 20:00 UTC = ~10am / 1pm / 4pm ET same day (EDT) --
+#     mode=light: reuses the cached context (historical rates don't change
+#     hour to hour) and only re-checks what DOES change intraday -- today's
+#     schedule/probable pitchers, RotoWire's expected/confirmed starters and
+#     lineups, and real posted weather. ~20x cheaper than a full rebuild
+#     (confirmed real, 2026-08-03: ~20 seconds vs. several minutes), so
+#     running it 3x more per day costs relatively little.
+# src/utils/tz.py's default_slate_date()/default_run_mode() pick the right
+# target date and mode automatically based on the real Eastern hour at the
+# moment each firing actually happens -- one schedule string, no second
+# Railway service needed (contrast nfl/railway.sunday.toml's own comment for
+# why NFL DOES need 2 services: its schedule varies by which DAY it is, not
+# purely by hour-of-day the way this one does).
 #
-# Real bug fixed here too: the previous single-run "10:00 ET" cron used a
-# `date.today() + 1 day` default computed against the container's UTC
-# clock, which overshot to tomorrow even when it was still today in
-# Eastern time (UTC and Eastern only diverge overnight -- see tz.py).
+# Real bug fixed here too (2026-08-02): the previous single-run "10:00 ET"
+# cron used a `date.today() + 1 day` default computed against the
+# container's UTC clock, which overshot to tomorrow even when it was still
+# today in Eastern time (UTC and Eastern only diverge overnight -- see
+# tz.py).
 #
 # DST caveat (documented, not solved): the literal UTC values above are
 # EDT-accurate; during EST months (Nov-Mar) each fires one Eastern hour
@@ -29,5 +45,6 @@
 builder = "NIXPACKS"
 
 [deploy]
-cronSchedule = "0 1,14 * * *"
+startCommand = "python -m src.pipeline.generate_daily_props auto 1000 auto && python -m src.pipeline.export_to_site_db"
+cronSchedule = "0 1,14,17,20 * * *"
 restartPolicyType = "NEVER"

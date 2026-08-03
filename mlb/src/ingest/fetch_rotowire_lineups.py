@@ -191,6 +191,77 @@ def rotowire_lineup_for_team(rotowire_df: pd.DataFrame, team: str, probable_pitc
     return grp["player_id"].astype(int).tolist(), grp["status"].iloc[0]
 
 
+_PYBASEBALL_PITCHER_ID_CACHE: dict[str, int | None] = {}
+
+
+def resolve_rotowire_pitcher_id(pitcher_name: str | None) -> int | None:
+    """Resolves a RotoWire-listed starter's name to an MLBAM player_id via
+    pybaseball's Chadwick register (a comprehensive name<->id crosswalk
+    across MLB's full player universe, not scoped to this project's own
+    cached history) -- a pitcher, unlike a batter, doesn't need to have
+    appeared in this exact team's own recent LINEUP history to be matchable
+    this way, which is why this is a separate resolution path from
+    match_rotowire_names_to_player_ids above rather than a reuse of the same
+    roster-scoped map. Memoized per-run (module-level cache) since the same
+    name may be looked up more than once in one daily run. Best-effort:
+    returns None on any lookup failure (network hiccup, zero/ambiguous
+    match) rather than raising -- callers already treat a None probable
+    pitcher as "skip this game," the existing, safe fallback behavior."""
+    if not pitcher_name or pd.isna(pitcher_name):
+        return None
+    if pitcher_name in _PYBASEBALL_PITCHER_ID_CACHE:
+        return _PYBASEBALL_PITCHER_ID_CACHE[pitcher_name]
+    parts = _normalize_name(pitcher_name).split()
+    result = None
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        try:
+            import pybaseball as pb
+            match = pb.playerid_lookup(last, first)
+            if len(match) == 1:
+                result = int(match.iloc[0]["key_mlbam"])
+            elif len(match) > 1:
+                # ambiguous (two real MLB players sharing this name) -- prefer
+                # whoever was active most recently, matching this project's
+                # own "don't guess" discipline elsewhere (see e.g.
+                # rotowire_lineup_for_team's own doubleheader disambiguation).
+                match = match.sort_values("mlb_played_last", ascending=False)
+                result = int(match.iloc[0]["key_mlbam"])
+        except Exception:
+            result = None
+    _PYBASEBALL_PITCHER_ID_CACHE[pitcher_name] = result
+    return result
+
+
+def rotowire_pitcher_for_team(rotowire_df: pd.DataFrame, team: str) -> tuple[int | None, str | None, str | None]:
+    """This team's RotoWire-listed starting pitcher (confirmed or expected),
+    resolved to an MLBAM player_id -- the pitcher-side analog of
+    rotowire_lineup_for_team, used specifically as a fallback when MLB's own
+    probable_pitcher_id is still unannounced (real lineups/starters post
+    2-4 hours before each game's OWN first pitch, not on a fixed clock, so a
+    single once-a-day check can miss a starter that's only confirmed a few
+    hours later -- see the intraday light-refresh cadence this exists for).
+    Only meaningful when a team has exactly ONE distinct starter listed
+    today; a doubleheader has 2 and no probable-pitcher name to disambiguate
+    by (unlike rotowire_lineup_for_team's batting-lineup case, which always
+    has MLB's own probable_pitcher_name to fall back on) -- returns
+    (None, None, None) rather than guessing which start this is. Returns
+    (player_id, pitcher_name, status) or (None, None, None) if no confident
+    resolution."""
+    candidates = rotowire_df[rotowire_df["team"] == team]
+    if candidates.empty:
+        return None, None, None
+    distinct = candidates[["pitcher_name"]].dropna().drop_duplicates()
+    if len(distinct) != 1:
+        return None, None, None  # 0 (no starter listed yet) or 2+ (doubleheader, ambiguous) -- don't guess
+    pitcher_name = distinct.iloc[0]["pitcher_name"]
+    player_id = resolve_rotowire_pitcher_id(pitcher_name)
+    if player_id is None:
+        return None, None, None
+    status = candidates["status"].iloc[0]
+    return player_id, pitcher_name, status
+
+
 def build_todays_rotowire_lineups(lineups: pd.DataFrame, schedule: pd.DataFrame, date: str = "today") -> pd.DataFrame:
     """One-call convenience: fetch + parse + name-match a RotoWire lineups
     page (date="today" or "tomorrow") against this project's own roster

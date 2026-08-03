@@ -46,6 +46,7 @@ itself just because the raw cache did) at the start of every run.
 
 import datetime as _dt
 import json
+import pickle
 import sys
 
 import numpy as np
@@ -53,14 +54,14 @@ import pandas as pd
 
 from src.ingest.build_pa_table import build_and_save_pa_table
 from src.ingest.fetch import fetch_schedule_day, fetch_transactions
-from src.ingest.fetch_rotowire_lineups import build_todays_rotowire_lineups, rotowire_lineup_for_team
+from src.ingest.fetch_rotowire_lineups import build_todays_rotowire_lineups, rotowire_lineup_for_team, rotowire_pitcher_for_team
 from src.models.bullpen import build_traded_pitcher_overrides, TRADE_OVERRIDE_LOOKBACK_DAYS
 from src.models.lineup_projection import project_lineup_platoon_aware
 from src.models.props import build_pregame_context, generate_game_props
 from src.models.validate_game_simulator import predominant_hand
 from src.pipeline.daily_update import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
-from src.utils.tz import eastern_today, default_slate_date
+from src.utils.tz import eastern_today, default_slate_date, default_run_mode
 
 
 POSTSEASON_GAME_TYPES = {"F", "D", "L", "W"}  # wild card, division series, league
@@ -94,6 +95,27 @@ def games_for_date(target_date: str) -> pd.DataFrame:
     return sched[(sched["date"] == target_date) & (sched["game_type"].isin(GAME_TYPES_TO_PREDICT))]
 
 
+def _context_cache_path(target_date: str):
+    return DATA_PROCESSED / f"pregame_context_cache_{target_date}.pkl"
+
+
+def refresh_game_weather(ctx: dict) -> None:
+    """Rebuilds ctx['game_weather'] in place from whatever's currently on disk
+    (real posted conditions fill in progressively closer to first pitch --
+    see weather_forecast.py) -- the one piece of a cached pregame context
+    that a light/intraday refresh (see the mode branch below) must NOT reuse
+    stale, even though every other walk-forward table in the context is
+    genuinely safe to reuse for the rest of the day. Mirrors props.py's
+    build_pregame_context construction of this exact field exactly, just
+    callable standalone without rebuilding anything else."""
+    all_schedules = pd.concat(
+        [pd.read_parquet(p) for p in sorted(DATA_RAW.glob("schedule_*.parquet"))], ignore_index=True
+    )
+    ctx["game_weather"] = all_schedules[
+        ["game_pk", "weather_condition", "weather_temp", "weather_wind"]
+    ].drop_duplicates("game_pk").set_index("game_pk")
+
+
 def lineup_for_game(schedule: pd.DataFrame, lineups: pd.DataFrame, pitcher_hand: pd.Series, game_pk: int,
                      team: str, side: str, target_date: str, opposing_pitcher_id,
                      rotowire_df: pd.DataFrame | None = None,
@@ -122,32 +144,97 @@ def lineup_for_game(schedule: pd.DataFrame, lineups: pd.DataFrame, pitcher_hand:
 
 
 if __name__ == "__main__":
-    target_date = sys.argv[1] if len(sys.argv) > 1 else str(default_slate_date())
+    # "auto" (or no arg at all) resolves via default_slate_date() -- same
+    # sentinel convention as mode="auto" below, so the cron's start command
+    # can pass an explicit, self-documenting 3rd positional (mode) without
+    # also having to hardcode a real date for the 1st.
+    _target_arg = sys.argv[1] if len(sys.argv) > 1 else "auto"
+    target_date = str(default_slate_date()) if _target_arg == "auto" else _target_arg
     n_trials = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
+    # mode="full" (default): refresh yesterday's completed games, rebuild the
+    # derived PA table, and rebuild every walk-forward rate table from scratch
+    # (build_pregame_context, the expensive part) -- then cache that context
+    # to disk so same-day "light" runs can reuse it. mode="light": none of
+    # that (historical rates don't meaningfully change hour to hour), just
+    # reload the cached context and re-check the things that DO change
+    # through the day -- today's schedule/probable pitchers (fetch_schedule_
+    # day, unconditional below either way), RotoWire lineups/pitchers, and
+    # real posted weather (refresh_game_weather) -- so an intraday cron slot
+    # can catch a newly-announced starter or a newly-posted forecast without
+    # paying the full rebuild's cost every time it runs. See railway.toml for
+    # the actual cron cadence this exists for.
+    #
+    # mode="auto": resolves via default_run_mode() (src/utils/tz.py) -- the
+    # SAME hour-aware, no-explicit-flag convention default_slate_date()
+    # already uses for target_date, deliberately keyed to the identical
+    # hour>=17 ET boundary (the one evening firing that targets tomorrow's
+    # not-yet-built slate is also the one that should fully rebuild it; every
+    # other same-day firing should just refresh what changes intraday). This
+    # is what railway.toml's cron actually passes -- lets ONE cron schedule
+    # string (multiple comma-separated firing times) resolve to the right
+    # mode per firing without needing a second Railway service the way NFL's
+    # sunday/tuesday split needed (see nfl/railway.sunday.toml's own comment
+    # for why THAT project needed 2 services -- MLB doesn't, because mode
+    # here is a pure function of time-of-day, not of which service is
+    # running). Manual/on-demand invocations with no 3rd arg at all still
+    # default to "full", unchanged, safe behavior.
+    mode = sys.argv[3] if len(sys.argv) > 3 else "full"
+    if mode == "auto":
+        mode = default_run_mode()
     season = int(target_date[:4])
-    print(f"=== generating props for {target_date} ===", flush=True)
+    print(f"=== generating props for {target_date} (mode={mode}) ===", flush=True)
 
-    print("refreshing raw Statcast/schedule data (yesterday's real games)...", flush=True)
-    status = refresh_all_data()
-    if status["errors"]:
-        print(f"  {len(status['errors'])} error(s) during refresh: {status['errors']}", flush=True)
-    print("rebuilding derived PA table from refreshed raw data...", flush=True)
-    build_and_save_pa_table(status["seasons_covered"])
+    cache_path = _context_cache_path(target_date)
+    ctx = pitcher_hand = None
+    if mode == "light":
+        if cache_path.exists():
+            print(f"light mode: loading cached pregame context from {cache_path.name}...", flush=True)
+            with open(cache_path, "rb") as f:
+                cached = pickle.load(f)
+            ctx, pitcher_hand = cached["ctx"], cached["pitcher_hand"]
+        else:
+            print(f"light mode requested but no cache found at {cache_path.name} -- "
+                  f"falling back to a full rebuild this once (self-healing, never worse than before).", flush=True)
+            mode = "full"
+
+    if mode == "full":
+        print("refreshing raw Statcast/schedule data (yesterday's real games)...", flush=True)
+        status = refresh_all_data()
+        if status["errors"]:
+            print(f"  {len(status['errors'])} error(s) during refresh: {status['errors']}", flush=True)
+        print("rebuilding derived PA table from refreshed raw data...", flush=True)
+        build_and_save_pa_table(status["seasons_covered"])
+        pa_path = DATA_PROCESSED / f"pa_table_{min(status['seasons_covered'])}_{max(status['seasons_covered'])}.parquet"
+        print("loading PA history and building pregame context (this is the slow part)...", flush=True)
+        pa = pd.read_parquet(pa_path)
+        ctx = build_pregame_context(pa)
+        pitcher_hand = predominant_hand(pa, "pitcher")
+        with open(cache_path, "wb") as f:
+            pickle.dump({"ctx": ctx, "pitcher_hand": pitcher_hand}, f)
+        cache_mb = cache_path.stat().st_size / (1024 * 1024)
+        print(f"cached pregame context to {cache_path.name} ({cache_mb:.0f} MB) for later same-day light runs",
+              flush=True)
+        # a full context pickle runs ~300MB (confirmed real, 2026-08-03) -- only
+        # TODAY's is ever needed (a light run always targets the same date a
+        # full run already covered), so every OTHER cached date is pure dead
+        # weight on the persistent volume; pruned here rather than left to grow
+        # unbounded (this is the only place a new one gets written).
+        for stale in DATA_PROCESSED.glob("pregame_context_cache_*.pkl"):
+            if stale != cache_path:
+                stale.unlink()
+                print(f"  pruned stale cache {stale.name}", flush=True)
 
     print("fetching this date's schedule/probable pitchers...", flush=True)
     fetch_schedule_day(target_date)
+    if mode == "light":
+        print("light mode: refreshing real posted weather from today's just-fetched schedule...", flush=True)
+        refresh_game_weather(ctx)
 
     games = games_for_date(target_date)
     if games.empty:
         print(f"no games found for {target_date} (schedule may not be posted yet, or it's an off day).", flush=True)
         sys.exit(0)
     print(f"found {len(games)} games", flush=True)
-
-    print("loading PA history and building pregame context (this is the slow part)...", flush=True)
-    pa_path = DATA_PROCESSED / f"pa_table_{min(status['seasons_covered'])}_{max(status['seasons_covered'])}.parquet"
-    pa = pd.read_parquet(pa_path)
-    ctx = build_pregame_context(pa)
-    pitcher_hand = predominant_hand(pa, "pitcher")
 
     schedule = pd.read_parquet(DATA_RAW / f"schedule_{season}.parquet")
     lineups = pd.read_parquet(DATA_RAW / f"lineups_{season}.parquet")
@@ -204,19 +291,40 @@ if __name__ == "__main__":
     pitcher_prop_rows = []
     for row in games.itertuples():
         home_pid, away_pid = row.home_probable_pitcher_id, row.away_probable_pitcher_id
+        home_pitcher_name, away_pitcher_name = row.home_probable_pitcher_name, row.away_probable_pitcher_name
+        home_pitcher_source = away_pitcher_source = "real"
+        # RotoWire expected/confirmed-starter fallback (2026-08-03): MLB's own
+        # probable_pitcher_id posts 2-4 hours before each game's OWN first pitch,
+        # not on a fixed daily clock -- a single once-a-day check misses any game
+        # whose starter simply isn't announced yet AT THAT CHECK, even though real
+        # information (RotoWire's own beat-writer-sourced expected starter) may
+        # already exist. Tried BEFORE giving up on a game entirely, same "don't
+        # skip when a real fallback exists" principle already applied to lineups
+        # (see lineup_for_game) -- only skips if NEITHER MLB NOR RotoWire has it.
+        if pd.isna(home_pid) and rotowire_df is not None:
+            rw_pid, rw_name, rw_status = rotowire_pitcher_for_team(rotowire_df, row.home_team)
+            if rw_pid is not None:
+                home_pid, home_pitcher_name = rw_pid, rw_name
+                home_pitcher_source = f"rotowire-{rw_status}"
+        if pd.isna(away_pid) and rotowire_df is not None:
+            rw_pid, rw_name, rw_status = rotowire_pitcher_for_team(rotowire_df, row.away_team)
+            if rw_pid is not None:
+                away_pid, away_pitcher_name = rw_pid, rw_name
+                away_pitcher_source = f"rotowire-{rw_status}"
         if pd.isna(home_pid) or pd.isna(away_pid):
-            print(f"  skipping {row.away_team} @ {row.home_team}: probable pitcher not yet announced", flush=True)
+            print(f"  skipping {row.away_team} @ {row.home_team}: probable pitcher not yet announced "
+                  f"(no RotoWire expected starter either)", flush=True)
             continue
 
         # each team's opponent for platoon purposes is the OTHER team's probable starter
         home_ids, home_source = lineup_for_game(schedule, lineups, pitcher_hand, row.game_pk,
                                                  row.home_team, "home", target_date, away_pid,
                                                  rotowire_df=rotowire_df,
-                                                 own_probable_pitcher_name=row.home_probable_pitcher_name)
+                                                 own_probable_pitcher_name=home_pitcher_name)
         away_ids, away_source = lineup_for_game(schedule, lineups, pitcher_hand, row.game_pk,
                                                  row.away_team, "away", target_date, home_pid,
                                                  rotowire_df=rotowire_df,
-                                                 own_probable_pitcher_name=row.away_probable_pitcher_name)
+                                                 own_probable_pitcher_name=away_pitcher_name)
         if home_ids is None or away_ids is None:
             print(f"  skipping {row.away_team} @ {row.home_team}: no lineup history to project from", flush=True)
             continue
@@ -230,11 +338,15 @@ if __name__ == "__main__":
         lineup_flags = [f for f in [_side_flag("home", home_source), _side_flag("away", away_source)] if f]
         if lineup_flags:
             flags.append(", ".join(lineup_flags))
+        pitcher_flags = [f for f in [_side_flag("home pitcher", home_pitcher_source),
+                                      _side_flag("away pitcher", away_pitcher_source)] if f]
+        if pitcher_flags:
+            flags.append(", ".join(pitcher_flags))
         flags.append("real weather" if has_real_weather else "forecast/climatological weather")
         flag_str = f"  [{', '.join(flags)}]"
 
-        print(f"  {row.away_team} @ {row.home_team}: {row.away_probable_pitcher_name} vs "
-              f"{row.home_probable_pitcher_name}{flag_str}", flush=True)
+        print(f"  {row.away_team} @ {row.home_team}: {away_pitcher_name} vs "
+              f"{home_pitcher_name}{flag_str}", flush=True)
 
         is_postseason = row.game_type in POSTSEASON_GAME_TYPES
         try:
@@ -258,6 +370,7 @@ if __name__ == "__main__":
         results.append({
             "game_pk": row.game_pk, "matchup": matchup,
             "home_lineup_source": home_source, "away_lineup_source": away_source,
+            "home_pitcher_source": home_pitcher_source, "away_pitcher_source": away_pitcher_source,
             "real_weather": has_real_weather, "postseason": is_postseason,
             "used_debut_fallback": bool(props["debut_fallback_pids"]), **props["game_props"],
             # JSON-encoded (not a raw dict column) -- pyarrow infers a
