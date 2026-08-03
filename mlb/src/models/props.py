@@ -51,6 +51,7 @@ from src.models.bullpen import (
     build_bullpen_snapshot,
     build_closer_appearance_log,
     build_expected_starter_innings,
+    build_live_expected_innings,
     build_relief_appearance_log,
     build_team_bullpen_roster,
     identify_closer,
@@ -279,6 +280,12 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
         historical_game_buckets=build_historical_game_buckets(all_schedules),
         bullpen_snap=build_bullpen_snapshot(pa, park_factors_long),
         expected_innings=build_expected_starter_innings(pa).set_index(["pitcher", "game_pk"])["expected_innings"],
+        # live-path companion (2026-08-03 audit, finding C4): the per-start
+        # table above only ever hits for HISTORICAL game_pks -- a live game's
+        # lookup always missed and fell back to a constant 5.4 for every
+        # starter, silently disabling the whole per-pitcher innings model in
+        # production while backtests exercised it.
+        expected_innings_live=build_live_expected_innings(pa),
         hook_table=build_hook_table(pa),
         relief_log=build_relief_appearance_log(pa),
         all_appearance_log=build_all_appearance_log(pa),
@@ -547,8 +554,18 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
 
     home_roster_profiles, home_roster_weights = build_roster_profiles(home_team)
     away_roster_profiles, away_roster_weights = build_roster_profiles(away_team)
-    home_exp_ip = ctx["expected_innings"].get((home_pitcher_id, game_pk), 5.4)
-    away_exp_ip = ctx["expected_innings"].get((away_pitcher_id, game_pk), 5.4)
+    # 3-tier lookup (2026-08-03 audit, finding C4): exact historical
+    # (pitcher, game_pk) row for backtests -> the pitcher's live
+    # as-of-next-start projection for real future games -> 5.4 only for a
+    # pitcher with no starter history anywhere (true opener/debut).
+    def _exp_ip(pitcher_id):
+        v = ctx["expected_innings"].get((pitcher_id, game_pk))
+        if v is None:
+            v = ctx["expected_innings_live"].get(pitcher_id)
+        return 5.4 if v is None else float(v)
+
+    home_exp_ip = _exp_ip(home_pitcher_id)
+    away_exp_ip = _exp_ip(away_pitcher_id)
     home_fallback = fallback_profile(home_team)
     away_fallback = fallback_profile(away_team)
     home_closer_id = identify_closer(ctx["closer_log"], home_team, game_date, traded_overrides=traded_overrides)

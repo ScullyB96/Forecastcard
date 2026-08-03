@@ -232,7 +232,38 @@ def build_expected_starter_innings(pa: pd.DataFrame) -> pd.DataFrame:
         out_frames.append(sdf)
 
     result = pd.concat(out_frames, ignore_index=True)
-    return result[["pitcher", "pitching_team", "game_pk", "season", "game_date", "expected_innings"]]
+    return result[["pitcher", "pitching_team", "game_pk", "season", "game_date", "expected_innings", "prior_weight_starts", "preseason_innings", "season_innings_before", "season_starts_before", "innings_pitched"]]
+
+
+def build_live_expected_innings(pa: pd.DataFrame) -> pd.Series:
+    """Per-pitcher expected starter innings AS OF THEIR NEXT START -- the
+    live-game companion to build_expected_starter_innings (2026-08-03
+    audit, finding C4). The per-start table above is keyed by
+    (pitcher, game_pk) from HISTORICAL PA rows, so a live/future game_pk
+    can never hit it and props.py's lookup silently returned the 5.4
+    fallback for EVERY starter, every game -- the whole per-pitcher
+    innings projection was dead code on the live path while backtests
+    (historical game_pks) exercised it, i.e. the validated configuration
+    was not the deployed one.
+
+    Value = each pitcher's blend INCLUDING his most recent start's
+    innings (one Bayesian update past his last per-start row), taken from
+    his latest available season. A pitcher returning after a season with
+    zero starts gets his end-of-prior-season value (close to, not
+    identical to, the re-weighted Marcel preseason prior -- documented
+    approximation, not a gap). A pitcher with no starts anywhere (true
+    opener/debut) is absent -- callers keep their explicit fallback."""
+    per_start = build_expected_starter_innings(pa)
+    if per_start.empty:
+        return pd.Series(dtype=float)
+    per_start = per_start.sort_values(["pitcher", "season", "game_date", "game_pk"])
+    last = per_start.groupby(["pitcher", "season"]).tail(1).copy()
+    next_num = (last["prior_weight_starts"] * last["preseason_innings"]
+                + last["season_innings_before"] + last["innings_pitched"])
+    next_den = last["prior_weight_starts"] + last["season_starts_before"] + 1
+    last["expected_innings_next"] = next_num / next_den
+    latest = last.sort_values("season").groupby("pitcher").tail(1)
+    return latest.set_index("pitcher")["expected_innings_next"]
 
 
 def build_predictive_bullpen_plan(starter_profile: dict, expected_innings: float,
