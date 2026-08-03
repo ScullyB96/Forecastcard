@@ -197,6 +197,22 @@ class TransitionTable:
             arr = self._by_outs_outcome.get((pre_state % 10, outcome))
         if arr is None:
             arr = self._by_outcome_only.get(outcome)
+            if arr is not None and len(arr):
+                # Outs-preserving guard on the outcome-only last resort
+                # (2026-08-03 audit, finding M14): this tier pools rows
+                # across every out count, so a 2-out draw could return a
+                # 0/1-out context's post_state -- outs went BACKWARDS,
+                # un-ending the half-inning. Keep only rows that are
+                # terminal (post_state == -1; the half-inning ended, outs
+                # can only have gone UP) or whose post outs >= pre outs.
+                # If nothing survives (never observed on real data), the
+                # unfiltered array is kept rather than crashing -- the
+                # state-factor hard zeros upstream make reaching here for
+                # an impossible outcome ~impossible to begin with.
+                mask = (arr[:, 0] == -1) | (arr[:, 0] % 10 >= pre_state % 10)
+                filtered = arr[mask]
+                if len(filtered):
+                    arr = filtered
         if arr is None or len(arr) == 0:
             raise ValueError(f"no historical data for outcome={outcome!r} (pre_state={pre_state})")
         if crn_key is not None:

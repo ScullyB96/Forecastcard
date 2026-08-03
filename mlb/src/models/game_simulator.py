@@ -145,6 +145,31 @@ def build_league_rates_by_season(pa: pd.DataFrame) -> dict[int, dict[str, float]
 STATE_FACTOR_PRIOR_PA = 5000  # same magnitude/role as park_factors.py's and weather.py's own priors
 
 
+def _mechanically_impossible(state: int, outcome: str) -> bool:
+    """Rule-level impossibilities (2026-08-03 audit, finding M14): the
+    Bayesian floor below otherwise keeps every outcome drawable at
+    ~STATE_FACTOR_PRIOR_PA/(n+PRIOR) x league rate even where the scoring
+    rules make it impossible (a 2-out sacrifice can't exist -- the out
+    would end the inning before the advance counts; a triple play needs 0
+    outs and 2+ runners; sacrifice/DP/FC/TP all need a runner). Those
+    impossible draws then fell through the transition table to its
+    outcome-only last-resort tier, whose pooled rows come from 0/1-out
+    contexts -- OUTS WENT BACKWARDS ~once per 26 simulated games,
+    un-ending half-innings and inflating scoring. Every rule below is
+    verified against all 676,748 real PAs: zero real occurrences of any
+    flagged (state, outcome) combination."""
+    bm, outs = state // 10, state % 10
+    n_runners = bin(bm).count("1")
+    needs_runner = {"sac_fly", "sac_bunt", "fielders_choice", "double_play", "triple_play"}
+    if outcome in needs_runner and n_runners == 0:
+        return True
+    if outcome in {"sac_fly", "sac_bunt", "double_play", "triple_play"} and outs == 2:
+        return True
+    if outcome == "triple_play" and (outs != 0 or n_runners < 2):
+        return True
+    return False
+
+
 def build_state_factors_by_season(pa: pd.DataFrame) -> dict[int, dict[int, dict[str, float]]]:
     """Walk-forward-safe (prior-seasons-only) state_factor[state][outcome] =
     rate(outcome | state) / rate(outcome | overall). Confirmed necessary on
@@ -184,7 +209,10 @@ def build_state_factors_by_season(pa: pd.DataFrame) -> dict[int, dict[int, dict[
         prior = pa[pa["season"] < season]
         if prior.empty:
             out[season] = {
-                bitmask * 10 + outs: {o: 1.0 for o in OUTCOMES}
+                bitmask * 10 + outs: {
+                    o: (0.0 if _mechanically_impossible(bitmask * 10 + outs, o) else 1.0)
+                    for o in OUTCOMES
+                }
                 for bitmask in range(8) for outs in range(3)
             }
             continue
@@ -196,6 +224,11 @@ def build_state_factors_by_season(pa: pd.DataFrame) -> dict[int, dict[int, dict[
             n_state = len(g)
             cell = {}
             for o in OUTCOMES:
+                if _mechanically_impossible(int(state), o):
+                    # hard zero, not a Bayesian floor -- see
+                    # _mechanically_impossible (finding M14)
+                    cell[o] = 0.0
+                    continue
                 overall_rate = overall.get(o, 1e-9)
                 shrunk_rate = (
                     (state_counts.get(o, 0) + STATE_FACTOR_PRIOR_PA * overall_rate)
@@ -669,6 +702,19 @@ class GameSimulator:
                 post_state, runs_this_pa = self.transitions.sample(state, outcome, self.rng)
             if thruorder_counts is not None:
                 thruorder_counts[lineup_idx] = thruorder_counts.get(lineup_idx, 0) + 1
+            # Walk-off run truncation (2026-08-03 audit, finding M13): under
+            # MLB rules a game-ending play only counts runs through the
+            # WINNING run -- the game is over the instant the home team
+            # leads -- UNLESS the play is a home run, which counts every
+            # runner (the "walk-off grand slam" exception). The sampled
+            # historical transition carries the full runs_scored from a
+            # non-walkoff context, so a non-HR walkoff play must be
+            # truncated to exactly (margin + 1) runs or ~0.7% of simulated
+            # games end with MLB-impossible margins, distorting run-line
+            # and totals distributions at the 1-vs-2-run boundary.
+            if (walkoff_margin is not None and outcome != "home_run"
+                    and runs + runs_this_pa > walkoff_margin + 1):
+                runs_this_pa = walkoff_margin + 1 - runs
             if events is not None:
                 events.append({"batter_idx": lineup_idx, "outcome": outcome, "runs": runs_this_pa})
             if hook_state is not None and not hook_state["hooked"]:
