@@ -443,44 +443,6 @@ h2 {
 .confidence-medium .confidence-dot { background: var(--accent); }
 .confidence-low .confidence-dot { background: var(--lose); }
 
-/* ---------- top plays (always visible, no expand needed) ---------- */
-
-.top-props {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--sp-2);
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-3);
-  border-top: 1px dashed var(--border);
-}
-.top-props-label {
-  font-size: var(--fs-meta);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-faint);
-  flex-shrink: 0;
-}
-.top-props-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.35rem;
-  padding: 0.2rem var(--sp-2);
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--accent) 10%, var(--panel-2));
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
-  font-size: 0.78rem;
-}
-.top-props-name { font-weight: 600; color: var(--text); }
-.top-props-market { color: var(--text-faint); font-size: var(--fs-meta); }
-.top-props-value {
-  font-family: var(--font-display);
-  font-weight: 700;
-  color: var(--accent-2);
-  font-variant-numeric: tabular-nums;
-}
-
 /* ---------- props ---------- */
 
 .props-toggle, .factors-toggle {
@@ -512,81 +474,14 @@ h2 {
 .props-toggle[open] summary::after, .factors-toggle[open] summary::after { transform: rotate(180deg); }
 .props-toggle summary:hover, .factors-toggle summary:hover { color: var(--text); border-color: var(--border-strong); }
 
-.prop-panel {
+.stat-lines-panel {
   margin-top: var(--sp-3);
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
 }
 
-.prop-filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-1);
-  margin-bottom: var(--sp-1);
-}
-.prop-filter-chip {
-  font-family: var(--font-body);
-  padding: 0.25rem var(--sp-3);
-  border-radius: var(--radius-pill);
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  font-size: var(--fs-meta);
-  font-weight: 600;
-  cursor: pointer;
-  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
-}
-.prop-filter-chip:hover { color: var(--text); border-color: var(--border-strong); }
-.prop-filter-chip.active {
-  /* fixed near-black text regardless of theme -- var(--bg) text against
-     the accent background fails contrast in light mode (~2.6:1, below
-     WCAG AA's 4.5:1); black holds ~4.9:1 against the light-mode accent
-     and ~7.6:1 against the dark-mode one, since --accent itself is a
-     different shade per theme (see the light-mode override below). */
-  color: #000;
-  background: var(--accent);
-  border-color: var(--accent);
-}
-.prop-filter-count { opacity: 0.7; font-weight: 500; }
-
-.prop-role-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-}
-.prop-role-title {
-  margin: 0;
-  padding-bottom: var(--sp-1);
-  border-bottom: 1px solid var(--border);
-  font-size: var(--fs-label);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-dim);
-}
-
-.prop-market-group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-}
-.prop-market-title {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-1);
-  padding: 0 var(--sp-1);
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--text);
-}
-.prop-market-count {
-  font-size: var(--fs-meta);
-  color: var(--text-faint);
-  font-weight: 500;
-}
-
-.prop-list {
+.stat-lines-section {
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -594,61 +489,65 @@ h2 {
   border-radius: 10px;
   overflow: hidden;
 }
+.stat-lines-title {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
+  font-size: var(--fs-label);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
 
-.prop-row {
+.stat-line {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: baseline;
   justify-content: space-between;
-  gap: var(--sp-3);
+  gap: var(--sp-2) var(--sp-3);
   padding: var(--sp-2) var(--sp-3);
   background: var(--panel-2);
 }
 
-.prop-player {
+.stat-line-name {
   min-width: 0;
+  flex-shrink: 0;
   font-size: 0.85rem;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-.prop-value {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-shrink: 0;
-}
-
-.prop-line-val {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: var(--text-dim);
-}
-
-.prop-line {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 1.05rem;
-  color: var(--text);
-}
-
-.prop-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.15rem var(--sp-2);
-  border-radius: var(--radius-pill);
+.stat-line-team {
+  font-weight: 500;
+  color: var(--text-faint);
   font-size: var(--fs-meta);
-  font-weight: 700;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
+}
+
+.stat-line-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+}
+.stat-line-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
   font-variant-numeric: tabular-nums;
 }
-.prop-pill.over { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-.prop-pill.under { color: var(--text-dim); }
-.prop-pill.single { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.stat-line-abbrev {
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+.stat-line-value {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text);
+}
 
 .empty-state {
   color: var(--text-dim);

@@ -38,14 +38,23 @@ SPORT = "mlb"
 # column -> (display market name, kind); "prob" columns populate over_prob,
 # "mean" columns populate proj_mean. Matches the real column names
 # _batter_props/_pitcher_props produce (src/models/props.py).
+#
+# All-"mean" by design (site prop-display redesign, 2026-08) -- previously
+# most batter/pitcher markets were "prob" (e.g. "6+ K" as a fixed threshold
+# probability), which forced the same arbitrary line onto every player
+# regardless of their own skill (an ace and a #5 starter both got judged
+# against "6+", reading as a genuine bug even though it was working as
+# designed). Showing the real projected number instead (e.g. "7.2 K") lets
+# a reader pick their own threshold rather than the site picking one for
+# them. The underlying p_1plus_*/p_6plus_k probability columns are still
+# computed in props.py (still used for calibration) -- just not exported
+# to the site anymore.
 BATTER_MARKETS = {
-    "p_1plus_hit": ("1+ Hit", "prob"),
-    "p_2plus_hits": ("2+ Hits", "prob"),
-    "p_1plus_hr": ("1+ HR", "prob"),
-    "p_1plus_bb": ("1+ BB", "prob"),
-    "p_1plus_rbi": ("1+ RBI", "prob"),
-    "mean_total_bases": ("Total Bases", "mean"),
     "mean_hits": ("Hits", "mean"),
+    "mean_hr": ("HR", "mean"),
+    "mean_bb": ("BB", "mean"),
+    "mean_rbi": ("RBI", "mean"),
+    "mean_total_bases": ("Total Bases", "mean"),
     # "Batter Strikeouts" (not just "Strikeouts") -- a two-way player (e.g.
     # Ohtani) can have both a batter AND a pitcher row for the same game,
     # and props' primary key is (..., player_id, market) with no role
@@ -60,7 +69,6 @@ PITCHER_MARKETS = {
     "mean_hits_allowed": ("Hits Allowed", "mean"),
     "mean_runs_allowed": ("Runs Allowed", "mean"),
     "mean_batters_faced": ("Batters Faced", "mean"),
-    "p_6plus_k": ("6+ K", "prob"),
 }
 
 GAME_EXTRA_COLUMNS = [

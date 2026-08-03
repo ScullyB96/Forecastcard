@@ -58,70 +58,79 @@ def _is_stale(dt: datetime) -> bool:
 templates.env.filters["is_stale"] = _is_stale
 
 
-# Preferred on-page order for known markets (mirrors each sport's own
-# BATTER_MARKETS/PITCHER_MARKETS-style constants) -- anything not listed
-# falls back to alphabetical after these, so a market this list doesn't
-# know about yet (a new sport, a new stat) still renders instead of
-# erroring, just without a curated position.
+# Preferred on-page order for known markets within one player's stat line
+# (mirrors each sport's own BATTER_MARKETS/PITCHER_MARKETS-style constants)
+# -- anything not listed falls back to alphabetical after these, so a
+# market this list doesn't know about yet (a new sport, a new stat) still
+# renders instead of erroring, just without a curated position.
 MARKET_ORDER = [
-    "1+ HR", "2+ Hits", "1+ Hit", "Total Bases", "1+ RBI", "1+ BB", "Hits", "Batter Strikeouts",
-    "6+ K", "Strikeouts", "Walks Allowed", "Hits Allowed", "Runs Allowed", "Batters Faced",
+    "HR", "Hits", "Total Bases", "RBI", "BB", "Batter Strikeouts",
+    "Strikeouts", "Walks Allowed", "Hits Allowed", "Runs Allowed", "Batters Faced",
 ]
 _MARKET_RANK = {m: i for i, m in enumerate(MARKET_ORDER)}
 
+# Short label for a stat line (e.g. "K 7.2" instead of "Strikeouts 7.2") --
+# falls back to the full market name for anything not listed (a new sport's
+# market this project hasn't curated an abbreviation for yet), so nothing
+# ever fails to render, just without a shortened label.
+MARKET_ABBREV = {
+    "HR": "HR", "Hits": "H", "Total Bases": "TB", "RBI": "RBI", "BB": "BB",
+    "Batter Strikeouts": "K", "Strikeouts": "K", "Walks Allowed": "BB",
+    "Hits Allowed": "H", "Runs Allowed": "R", "Batters Faced": "BF",
+}
+
 # extra.role is only set by MLB's export today (NFL/NBA/NHL props have no
-# role key) -- ROLE_LABELS.get(None) below falls back to a generic "Props"
+# role key) -- ROLE_LABELS.get(None) below falls back to a generic "Players"
 # section so those sports still render sensibly, just without a batter/
 # pitcher split they don't have data for.
 ROLE_LABELS = {"batter": "Batters", "pitcher": "Pitchers"}
 
 
-def _prop_confidence(p: dict) -> float:
-    """Sort key so the most notable prop leads each market group --
-    highest probability first, or highest projection for mean-only
-    markets -- instead of the old alphabetical-by-player ordering."""
-    if p.get("over_prob") is not None:
-        return p["over_prob"]
+def _stat_value(p: dict) -> float:
+    """A single comparable number for a stat, whichever kind it is --
+    projected mean if this market has one, else the raw probability
+    (0-1) for the handful of genuinely binary/rare markets (e.g. NFL's
+    Anytime TD) that don't have a natural mean equivalent."""
     if p.get("proj_mean") is not None:
         return p["proj_mean"]
-    return 0.0
+    return p.get("over_prob") or 0.0
 
 
 def _group_props(rows: list[dict]) -> dict:
-    """Turn one game's flat prop list into role -> market sections, each
-    sorted by descending confidence. Replaces a single 300+ row
-    alphabetical dump with the category-first layout real sportsbook
-    sites use (pick a market, see who's most likely first).
+    """Turn one game's flat prop list into role -> player stat-line
+    sections -- one row per player merging every market they have into a
+    single line (e.g. "Zack Wheeler  K 7.2 · BB 2.1 · H 5.4 · R 2.8 · BF
+    23.6"), sorted by total projected production within each role.
 
-    Also returns `chips` (a flat, ordered list of every market + its row
-    count, for a clickable filter-chip bar -- the same "pick one category"
-    pattern Action Network's prop tables use) and `top_props` (the 3
-    highest-confidence rows across the whole game, any market, so a card
-    has real headline content visible without expanding anything)."""
-    by_role: dict[str | None, dict[str, list[dict]]] = {}
+    Replaces the old one-pill-per-market-per-player layout: showing a
+    fixed "6+ K"-style probability forced the same arbitrary threshold
+    onto every pitcher regardless of their own skill level. A plain
+    projected number lets the reader pick their own threshold instead."""
+    by_player: dict[tuple, dict] = {}
     for p in rows:
         role = (p.get("extra") or {}).get("role")
-        by_role.setdefault(role, {}).setdefault(p["market"], []).append(p)
+        key = (p["player_id"], role)
+        entry = by_player.setdefault(key, {
+            "player_id": p["player_id"], "player_name": p["player_name"],
+            "team": p.get("team"), "role": role, "stats": [],
+        })
+        entry["stats"].append({
+            **p, "abbrev": MARKET_ABBREV.get(p["market"], p["market"]),
+        })
+
+    for entry in by_player.values():
+        entry["stats"].sort(key=lambda s: (_MARKET_RANK.get(s["market"], len(MARKET_ORDER)), s["market"]))
+
+    by_role: dict[str | None, list[dict]] = {}
+    for entry in by_player.values():
+        by_role.setdefault(entry["role"], []).append(entry)
 
     sections = []
-    chips = []
     for role in sorted(by_role, key=lambda r: (r is None, r != "batter")):
-        markets = by_role[role]
-        market_names = sorted(markets, key=lambda m: (_MARKET_RANK.get(m, len(MARKET_ORDER)), m))
-        market_groups = [
-            {"market": m, "rows": sorted(markets[m], key=_prop_confidence, reverse=True)}
-            for m in market_names
-        ]
-        sections.append({"role": role, "label": ROLE_LABELS.get(role, "Props"), "markets": market_groups})
-        chips.extend({"market": g["market"], "count": len(g["rows"])} for g in market_groups)
+        players = sorted(by_role[role], key=lambda e: sum(_stat_value(s) for s in e["stats"]), reverse=True)
+        sections.append({"role": role, "label": ROLE_LABELS.get(role, "Players"), "players": players})
 
-    # Only probability-type rows are comparable on one scale (0-1) --
-    # mixing in proj_mean rows (e.g. "7.2 projected strikeouts") would let
-    # a raw counting-stat number outrank a genuine 70%+ probability just
-    # because 7.2 > 0.70, which isn't a real confidence comparison.
-    prob_rows = [p for p in rows if p.get("over_prob") is not None]
-    top_props = sorted(prob_rows, key=_prop_confidence, reverse=True)[:3]
-    return {"total": len(rows), "sections": sections, "chips": chips, "top_props": top_props}
+    return {"total": len(rows), "player_count": len(by_player), "sections": sections}
 
 
 def _props_by_game_id(sport: str, slate_key: str, games: list[dict]) -> dict[str, dict]:

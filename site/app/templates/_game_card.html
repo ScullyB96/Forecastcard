@@ -18,74 +18,32 @@
 </div>
 {% endmacro %}
 
-{% macro prop_row(p) %}
-{% if p.line is not none %}
-<div class="prop-row prop-row--ou">
-  <div class="prop-player">{{ p.player_name }}{% if p.team %} · {{ p.team }}{% endif %}</div>
-  <div class="prop-value">
-    <span class="prop-line-val">{{ p.line }}</span>
-    {% if p.over_prob is not none %}<span class="prop-pill over">O {{ (p.over_prob * 100)|round }}%</span>{% endif %}
-    {% if p.under_prob is not none %}<span class="prop-pill under">U {{ (p.under_prob * 100)|round }}%</span>{% endif %}
-  </div>
-</div>
-{% else %}
-<div class="prop-row prop-row--single">
-  <div class="prop-player">{{ p.player_name }}{% if p.team %} · {{ p.team }}{% endif %}</div>
-  <div class="prop-value">
-    {%- if p.over_prob is not none -%}
-      <span class="prop-pill single">{{ (p.over_prob * 100)|round }}%</span>
-    {%- elif p.proj_mean is not none -%}
-      <span class="prop-line">{{ '%.2f'|format(p.proj_mean) }}</span>
-    {%- else -%}
-      <span class="prop-pill">—</span>
-    {%- endif -%}
-  </div>
-</div>
-{% endif %}
-{% endmacro %}
-
-{% macro top_props_row(top_props) %}
-{% if top_props %}
-<div class="top-props">
-  <span class="top-props-label">Top plays</span>
-  {% for p in top_props %}
-  <span class="top-props-chip">
-    <span class="top-props-name">{{ p.player_name }}</span>
-    <span class="top-props-market">{{ p.market }}</span>
-    <span class="top-props-value">
-      {%- if p.over_prob is not none -%}{{ (p.over_prob * 100)|round }}%
-      {%- elif p.proj_mean is not none -%}{{ '%.2f'|format(p.proj_mean) }}
-      {%- else -%}—
-      {%- endif -%}
+{% macro stat_line(entry) %}
+<div class="stat-line">
+  <div class="stat-line-name">{{ entry.player_name }}{% if entry.team %} <span class="stat-line-team">{{ entry.team }}</span>{% endif %}</div>
+  <div class="stat-line-stats">
+    {% for s in entry.stats %}
+    <span class="stat-line-item">
+      <span class="stat-line-abbrev">{{ s.abbrev }}</span>
+      <span class="stat-line-value">
+        {%- if s.proj_mean is not none -%}{{ '%.1f'|format(s.proj_mean) }}
+        {%- elif s.over_prob is not none -%}{{ (s.over_prob * 100)|round }}%
+        {%- else -%}—
+        {%- endif -%}
+      </span>
     </span>
-  </span>
-  {% endfor %}
-</div>
-{% endif %}
-{% endmacro %}
-
-{% macro prop_panel(grouped) %}
-<div class="prop-panel">
-  {% if grouped.chips|length > 1 %}
-  <div class="prop-filter-bar">
-    <button type="button" class="prop-filter-chip active" data-market="all">All</button>
-    {% for c in grouped.chips %}
-    <button type="button" class="prop-filter-chip" data-market="{{ c.market }}">{{ c.market }} <span class="prop-filter-count">{{ c.count }}</span></button>
     {% endfor %}
   </div>
-  {% endif %}
+</div>
+{% endmacro %}
+
+{% macro stat_lines_panel(grouped) %}
+<div class="stat-lines-panel">
   {% for sec in grouped.sections %}
-  <div class="prop-role-section" data-role-section>
-    {% if grouped.sections|length > 1 %}<h4 class="prop-role-title">{{ sec.label }}</h4>{% endif %}
-    {% for grp in sec.markets %}
-    <div class="prop-market-group" data-market="{{ grp.market }}">
-      <div class="prop-market-title">{{ grp.market }} <span class="prop-market-count">{{ grp.rows|length }}</span></div>
-      <div class="prop-list">
-        {% for p in grp.rows %}
-          {{ prop_row(p) }}
-        {% endfor %}
-      </div>
-    </div>
+  <div class="stat-lines-section">
+    {% if grouped.sections|length > 1 %}<h4 class="stat-lines-title">{{ sec.label }}</h4>{% endif %}
+    {% for entry in sec.players %}
+      {{ stat_line(entry) }}
     {% endfor %}
   </div>
   {% endfor %}
@@ -173,10 +131,9 @@
   {% endif %}
   {% set grouped = props_by_game_id.get(game.game_id) %}
   {% if grouped and grouped.total %}
-  {{ top_props_row(grouped.top_props) }}
   <details class="props-toggle">
-    <summary>{{ grouped.total }} prop{{ 's' if grouped.total != 1 }}</summary>
-    {{ prop_panel(grouped) }}
+    <summary>{{ grouped.player_count }} player projection{{ 's' if grouped.player_count != 1 }}</summary>
+    {{ stat_lines_panel(grouped) }}
   </details>
   {% endif %}
   {% if game.debug %}

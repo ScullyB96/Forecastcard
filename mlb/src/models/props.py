@@ -784,7 +784,11 @@ def _apply_batter_prop_calibration(df: pd.DataFrame) -> pd.DataFrame:
 
 def _batter_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
     """Per batter_id: probability of 1+/2+ hits, HR, walk, strikeout, RBI,
-    and the mean simulated total-bases/hits/RBI across trials."""
+    and the mean simulated hits/HR/BB/RBI/total-bases/strikeouts across
+    trials. The mean_hr/mean_bb/mean_rbi columns (task: site prop-display
+    redesign) read straight off per_trial's already-computed hr/bb/rbi
+    columns below -- the probability columns aren't removed (still used
+    for calibration), just no longer the only per-player numbers available."""
     events_df = events_df.copy()
     events_df["is_hit"] = events_df["outcome"].isin(HIT_OUTCOMES)
     events_df["is_hr"] = events_df["outcome"] == "home_run"
@@ -814,6 +818,9 @@ def _batter_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
             "p_1plus_rbi": (g["rbi"] >= 1).mean(),
             "mean_total_bases": g["bases"].mean(),
             "mean_hits": g["hits"].mean(),
+            "mean_hr": g["hr"].mean(),
+            "mean_bb": g["bb"].mean(),
+            "mean_rbi": g["rbi"].mean(),
             "mean_k": g["k"].mean(),
         })
 
