@@ -189,6 +189,38 @@ def export(target_date: str, database_url: str) -> None:
     conn = psycopg2.connect(database_url)
     try:
         with conn, conn.cursor() as cur:
+            # Phantom-row sweep (2026-08-03 audit, finding M20): this export
+            # runs 4x/day with upserts only -- when a lineup or probable
+            # starter changed between runs, replaced players' prop rows (and
+            # a postponed game's rows) persisted in the site DB alongside
+            # the new ones, so the site displayed props for players who
+            # weren't playing. Delete anything for this slate that is NOT in
+            # the current export, inside the same transaction as the
+            # upserts (the `with conn` block) -- atomic, so the site never
+            # observes an empty or partially-written slate.
+            current_game_ids = [g["game_id"] for g in games]
+            cur.execute(
+                "DELETE FROM props WHERE sport = %s AND slate_key = %s AND NOT (game_id = ANY(%s))",
+                (SPORT, target_date, current_game_ids),
+            )
+            cur.execute(
+                "DELETE FROM games WHERE sport = %s AND slate_key = %s AND NOT (game_id = ANY(%s))",
+                (SPORT, target_date, current_game_ids),
+            )
+            current_prop_keys = [(p["game_id"], str(p["player_id"]), p["market"]) for p in props]
+            cur.execute(
+                """
+                DELETE FROM props WHERE sport = %s AND slate_key = %s
+                AND (game_id, player_id, market) NOT IN (
+                    SELECT x.game_id, x.player_id, x.market
+                    FROM unnest(%s::text[], %s::text[], %s::text[]) AS x(game_id, player_id, market)
+                )
+                """,
+                (SPORT, target_date,
+                 [k[0] for k in current_prop_keys],
+                 [k[1] for k in current_prop_keys],
+                 [k[2] for k in current_prop_keys]),
+            )
             for g in games:
                 cur.execute(
                     """
