@@ -28,14 +28,21 @@ noise, a well-established, textbook-matching effect.
 """
 
 import json
+from pathlib import Path
 
 import pandas as pd
 
 from src.models.matchup import odds, prob_from_odds
 from src.models.true_talent import MARCEL_WEIGHTS
-from src.utils.paths import DATA_PROCESSED
 
-MEASURED_SHARED_TERM_PATH = DATA_PROCESSED / "platoon_shared_term.json"
+# Lives alongside the source (NOT under data/processed/, which is gitignored as a
+# bulky regenerable cache) -- this is a small, periodically-fitted constants file
+# that must ship WITH the code and be available immediately in production,
+# without depending on a runtime regeneration step (production rebuilds
+# pa_table/state/park/ttop factors fresh from raw data on every full run, but
+# this measurement is meant to refresh on the same offseason cadence as every
+# other fitted constant in this project -- task #155 -- not nightly).
+MEASURED_SHARED_TERM_PATH = Path(__file__).parent / "platoon_shared_term.json"
 _measured_shared_term_cache = None  # module-level cache -- loaded once, not once per outcome/season
 
 

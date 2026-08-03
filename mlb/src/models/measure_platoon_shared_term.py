@@ -28,6 +28,7 @@ or after enough new same-hand-matchup data has accumulated to matter --
 same cadence discipline as every other fitted constant in this project."""
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -35,9 +36,14 @@ import pandas as pd
 from src.models.matchup import odds
 from src.models.props import OUTCOMES
 from src.models.validate_game_simulator import build_shared_tables
-from src.utils.paths import DATA_PROCESSED
 
-OUTPUT_PATH = DATA_PROCESSED / "platoon_shared_term.json"
+# Must match platoon_splits.MEASURED_SHARED_TERM_PATH -- lives alongside the
+# source (NOT data/processed/, which is gitignored) so it ships with the code
+# and is available immediately in production. See that module's own comment
+# for why: production rebuilds pa_table/state/park/ttop fresh from raw data
+# on every full run, but this measurement refreshes on the offseason cadence
+# (task #155), not nightly -- it needs to persist across deploys on its own.
+OUTPUT_PATH = Path(__file__).parent / "platoon_shared_term.json"
 
 
 def measure_for_season(pa: pd.DataFrame, shared: dict, season: int) -> dict:

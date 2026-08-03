@@ -463,14 +463,17 @@ noise, the same "ships regardless of a small delta" bar as the state-factor cold
 
 **Shipped.** `platoon_splits.py` now: (1) conditions the deviation's league reference on each
 player's own predominant hand; (2) uses a measured, per-(season, outcome, batter-hand, pitcher-hand)
-shared term instead of an assumed exponent, loaded from `data/processed/platoon_shared_term.json`.
+shared term instead of an assumed exponent, loaded from `src/models/platoon_shared_term.json`.
 That file is produced by the new `src/models/measure_platoon_shared_term.py`, kept as a separate
 periodically-refreshed script (not computed inline in `platoon_splits.py`) specifically because the
 factors it needs (state/park/TTO) live in `game_simulator.py`, which itself imports
 `build_platoon_multipliers` from `platoon_splits.py` — a live inline computation would be circular.
-Falls back to the original exponent-based value for any cell the measurement hasn't covered (a new
-outcome, or the true cold-start season). Add re-running this script to the offseason fitted-
-constants refresh cadence (task #155).
+Deliberately committed to the repo (unlike the bulky, regenerable `data/processed/` caches) so
+production has it immediately without depending on a runtime regeneration step — production
+rebuilds `pa_table`/state/park/TTO fresh from raw data on every full run, but this measurement is
+meant to refresh on the offseason cadence (task #155), not nightly. Falls back to the original
+exponent-based value for any cell the measurement hasn't covered (a new outcome, or the true
+cold-start season).
 
 ---
 
