@@ -85,7 +85,34 @@ def fetch_statcast_season(season: int, force: bool = False) -> Path:
         last_cached = season_start - _dt.timedelta(days=1)
     else:
         last_cached = pd.to_datetime(existing["game_date"]).max().date()
+
+    # Completeness guard (2026-08-03 audit, finding C3): the cursor used to
+    # assume max(cached game_date) was a COMPLETE date -- but the evening
+    # full-run cron (~9pm ET) fetches mid-slate, and on a mixed day/night
+    # slate Savant returns the finished afternoon games' rows while the
+    # night games are still playing. The cursor then advanced past the date
+    # and the night games were permanently absent (the backfill couldn't
+    # rescue them either -- it only looked at "Final" schedule rows, which
+    # finding C2's frozen statuses never became). Fix: never advance past
+    # the latest date for which the schedule says every regular-season game
+    # is in a terminal status; re-fetching a partially-cached date overlaps
+    # existing rows, which the keep-last dedup below already handles.
+    # Requires the schedule to be refreshed first -- refresh_all_data() runs
+    # fetch_schedule_season (with its own C2 stale-date healing) before this.
     fetch_start = last_cached + _dt.timedelta(days=1)
+    sched_path = DATA_RAW / f"schedule_{season}.parquet"
+    if sched_path.exists():
+        sched = pd.read_parquet(sched_path)
+        reg = sched[sched["game_type"] == "R"]
+        if not reg.empty:
+            terminal = {"Final", "Completed Early", "Postponed", "Cancelled"}
+            incomplete = reg[~reg["status"].isin(terminal)]
+            if not incomplete.empty:
+                first_incomplete = pd.to_datetime(incomplete["date"]).min().date()
+                if first_incomplete <= last_cached:
+                    fetch_start = first_incomplete
+                    print(f"  completeness guard: re-fetching from {fetch_start} "
+                          f"(cached through {last_cached}, but that range has non-terminal games)", flush=True)
 
     if fetch_start > end_bound:
         print(f"season {season}: cache already current through {last_cached}, nothing new to fetch", flush=True)
@@ -135,7 +162,11 @@ def verify_and_backfill_statcast(season: int) -> int:
 
     statcast = pd.read_parquet(statcast_path, columns=["game_pk", "game_date"])
     schedule = pd.read_parquet(schedule_path)
-    expected = schedule[(schedule["game_type"] == "R") & (schedule["status"] == "Final")]
+    # "Completed Early" widened in (2026-08-03 audit, finding C3): rain-
+    # shortened games ARE official and DO have Statcast data, but were
+    # invisible to this safety net (and to the umpire/SB backfills, fixed
+    # separately). Postponed/Cancelled correctly stay excluded (no pitches).
+    expected = schedule[(schedule["game_type"] == "R") & (schedule["status"].isin(["Final", "Completed Early"]))]
     missing = expected[~expected["game_pk"].isin(set(statcast["game_pk"]))]
 
     if missing.empty:
@@ -146,10 +177,19 @@ def verify_and_backfill_statcast(season: int) -> int:
           f"on {len(missing_dates)} date(s), backfilling...", flush=True)
 
     frames = [pd.read_parquet(statcast_path)]
-    for d in missing_dates:
-        backfill = _statcast_with_retry(str(d), str(d))
-        if not backfill.empty:
-            frames.append(backfill)
+    # pybaseball caches each per-day Savant CSV response for 7 days keyed on
+    # the date-URL (2026-08-03 audit, finding C3/M22): a partial same-day
+    # response would otherwise be silently re-served to every backfill
+    # attempt for a week, making the "backfill" a no-op exactly when it
+    # matters. Disable the cache for these targeted re-fetches only.
+    pb.cache.disable()
+    try:
+        for d in missing_dates:
+            backfill = _statcast_with_retry(str(d), str(d))
+            if not backfill.empty:
+                frames.append(backfill)
+    finally:
+        pb.cache.enable()
     combined = pd.concat(frames, ignore_index=True)
     dedupe_cols = [c for c in ("game_pk", "at_bat_number", "pitch_number") if c in combined.columns]
     if dedupe_cols:
