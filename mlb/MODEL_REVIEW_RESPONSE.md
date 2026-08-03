@@ -388,6 +388,92 @@ scoped, well-defined candidate for a future session rather than implemented now.
 
 ---
 
+## Reviewer's second-round finding — the platoon fix's own observed leg still double-counted
+
+Sent the residual investigation above back to the reviewer for a second opinion. Their read: the
+reliability-tier finding wasn't evidence *against* double-counting — it was evidence of *where the
+unfixed half of it lives*. The shipped fix (Finding 1 follow-up) only corrected the FALLBACK
+default; `own_same_mult`/`own_opp_mult` (each player's own measured split, blended in by
+reliability) were left as raw, unnormalized ratios, documented at the time as "a real, non-redundant
+per-player signal." The reviewer's counter: a player's own same-hand PAs are, by definition, against
+same-handed opponents — his own ratio mechanically re-embeds the SAME shared population effect the
+fallback fix had just corrected, so two high-reliability legs still combine to roughly the double-
+counted magnitude, just via the observed path instead of the default path. This exactly matches
+where the residual investigation found the strikeout gap concentrated: high-reliability matchups,
+not low.
+
+**One-minute check, confirmed by code read.** `own_same_mult`/`own_opp_mult` at the time were
+literally `odds(own_same_rate) / odds(own_combined_rate)` — raw ratios, never divided by any
+league-derived normalization. Diagnosis confirmed by inspection.
+
+**First attempt (uniform exponent), tested and partially refuted.** Dividing each observed leg by
+`league_mult**0.5` (the reviewer's proposed correction) moved the worst buckets sharply toward
+zero (K same-hand high-reliability: +0.53pp → -0.05pp) but two buckets broke in the opposite
+direction — HR same-hand (-0.03pp → +0.07pp) and, in a follow-up exponent sweep, walk same-hand
+(-0.07pp → +0.38pp at e=0.5) — degradations the reviewer's own falsifiable prediction explicitly
+ruled out in advance. A sweep of the correction exponent found no single value fit both home_run
+and strikeout simultaneously.
+
+**Root-caused to two distinct, real bugs, per the reviewer's own prescribed diagnostic order.**
+1. **Currency mismatch**: the shared term (`league_mult**∓0.25`, an "opposite-vs-same-hand" odds
+   ratio) and the deviation (`own_same_mult`/`own_opp_mult`, a "conditional-vs-combined-rate" odds
+   ratio) were never expressed in the same units before being multiplied together.
+2. **Handedness pooling**: the league reference used to normalize the deviation pooled ALL players
+   together regardless of handedness — but same-hand is a MAJORITY-exposure regime for a RHB
+   (facing the ~70% of starters who are RHP) and a MINORITY-exposure regime for a LHB, so pooling
+   them poisons the same-hand reference specifically toward whichever handedness dominates the
+   league's roster mix.
+
+An isolation run (fixing #2 alone, leaving #1 untouched) confirmed both were real and separable:
+walk's same-hand degradation resolved almost entirely from #2 alone (-0.065pp → -0.034pp, no
+overshoot), while HR's same-hand bucket still showed a residual (-0.027pp → +0.031pp), confirming
+#1 was doing independent damage.
+
+**A zero-parameter version was tried and clearly refuted — not a knock on the structural approach,
+a magnitude misspecification.** Replacing the shared term with the handedness-conditioned reference
+at full strength (no exponent at all) badly overcorrected everywhere, especially strikeout (both
+reliability tiers moving to +0.7–1.1pp, worse than the original bug). Confirmed this was the
+per-leg-both-legs case the reviewer flagged: each side's reference is already a *complete*
+measurement of the shared effect, so applying both at full strength re-squares it — the same
+double-count, reinstated at maximum amplitude, not a refutation of the deviation-space structure.
+
+**Final fix: measure the shared term directly, rather than assume or sweep an exponent.** Per the
+reviewer's explicit holdout-hygiene objection — sweeping a correction against the 2025 bucket table
+would make 2025 the training set for that parameter, after it had already adjudicated three prior
+configurations. Instead: ran the pipeline on 2024 with the platoon term entirely disabled, and
+measured the real actual-vs-predicted odds ratio per (batter-hand × pitcher-hand) cell, per outcome
+— the total shared displacement, in the model's own native currency, no assumed functional form.
+Confirmed stable across 3 independent seasons (strikeout's LHB-vs-LHP cell: 1.116 in 2024, 1.089 in
+2025, 1.063 in 2026 — not noise). The measurement also revealed real heterogeneity a single exponent
+could never represent: strikeout's LHB-vs-LHP cell shows an **+11.6% displacement** while its
+RHB-vs-RHP cell shows barely **+0.7%**; home_run's LHB-vs-LHP shows a **-24% suppression** vs.
+RHB-vs-RHP's **-7%** — plausibly a real selection effect (same-handed relief matchups are more
+heavily curated by managers than the everyday RHB-vs-RHP case).
+
+**Single confirming read on 2025** (respecting holdout hygiene — no adjustment made after this
+read): 7 of 12 buckets improved, several substantially and in exactly the buckets that were worst
+before (K same-hand high-reliability: +0.53pp → +0.08pp; walk same-hand low-reliability: +0.13pp →
+essentially zero). One real regression, carried forward explicitly rather than let the wins
+headline it away: **walk opposite-hand low-reliability worsened, -0.461pp → -0.538pp**. The
+catastrophic same-hand degradations from the earlier broken attempts were gone.
+
+**CRN-paired guardrail backtest** (n=697, 2023–2024, K=300, shipped single-exponent fix vs. the
+final measured-shared-term configuration): SU -0.14pp, Brier +0.0002, MAE +0.0095 — all within
+noise, the same "ships regardless of a small delta" bar as the state-factor cold-start fix above.
+
+**Shipped.** `platoon_splits.py` now: (1) conditions the deviation's league reference on each
+player's own predominant hand; (2) uses a measured, per-(season, outcome, batter-hand, pitcher-hand)
+shared term instead of an assumed exponent, loaded from `data/processed/platoon_shared_term.json`.
+That file is produced by the new `src/models/measure_platoon_shared_term.py`, kept as a separate
+periodically-refreshed script (not computed inline in `platoon_splits.py`) specifically because the
+factors it needs (state/park/TTO) live in `game_simulator.py`, which itself imports
+`build_platoon_multipliers` from `platoon_splits.py` — a live inline computation would be circular.
+Falls back to the original exponent-based value for any cell the measurement hasn't covered (a new
+outcome, or the true cold-start season). Add re-running this script to the offseason fitted-
+constants refresh cadence (task #155).
+
+---
+
 ## Documents updated as part of this review response
 
 | File | Change |
@@ -532,7 +618,8 @@ not the per-game card view, per the request. **Commit `999e435`** — deployed, 
 | `mlb/src/pipeline/export_to_site_db.py` | New `home_pitcher_source`/`away_pitcher_source` columns |
 | `mlb/src/utils/tz.py` | New `default_run_mode()` |
 | `mlb/railway.toml` | Explicit `startCommand`; cron cadence 2×/day → 4×/day |
-| `mlb/src/models/platoon_splits.py` | **Live correctness fix**: shared league-average platoon default corrected from `league_mult**0.5` to `league_mult**0.25`, resolving a real double-counting bug (Finding 1 follow-up) |
+| `mlb/src/models/platoon_splits.py` | **Live correctness fix, two rounds**: (1) shared league-average default corrected from `league_mult**0.5` to `league_mult**0.25` (Finding 1 follow-up); (2) reviewer's second-round finding fixed the still-double-counted observed leg — handedness-conditioned deviation reference + a measured (not assumed) per-cell shared term |
+| `mlb/src/models/measure_platoon_shared_term.py` | New: periodically-refreshed script that measures the platoon shared term directly from 2024-only platoon-disabled predictions, persists to `platoon_shared_term.json` |
 | `mlb/src/models/game_simulator.py` | **Live correctness fix**: `build_state_factors_by_season`'s cold-start season now gets a fully-neutral 24-state table instead of leaking its own data into itself (bonus finding) |
 | `mlb/src/models/bullpen.py` | CRN-keyed opt-in for closer/bullpen-pick sampling (Finding 2 infra) |
 | `mlb/src/models/weather_forecast.py` | CRN-keyed opt-in for weather-bucket sampling (Finding 2 infra) |
@@ -541,6 +628,10 @@ not the per-game card view, per the request. **Commit `999e435`** — deployed, 
 
 ## Open items for a future session
 
+- **Walk opposite-hand low-reliability regression**: the final measured-shared-term platoon
+  configuration made this one bucket worse (-0.461pp → -0.538pp held out on 2025) even though the
+  overall change is a net win. Flagged explicitly, not fixed — worth a look if walk-prop calibration
+  in low-reliability matchups gets revisited.
 - **Platoon × times-through-the-order interaction (strikeout-specific)**: the follow-up
   investigation above found a real, pre-existing platoon × TTO interaction concentrated in
   strikeout (same-hand over-predicted +1.15pp at TTO=1, under-predicted -0.59/-1.26pp at TTO=2/3;
