@@ -202,7 +202,14 @@ multiplier for that category is fixed at neutral (1.0) — it is simply absent f
 dict, not present-and-equal-to-1.
 
 - **Platoon splits**: same-hand/opposite-hand batter-vs-pitcher effect, computed separately for
-  the batter's own split AND the pitcher's own split-allowed, both applied.
+  the batter's own split AND the pitcher's own split-allowed, both applied. Each side is a
+  reliability-weighted blend of that player's own observed split (a pure deviation from an
+  exactly-average player *of the same predominant hand* — see §8.6) and a shared population term
+  applied once per matchup, per (season, outcome, batter-hand, pitcher-hand) cell — measured
+  directly from real data (a 2024-only platoon-disabled actual-vs-predicted odds ratio), not an
+  assumed exponent; real cells differ meaningfully (e.g. strikeout's LHB-vs-LHP cell: +11.6%
+  displacement vs. its RHB-vs-RHP cell's +0.7%, plausibly real matchup-curation heterogeneity a
+  single constant could never represent).
 - **Park factors**: per-outcome-category (not one overall "runs" factor), mean-normalized to
   1.0 across the league each season.
 - **Weather**: temperature/wind-bucketed, further split by the batter's own handedness AND
@@ -375,6 +382,7 @@ real engineering time and a real statistical test, not a hunch.
 | Runner-speed-conditioned base-out transitions | Real, large component-level effect, but **failed full-stack even after a more rigorous re-test** (Brier score regression, CI excludes zero) | Conditioning resampling on runner identity adds within-game heterogeneity that hurts calibration |
 | Batter-side walk-rate blend multiplier | Total MAE improved; margin MAE worse; **SU −1.4pp** | Same failure shape as whiff-rate, despite being a walk (not strikeout) signal |
 | Jet-lag / circadian fatigue team-level multiplier | Original test: SU −1.2pp. **Retested with a more rigorous protocol: the delta reversed to statistically indistinguishable from zero** | The original "regression" was itself noise, not a real negative effect — still not deployed (no proven benefit either), but for a different reason than first believed |
+| Batter-side walk-rate blend multiplier (`pitch_walk_multiplier`) | Original test: SU −1.4pp. **Retested CRN-paired at K=30/100/300: the gap flips sign (−1.3pp → +0.6pp) rather than converging, and Brier stays flat (~0.0004–0.0005) across every K** | Also very likely noise-inflated, matching the jet-lag case — but unlike jet-lag, the corrected picture is "no detectable effect in either direction," not a clean reversal, so it stays reverted on that (properly re-tested) basis |
 
 ### 8.3 Investigated and never built (failed a component-level or safety check before reaching a full-stack test)
 
@@ -465,9 +473,22 @@ real data before any fix) found a dozen real, verified defects, including:
 - A live, user-facing prop (`away_covers_plus_1_5`) computed an entirely wrong condition —
   effectively "home doesn't lose by 2+ runs" instead of the actual spread-cover condition —
   silently wrong since the file's first commit.
-- A cold-start data-leakage bug in four independent modules (catcher framing, weather, umpire
-  tendency, times-through-order), all sharing one copy-pasted fallback pattern that let the
-  dataset's true first season see its own future-in-season data.
+- A cold-start data-leakage bug in five independent modules (catcher framing, weather, umpire
+  tendency, times-through-order, and — missed in the original audit, found later by an external
+  review — base-out state factors), all sharing one copy-pasted fallback pattern that let the
+  dataset's true first season see its own future-in-season data. The state-factors instance was
+  large where it hit (median absolute deviation from neutral ~9.2pp across all (state, outcome)
+  cells; some mechanically-driven cells reached 5–25×) and, once fixed, produced a real favorable
+  side effect on top of the correctness gain: mean simulated total runs moved from 8.50 to 8.82
+  against a real actual mean of 8.86.
+- A real platoon-split double-counting bug, found via an external review of a worked example's
+  arithmetic (§9): the shared league-average same/opposite-hand effect was being applied roughly
+  twice across the batter and pitcher sides combined. Fixed in two rounds — first the shared
+  *default* (used when a player lacks individual split data), then a second round after the first
+  fix's own residual investigation showed the bug's other half still lived in each player's *own*
+  observed split (which mechanically re-embeds the same population effect once reliability is high
+  enough to matter). The final fix measures the shared displacement directly from data rather than
+  assuming or fitting a constant — see the updated §4 description.
 - The same reliability-formula units bug (weighted-count used where an unweighted count was
   required, inflating apparent statistical confidence for any player without a full 3-season
   track record) found independently copy-pasted into 5 separate modules, having only been fixed
@@ -482,10 +503,11 @@ these affect the live production path): a dead/reverted jet-lag module groups tr
 only (not team+season), which could misattribute a season-opener's jet-lag status to the
 *previous* season's road trip; a gated-off, never-enabled pitcher double-play multiplier has the
 widest real-data tail in its file (6.33×) plus a documented coefficient-sign instability — a
-real landmine if ever flipped on without first hardening its clip; three CRN (deterministic
-random-draw pairing) decision-tags are defined but never wired up, which affects the
-*precision* of certain paired A/B comparisons involving bullpen sampling, not the correctness of
-the base model.
+real landmine if ever flipped on without first hardening its clip. (The three CRN
+deterministic-random-draw-pairing decision-tags noted as unwired in an earlier version of this
+packet — bullpen pick, closer usage, weather bucket — have since been wired up, improving the
+*precision* of paired A/B comparisons involving bullpen/weather sampling; not a correctness fix,
+noted here only so this list doesn't go stale the way §4/§8 did before.)
 
 This list exists so you can calibrate: real, non-trivial bugs have been found in this codebase
 before, more than once, by exactly the kind of independent review you're being asked to do now.

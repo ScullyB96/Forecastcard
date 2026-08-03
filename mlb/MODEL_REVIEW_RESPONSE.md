@@ -640,6 +640,17 @@ not the per-game card view, per the request. **Commit `999e435`** — deployed, 
   strikeout (same-hand over-predicted +1.15pp at TTO=1, under-predicted -0.59/-1.26pp at TTO=2/3;
   opposite-hand shows a phase-shifted version). Diagnosed, not fixed — would need a new joint
   (handedness × times-through) factor for strikeout with its own fit and full-stack validation.
+  **Real trap for whoever builds this**: `measure_platoon_shared_term.py`'s estimand runs the whole
+  pipeline with platoon disabled and everything else (including TTOP) live — so the per-cell
+  displacement it measures already absorbs the AVERAGE of this same handedness × TTO interaction.
+  Building the joint factor on top of the current `platoon_shared_term.json` without re-running the
+  measurement first would double-count the handedness-correlated share of TTO across both
+  mechanisms — the exact failure mode this whole investigation existed to kill, reintroduced one
+  level up by its own fix. Re-run `measure_platoon_shared_term.py` with the new factor active
+  before shipping it, not just on the general offseason cadence. This generalizes: the JSON is a
+  measurement of the residual structure *given the rest of the stack as of measurement time* — it
+  must be refreshed whenever a handedness-correlated factor elsewhere in the stack changes, not
+  only per the routine offseason schedule.
 - **Finding 2, deferred half**: `whiff_rate_multiplier` was fully deleted, not kept dormant — a
   from-scratch reconstruction (from its documented description) would be needed before it could be
   retested the same way the walk-blend was.

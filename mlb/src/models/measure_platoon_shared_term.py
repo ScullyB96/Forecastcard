@@ -23,9 +23,24 @@ pattern for exactly this kind of measured, periodically-refreshed constant:
 run this script, it persists a small JSON, platoon_splits.py loads it lazily
 at runtime with a documented fallback for anything missing.
 
-Run this whenever the offseason refit ritual fires (new season boundary),
-or after enough new same-hand-matchup data has accumulated to matter --
-same cadence discipline as every other fitted constant in this project."""
+IMPORTANT -- this is a measurement of the residual structure GIVEN THE REST
+OF THE STACK AS OF MEASUREMENT TIME, not an isolated platoon-only quantity:
+the "platoon-disabled prediction" baseline still includes state/park/TTO
+live, so each measured cell already absorbs the AVERAGE of any OTHER
+handedness-correlated effect in the stack (e.g. the platoon x times-through-
+the-order interaction documented as an open item in MODEL_REVIEW_RESPONSE.md
+-- strikeout-specific, real, not yet built). If a future factor is added
+that itself correlates with batter/pitcher handedness, this measurement
+MUST be re-run with that factor active BEFORE the new factor ships --
+otherwise the handedness-correlated share gets counted in both places, the
+exact double-counting failure mode this whole file exists to prevent,
+reintroduced one level up. Re-run on the general offseason cadence (task
+#155) too, but don't treat that as sufficient on its own: also confirmed via
+a 3-season stability check that the measured values aren't just noise, they
+show a real, more-than-noise MONOTONIC drift (strikeout's LHB-vs-LHP cell:
+1.116 in 2024, 1.089 in 2025, 1.063 in 2026) -- plausibly real drift in
+matchup curation, plausibly the 2026 partial season, but either way this
+means the refresh is load-bearing, not routine housekeeping to deprioritize."""
 
 import json
 from pathlib import Path
@@ -127,7 +142,24 @@ if __name__ == "__main__":
     shared = build_shared_tables(pa, test_seasons)
     print("done.\n", flush=True)
 
-    out = {}
+    # "_meta" is a real key, not a comment -- JSON has no comment syntax, and this
+    # warning needs to survive in the data file itself, not just this script's own
+    # docstring, since a future editor may open/regenerate the JSON without reading
+    # the script. platoon_splits.py's loader only ever looks up str(season) keys, so
+    # this key is silently ignored by every real consumer.
+    out = {
+        "_meta": (
+            "Measures the residual structure GIVEN THE REST OF THE STACK AS OF "
+            "MEASUREMENT TIME (platoon-disabled baseline still includes state/park/TTO "
+            "live) -- re-run this script BEFORE shipping any new handedness-correlated "
+            "factor (e.g. a platoon x times-through-the-order joint factor), not just on "
+            "the offseason cadence, or the handedness-correlated share gets counted "
+            "twice. Also shows a real, more-than-noise MONOTONIC drift across seasons "
+            "(strikeout LHB-vs-LHP: 1.116 in 2024, 1.089 in 2025, 1.063 in 2026) -- the "
+            "refresh is load-bearing, not routine housekeeping. See "
+            "measure_platoon_shared_term.py's own module docstring for the full context."
+        ),
+    }
     for season in seasons:
         print(f"measuring season {season}...", flush=True)
         measured = measure_for_season(pa, shared, season)

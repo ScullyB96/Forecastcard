@@ -1,4 +1,5 @@
 {
+  "_meta": "Measures the residual structure GIVEN THE REST OF THE STACK AS OF MEASUREMENT TIME (platoon-disabled baseline still includes state/park/TTO live) -- re-run this script BEFORE shipping any new handedness-correlated factor (e.g. a platoon x times-through-the-order joint factor), not just on the offseason cadence, or the handedness-correlated share gets counted twice. Also shows a real, more-than-noise MONOTONIC drift across seasons (strikeout LHB-vs-LHP: 1.116 in 2024, 1.089 in 2025, 1.063 in 2026) -- the refresh is load-bearing, not routine housekeeping. See measure_platoon_shared_term.py's own module docstring for the full context.",
   "2023": {
     "strikeout": {
       "LL": NaN,
