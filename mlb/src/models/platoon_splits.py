@@ -34,6 +34,18 @@ from src.models.true_talent import MARCEL_WEIGHTS
 
 PLATOON_STABILIZATION_PA = 2200  # Tango/Lichtman/Dolphin's own published figure
 
+# Structural double-count fix (2026-08-03, external review) -- see the full derivation
+# in build_platoon_multipliers below. 0.25 (current, correct): each side's shared
+# league-average default carries a QUARTER of the population log-odds effect, so two
+# defaults combine to the HALF-effect the data actually supports. 0.5 (the pre-fix
+# value) is kept here as a named constant, not restored, specifically so a future
+# A/B/backtest script can cleanly monkeypatch this module attribute back to the old
+# value for a temporary "disabled" comparison arm -- the same convention this project
+# already uses for other correctness fixes (see validate_game_simulator.py's
+# disable_bat_speed/disable_pulled_air flags) -- without adding permanent toggle
+# plumbing for a fix that isn't meant to ever be reverted.
+PLATOON_LEAGUE_DEFAULT_EXPONENT = 0.25
+
 SPLIT_RATE_PRIOR_PA = 20  # small Bayesian prior for the observed same/opp rate
                           # itself, BEFORE the reliability-weighted blend below --
                           # confirmed a real, severe bug without this: a thin
@@ -109,11 +121,50 @@ def build_platoon_multipliers(pa: pd.DataFrame, player_col: str, outcome: str) -
     out_frames = []
     for season in sorted(pa["season"].unique()):
         league_mult = league_platoon_multiplier(pa, outcome, season)
-        # league_mult is opposite/same; split symmetrically in odds-space so
-        # the two multipliers average out to ~1x on a player's own overall
-        # rate rather than silently shifting their season-long average.
-        same_mult_league = 1.0 / (league_mult ** 0.5)
-        opp_mult_league = league_mult ** 0.5
+        # Structural fix (2026-08-03, external review): league_mult is the
+        # FULL population-level same-vs-opposite-hand effect -- it already
+        # reflects BOTH the batter side's and the pitcher side's contribution
+        # to that effect jointly (a raw PA-level rate ratio can't separate
+        # "how much of this is batters" from "how much is pitchers"). This
+        # function is called ONCE per side (batter, then separately pitcher)
+        # with the exact same `pa`/`league_platoon_multiplier` result, and
+        # BOTH sides' multipliers are later multiplied together in
+        # game_simulator.combine_matchup_distribution for every real matchup.
+        #
+        # The previous split -- same_mult_league = league_mult**-0.5 on EACH
+        # side -- was built to "average out to ~1x on a player's own overall
+        # rate," a real and still-correct goal, but it silently assumed each
+        # side independently carries the FULL population effect: two
+        # default (zero-reliability) players combine to
+        # league_mult**-0.5 * league_mult**-0.5 = league_mult**-1, i.e. the
+        # shared population signal applied TWICE. Verified directly against
+        # real data (2026-08-03): held out 2025 real PAs, bucketed by same-
+        # vs opposite-hand matchup -- the pre-fix model under-predicted
+        # same-hand home_run rate and over-predicted opposite-hand home_run
+        # rate (both directions consistent with over-applying the split),
+        # and a decomposed leakage-free regression (offset=logit(matchup
+        # combine), one covariate per context factor) found the batter- and
+        # pitcher-side platoon lambdas summing to ~1.09 for home_run (~1.22
+        # for strikeout) against the ~2.0 the un-fixed code implicitly
+        # applies -- i.e., real data supports the COMBINED effect being
+        # applied close to ONCE, not twice.
+        #
+        # Fix: each side's DEFAULT now carries league_mult**-0.25 instead of
+        # **-0.5, so two defaults combine to exactly league_mult**-0.5 --
+        # matching the single-application magnitude the data supports --
+        # while still splitting the shared component symmetrically between
+        # the two sides (no evidence favoring attributing more of it to one
+        # side over the other for the DEFAULT specifically; the batter/
+        # pitcher asymmetry the decomposed regression found is attributable
+        # to how much each side's OWN blended-in data typically outweighs
+        # this default, not to the default itself needing an asymmetric
+        # split). own_same_mult/own_opp_mult (each player's OWN measured
+        # deviation from their own combined rate, blended in below by
+        # reliability) are completely untouched by this fix -- that
+        # component is a real, non-redundant, per-player signal, not part of
+        # the shared/double-counted population term.
+        same_mult_league = 1.0 / (league_mult ** PLATOON_LEAGUE_DEFAULT_EXPONENT)
+        opp_mult_league = league_mult ** PLATOON_LEAGUE_DEFAULT_EXPONENT
 
         hist = _player_split_history(season_splits, player_col, season)
         if hist.empty:
