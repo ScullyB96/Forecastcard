@@ -31,8 +31,8 @@
             {% set v = p.stats.get(col.key) %}
             <td class="num" data-value="{{ v if v is not none else '' }}">
               {%- if v is none -%}—
-              {%- elif col.is_prob -%}{{ (v * 100)|round }}%
-              {%- else -%}{{ '%.1f'|format(v) }}
+              {%- elif col.is_prob -%}{{ '%.1f'|format(v * 100) }}%
+              {%- else -%}{{ '%.2f'|format(v) }}
               {%- endif -%}
             </td>
             {% endfor %}
