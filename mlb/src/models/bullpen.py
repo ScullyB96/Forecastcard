@@ -45,6 +45,7 @@ import pandas as pd
 
 from src.models.true_talent import MARCEL_WEIGHTS, build_pregame_rates
 from src.models.game_simulator import OUTCOMES
+from src.models.crn import crn_bool, crn_choice, DECISION_BULLPEN_PICK, DECISION_CLOSER_USAGE
 
 K_STARTS = 8  # stabilization constant in START-count units for expected innings/start --
               # a reasonable starting guess (not yet empirically re-validated), same
@@ -450,7 +451,8 @@ def build_team_bullpen_roster(relief_log: pd.DataFrame, all_appearance_log: pd.D
 
 def sample_bullpen_plan(rng: np.random.Generator, starter_profile: dict, expected_innings: float,
                          roster_weights: dict, profile_lookup, fallback_profile: dict | None,
-                         innings: int = 9, closer_id=None) -> tuple[dict, dict]:
+                         innings: int = 9, closer_id=None,
+                         crn_keys: tuple | None = None) -> tuple[dict, dict]:
     """The roster-aware counterpart to build_predictive_bullpen_plan: instead
     of one flat blended bullpen rate for every post-starter inning, actually
     SAMPLE a specific reliever (their own individual walk-forward rate, via
@@ -496,13 +498,39 @@ def sample_bullpen_plan(rng: np.random.Generator, starter_profile: dict, expecte
 
     Returns (profile_plan, id_plan): profile_plan is the {inning: profile}
     dict GameSimulator consumes; id_plan is the parallel {inning: pitcher_id}
-    (or a fallback pseudo-id) for prop-generation attribution."""
+    (or a fallback pseudo-id) for prop-generation attribution.
+
+    crn_keys: optional (game_pk, trial[, side_tag]) tuple (see crn.py) --
+    when given, both stochastic decisions below (the closer-preference check
+    and the roster-weighted pick) are drawn via crn_bool/crn_choice keyed by
+    *crn_keys, inning, DECISION_{CLOSER_USAGE,BULLPEN_PICK} instead of
+    consuming the shared sequential rng stream, so two CRN-paired arms that
+    build an identical roster/weights for a given (game, trial, inning) draw
+    the exact same pick -- the same "stay synchronized until the real point
+    of divergence" property game_simulator.py's own crn_keys already gives
+    per-PA decisions (task #160 audit: this was flagged as dormant/unwired
+    infrastructure -- DECISION_BULLPEN_PICK/DECISION_CLOSER_USAGE were
+    defined in crn.py but never referenced anywhere until this). Default
+    None preserves the exact prior rng.random()/rng.choice() behavior,
+    byte-for-byte, for every existing caller."""
     cutoff = max(1, round(expected_innings))
     profile_plan, id_plan = {}, {}
     available = list(roster_weights.items())
     for inning in range(innings, cutoff, -1):
-        if inning == 9 and closer_id is not None and any(pid == closer_id for pid, _ in available) \
-                and rng.random() < CLOSER_INNING9_RATE:
+        # NOTE: the original code short-circuits on `inning == 9` FIRST (via
+        # `and`), so rng.random() is only ever called for inning 9 -- this
+        # must stay an explicit inning==9 gate, not a computed-every-inning
+        # flag, or the non-CRN rng stream desyncs from its pre-existing
+        # sequence for every OTHER inning (a real bug caught while writing
+        # this, not present in the shipped version).
+        if inning == 9 and closer_id is not None and any(pid == closer_id for pid, _ in available):
+            if crn_keys is not None:
+                closer_fires = crn_bool(CLOSER_INNING9_RATE, *crn_keys, inning, DECISION_CLOSER_USAGE)
+            else:
+                closer_fires = rng.random() < CLOSER_INNING9_RATE
+        else:
+            closer_fires = False
+        if inning == 9 and closer_fires:
             pid = closer_id
             profile_plan[inning] = profile_lookup(pid)
             id_plan[inning] = pid
@@ -511,7 +539,10 @@ def sample_bullpen_plan(rng: np.random.Generator, starter_profile: dict, expecte
             ids, weights = zip(*available)
             weights = np.array(weights, dtype=float)
             weights = weights / weights.sum()
-            pick = rng.choice(len(ids), p=weights)
+            if crn_keys is not None:
+                pick = crn_choice(list(range(len(ids))), weights, *crn_keys, inning, DECISION_BULLPEN_PICK)
+            else:
+                pick = rng.choice(len(ids), p=weights)
             pid = ids[pick]
             profile_plan[inning] = profile_lookup(pid)
             id_plan[inning] = pid

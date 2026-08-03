@@ -50,6 +50,7 @@ from src.models.game_simulator import (
     build_wide_pregame_rates,
 )
 from src.models.park_factors import build_outcome_park_factors, build_hfa_factors
+from src.models.pitch_talent import build_composed_rates, pitch_walk_multiplier
 from src.models.spray import build_pull_rate_by_season, build_pull_rate_snapshot, resolve_batter_pull_tercile
 from src.models.spray import attach_pull_tercile_column
 from src.models.true_talent import widen_rate
@@ -161,7 +162,9 @@ def build_profile(rate_row: pd.Series, platoon_row: pd.Series | None, hand: str,
                    pregame_fb_rate_pitcher: float | None = None,
                    pitcher_fullmix: bool = False,
                    league_rates_this_season: dict[str, float] | None = None,
-                   widen_w: float = 1.0) -> dict:
+                   widen_w: float = 1.0,
+                   pregame_pitch_walk_composed: float | None = None,
+                   player_col: str | None = None) -> dict:
     rates = {o: rate_row[f"pregame_rate_{o}"] for o in OUTCOMES}
     # effective_n backing each raw Marcel rate (task #127, posterior-sampled
     # rates) -- stored alongside the (possibly contact-quality-adjusted)
@@ -196,6 +199,17 @@ def build_profile(rate_row: pd.Series, platoon_row: pd.Series | None, hand: str,
                                    pregame_gb_rate_pitcher=pregame_gb_rate_pitcher,
                                    pregame_fb_rate_pitcher=pregame_fb_rate_pitcher,
                                    pitcher_fullmix=pitcher_fullmix)
+    # Finding 2 re-test (2026-08-02): pitch-level composed-walk-rate blend,
+    # originally deployed+reverted task #108/sec 11.2 (SU 60.5%->59.1%,
+    # -1.4pp, an unpaired canonical-K=50 read never re-checked under the
+    # K-scaling/CRN-pairing protocol that later reversed the jet-lag verdict
+    # and shrank the shock's own apparent cost -- see MODEL_REVIEW_PACKET.md
+    # Sec 8.2 Finding 2). pregame_pitch_walk_composed=None (every existing
+    # caller, since no one passes this yet) is an exact no-op -- see
+    # pitch_talent.pitch_walk_multiplier's own docstring for the formula.
+    if pregame_pitch_walk_composed is not None and player_col is not None:
+        rates["walk"] = rates["walk"] * pitch_walk_multiplier(
+            rates["walk"], pregame_pitch_walk_composed, player_col)
     if platoon_row is not None:
         same_mult = {o: platoon_row[f"same_hand_mult_{o}"] for o in OUTCOMES}
         opp_mult = {o: platoon_row[f"opp_hand_mult_{o}"] for o in OUTCOMES}
@@ -211,7 +225,8 @@ def build_profile(rate_row: pd.Series, platoon_row: pd.Series | None, hand: str,
             "pull_tercile": pull_tercile, "effective_n": effective_n}
 
 
-def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int]) -> dict:
+def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int],
+                         build_pitch_walk_composed: bool = False) -> dict:
     """Every walk-forward/history-dependent table this validator needs, built
     ONCE from the full PA table. Kept separate from run_validation (below) so
     a caller sweeping a single per-profile parameter (e.g. task #134's widen_w)
@@ -277,6 +292,22 @@ def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int]) -> dict:
     bat_speed_raw = load_bat_speed_by_season(sorted(pa["season"].unique()))
     bat_speed_by_season = {}  # memoized per season -- build_pregame_bat_speed is season-level, not per-game
 
+    # Finding 2 re-test (2026-08-02, see build_profile's own note): OPT-IN only
+    # (default False, byte-for-byte no-op) -- loads the pitch-level table and
+    # builds build_composed_rates per season, per side, ONLY when a caller
+    # actually wants to re-test pitch_walk_multiplier. Every other caller of
+    # this function pays zero extra cost (no pitch-table load, no extra
+    # per-season builds) since build_pitch_walk_composed defaults to False.
+    pitch_walk_composed_by_season = {}
+    if build_pitch_walk_composed:
+        print("building pitch-level composed-walk-rate estimates (Finding 2 re-test)...", flush=True)
+        pitches = pd.read_parquet(DATA_PROCESSED / "pitch_table_2023_2026.parquet")
+        for season in sorted(pa["season"].unique()):
+            pitch_walk_composed_by_season[season] = {
+                "batter": build_composed_rates(pitches, "batter", season),
+                "pitcher": build_composed_rates(pitches, "pitcher", season),
+            }
+
     batter_snap = player_game_snapshot(batter_wide, "batter")
     pitcher_snap = player_game_snapshot(pitcher_wide, "pitcher")
 
@@ -312,6 +343,7 @@ def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int]) -> dict:
         bat_speed_by_season=bat_speed_by_season, batter_snap=batter_snap, pitcher_snap=pitcher_snap,
         transitions=transitions, schedules=schedules, lineups=lineups,
         defense_snap_by_season=defense_snap_by_season, sb_rates_by_season=sb_rates_by_season,
+        pitch_walk_composed_by_season=pitch_walk_composed_by_season,
     )
 
 
@@ -320,7 +352,8 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
                     write_ledger: bool = True, notes: str = "validate_game_simulator.py oracle backtest",
                     verbose: bool = True, shock_sigma: float = 0.0, crn_pairing: bool = False,
                     trial_capture: dict | None = None,
-                    disable_bat_speed: bool = False, disable_pulled_air: bool = False) -> pd.DataFrame:
+                    disable_bat_speed: bool = False, disable_pulled_air: bool = False,
+                    use_pitch_walk_blend: bool = False) -> pd.DataFrame:
     """Run the real-games oracle backtest against `shared` (from
     build_shared_tables). widen_w=1.0, shock_sigma=0.0, crn_pairing=False
     (all defaults) + seed=42 reproduces this file's own historical default
@@ -345,8 +378,18 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
     already treat None as "fall back to the pre-signal formula", so this
     needs no other plumbing). Both False (the default) is a byte-for-byte
     no-op -- see resolve_bat_speed_pulled_air.py (task #156) for the
-    pre-registered protocol these exist for."""
+    pre-registered protocol these exist for.
+
+    use_pitch_walk_blend: Finding 2 re-test (2026-08-02) of the reverted
+    pitch_walk_multiplier (task #108/sec 11.2, originally SU 60.5%->59.1%
+    on an unpaired K=50 canonical read never re-checked under CRN pairing).
+    Requires `shared` built via build_shared_tables(..., build_pitch_walk_
+    composed=True) -- if that wasn't done, pitch_walk_composed_by_season is
+    empty and this flag is silently a no-op (every player falls through the
+    "not in dict" branch below). False (the default) is byte-for-byte
+    unaffected either way."""
     pa = shared["pa"]
+    pitch_walk_composed_by_season = shared.get("pitch_walk_composed_by_season", {})
     park_factors_wide = shared["park_factors_wide"]
     hfa_factors_by_season = shared["hfa_factors_by_season"]
     league_rates = shared["league_rates"]
@@ -440,11 +483,15 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
                 bat_speed = None
             if disable_pulled_air:
                 pulled_air = None
+            pitch_walk_composed = None
+            if use_pitch_walk_blend and season in pitch_walk_composed_by_season:
+                pitch_walk_composed = pitch_walk_composed_by_season[season]["batter"].get(pid, {}).get("walk")
             return build_profile(row, prow, hand, pull_tercile=tercile, pregame_xbacon=xbacon,
                                   pregame_barrel_rate=barrel, pregame_bacon_gb=bacon_gb,
                                   pregame_sprint_speed=sprint_speed, pregame_gb_rate=gb_rate,
                                   pregame_bat_speed=bat_speed, pregame_pulled_air_rate=pulled_air,
-                                  league_rates_this_season=league_rates[season], widen_w=widen_w)
+                                  league_rates_this_season=league_rates[season], widen_w=widen_w,
+                                  pregame_pitch_walk_composed=pitch_walk_composed, player_col="batter")
 
         def pitcher_profile(pid):
             row = psnap.loc[pid]
@@ -452,9 +499,13 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
             prow = pitcher_platoon.loc[key] if key in pitcher_platoon.index else None
             gb_p = gbfbsnap.loc[pid, "pregame_gb_rate_pitcher"] if pid in gbfbsnap.index else None
             fb_p = gbfbsnap.loc[pid, "pregame_fb_rate_pitcher"] if pid in gbfbsnap.index else None
+            pitch_walk_composed = None
+            if use_pitch_walk_blend and season in pitch_walk_composed_by_season:
+                pitch_walk_composed = pitch_walk_composed_by_season[season]["pitcher"].get(pid, {}).get("walk")
             return build_profile(row, prow, pitcher_hand.get(pid, "R"),
                                   pregame_gb_rate_pitcher=gb_p, pregame_fb_rate_pitcher=fb_p,
-                                  league_rates_this_season=league_rates[season], widen_w=widen_w)
+                                  league_rates_this_season=league_rates[season], widen_w=widen_w,
+                                  pregame_pitch_walk_composed=pitch_walk_composed, player_col="pitcher")
 
         home_lineup = [batter_profile(pid) for pid in home_ids]
         away_lineup = [batter_profile(pid) for pid in away_ids]

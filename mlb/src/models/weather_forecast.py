@@ -66,6 +66,7 @@ import requests
 
 from src.models.park_orientation import forecast_wind_to_bucket_suffix
 from src.models.weather import bucket_weather, temp_bin
+from src.models.crn import crn_choice, DECISION_WEATHER_BUCKET
 
 VENUE_COORDS = {
     "Sutter Health Park": (38.5805, -121.5310),
@@ -271,11 +272,19 @@ def resolve_weather_distribution(game_buckets: pd.DataFrame, venue_name: str, ta
     return {b: p / total for b, p in restricted.items()}
 
 
-def sample_weather_bucket(dist: dict, rng) -> str | None:
+def sample_weather_bucket(dist: dict, rng, crn_keys: tuple | None = None) -> str | None:
     """Sample one bucket from a distribution built above -- called once per
     Monte Carlo trial (not once per game), so real day-to-day weather
-    uncertainty propagates into the simulated outcome distribution."""
+    uncertainty propagates into the simulated outcome distribution.
+
+    crn_keys: optional (game_pk, trial) tuple (see crn.py) -- when given,
+    draws via crn_choice keyed by *crn_keys, DECISION_WEATHER_BUCKET instead
+    of the shared sequential rng stream (task #160 audit: DECISION_WEATHER_
+    BUCKET was defined in crn.py but never referenced anywhere until this).
+    Default None preserves the exact prior rng.choice() behavior."""
     if not dist:
         return None
     buckets, probs = zip(*dist.items())
+    if crn_keys is not None:
+        return crn_choice(buckets, probs, *crn_keys, DECISION_WEATHER_BUCKET)
     return rng.choice(buckets, p=probs)
