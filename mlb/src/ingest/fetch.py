@@ -241,6 +241,7 @@ def fetch_schedule_season(season: int, force: bool = False) -> tuple[Path, Path]
     season_end = _dt.date.fromisoformat(f"{season}-{SEASON_END_MMDD}")
     end_bound = min(season_end, today)
 
+    stale_dates: list[_dt.date] = []
     if not is_current or not sched_path.exists() or force:
         fetch_from = season_start
         existing_games, existing_lineups = pd.DataFrame(), pd.DataFrame()
@@ -251,20 +252,52 @@ def fetch_schedule_season(season: int, force: bool = False) -> tuple[Path, Path]
             pd.to_datetime(existing_games["date"]).max().date() if not existing_games.empty else season_start - _dt.timedelta(days=1)
         )
         fetch_from = last_cached + _dt.timedelta(days=1)
-        if fetch_from > end_bound:
+
+        # Stale-past-date healing (2026-08-03 audit, finding C2): the
+        # incremental cursor above starts at max(cached date)+1, and
+        # fetch_schedule_day(tomorrow) -- called by every evening full run --
+        # pushes that max to TOMORROW, so yesterday's/today's rows were
+        # structurally never revisited after the last same-day light run
+        # (16:00 ET, before most games end). Evening games froze forever at
+        # Pre-Game/In Progress with NULL weather and no lineups (76 real
+        # rows found), silently degrading lineup-projection history, weather
+        # climatology, and every schedule-status-gated backfill (Statcast/
+        # umpire/stolen-base -- see verify_and_backfill_statcast). Fix:
+        # explicitly re-fetch any PAST date whose cached rows contain a
+        # non-terminal status. "Suspended" is deliberately non-terminal (the
+        # game resumes later); a rescheduled game heals via the game_pk
+        # keep-last dedup below (same pk re-fetched under its new date wins).
+        if not existing_games.empty:
+            terminal = {"Final", "Completed Early", "Postponed", "Cancelled"}
+            past = existing_games[
+                (pd.to_datetime(existing_games["date"]).dt.date < today)
+                & (~existing_games["status"].isin(terminal))
+            ]
+            stale_dates = sorted(pd.to_datetime(past["date"]).dt.date.unique())
+            if stale_dates:
+                print(f"schedule {season}: re-fetching {len(stale_dates)} past date(s) with "
+                      f"non-terminal cached rows: {stale_dates[0]}..{stale_dates[-1]}", flush=True)
+
+        if fetch_from > end_bound and not stale_dates:
             print(f"schedule {season}: cache already current through {last_cached}, nothing new to fetch", flush=True)
             return sched_path, lineup_path
 
-    print(f"fetching schedule/lineups for season {season}: {fetch_from}..{end_bound}...", flush=True)
-    all_game_rows, all_lineup_rows = [], []
+    dates_to_fetch = list(stale_dates)
     d = fetch_from
     while d <= end_bound:
+        if d not in stale_dates:
+            dates_to_fetch.append(d)
+        d += _dt.timedelta(days=1)
+    dates_to_fetch.sort()
+
+    print(f"fetching schedule/lineups for season {season}: {len(dates_to_fetch)} date(s)...", flush=True)
+    all_game_rows, all_lineup_rows = [], []
+    for d in dates_to_fetch:
         games = _schedule_day_with_retry(str(d))
         g_rows, l_rows = _parse_games(games, str(d))
         all_game_rows.extend(g_rows)
         all_lineup_rows.extend(l_rows)
-        d += _dt.timedelta(days=1)
-    print(f"  fetched {len(all_game_rows)} games, {len(all_lineup_rows)} lineup slots over {fetch_from}..{end_bound}", flush=True)
+    print(f"  fetched {len(all_game_rows)} games, {len(all_lineup_rows)} lineup slots", flush=True)
 
     new_games = pd.DataFrame(all_game_rows)
     new_lineups = pd.DataFrame(all_lineup_rows)
