@@ -5,11 +5,18 @@ fallback-only fix and its 2026-08-04 observed-leg follow-up).
 
 The estimand: for each (batter-hand, pitcher-hand) cell and outcome, the
 league-wide odds ratio of ACTUAL outcome rate vs. a PLATOON-DISABLED
-prediction (matchup-combine x state x park x TTO, no platoon term at all),
-using only PRIOR seasons' data (walk-forward, no leakage). This directly
-measures "how much should the platoon adjustment move this cell," in the
-model's own native currency, with the real exposure composition and any
-real selection effects (e.g. lefty relievers being deployed specifically
+prediction (matchup-combine x state x park x TTO). The baseline components
+are walk-forward (built from strictly-prior seasons); the NUMERATOR is
+season S's own realized outcomes -- so the JSON entry keyed "S" is a
+measurement OF season S and must only ever be CONSUMED for seasons
+strictly AFTER S. platoon_splits._measured_shared_term_for enforces this
+(2026-08-03 audit finding C1: an earlier version consumed season S's cell
+when predicting season S itself -- a real walk-forward violation that
+contaminated 2024+ backtests and deviated from the validated
+2024-cells-applied-to-2025 configuration). This directly measures "how
+much should the platoon adjustment move this cell," in the model's own
+native currency, with the real exposure composition and any real
+selection effects (e.g. lefty relievers being deployed specifically
 against tough same-handed batters) baked in by construction -- not
 approximated by an assumed or swept exponent.
 
@@ -59,6 +66,9 @@ from src.models.validate_game_simulator import build_shared_tables
 # on every full run, but this measurement refreshes on the offseason cadence
 # (task #155), not nightly -- it needs to persist across deploys on its own.
 OUTPUT_PATH = Path(__file__).parent / "platoon_shared_term.json"
+
+MIN_CELL_EVENTS = 50  # minimum ACTUAL events (not PAs) for a measured cell to be
+                      # trusted -- see the inline comment at the floor check below.
 
 
 def measure_for_season(pa: pd.DataFrame, shared: dict, season: int) -> dict:
@@ -122,6 +132,19 @@ def measure_for_season(pa: pd.DataFrame, shared: dict, season: int) -> dict:
             for p_throws in ["L", "R"]:
                 mask = (df["stand"] == stand).to_numpy() & (df["p_throws"] == p_throws).to_numpy()
                 if mask.sum() < 200:  # too few real PAs this season for a stable cell measurement
+                    continue
+                # EVENT-count floor, not just PA-count (2026-08-03, caught by the
+                # audit-fix verification pass itself): for a rare category
+                # (triple_play ~1e-5, ~50 events/season league-wide) a cell can
+                # hold thousands of PAs but only 0-2 actual events -- the odds
+                # ratio is then pure noise (real observed example: a 2025
+                # triple_play cell whose value implied a 5.6x live multiplier
+                # once prior-season keying started consuming it). The measured
+                # shared term was only ever validated on high-volume categories
+                # (K/HR/walk/single, hundreds+ events per cell); cells below
+                # this floor fall back to the exponent-based shared term via
+                # the consumer's None path, which is the honest default.
+                if actual[mask].sum() < MIN_CELL_EVENTS:
                     continue
                 actual_rate = actual[mask].mean()
                 pred_rate = pred_no_platoon[mask].mean()

@@ -238,18 +238,48 @@ def _predominant_hand(pa: pd.DataFrame, player_col: str) -> pd.Series:
 
 def _measured_shared_term_for(season: int, outcome: str, stand: str, p_throws: str) -> float | None:
     """The measured total (both-sides-combined) shared displacement for this
-    (season, outcome, batter-hand, pitcher-hand) cell -- see
-    measure_platoon_shared_term.py. Returns this side's leg (sqrt of the
-    total, split symmetrically -- no evidence favoring attributing more of
-    the SHARED component to one side over the other), or None if this
-    exact cell wasn't measured (missing season/outcome, or too few real PAs
-    that season -- see that script's own n>=200 floor), so the caller can
-    fall back to the exponent-based value."""
+    (outcome, batter-hand, pitcher-hand) cell, taken from the LATEST measured
+    season STRICTLY BEFORE `season` -- see measure_platoon_shared_term.py.
+
+    Walk-forward fix (2026-08-03 audit, finding C1): the original version
+    looked up table[str(season)] -- season S's own cell, measured from season
+    S's own realized outcomes -- a real walk-forward violation that
+    contaminated every backtest from 2024 on AND silently deviated from the
+    configuration that actually passed the held-out 2025 bucketed check
+    (which applied 2024-measured cells to 2025). Strictly-prior-season
+    lookup restores exactly the validated shape: 2025 -> 2024 cells,
+    2026 -> 2025 cells, 2024 -> 2023 cells (NaN, true cold start) -> the
+    exponent fallback. The ~2.5%/yr drift documented in the JSON's _meta
+    note is the honest cost of not peeking.
+
+    Returns this side's leg (sqrt of the total, split symmetrically -- no
+    evidence favoring attributing more of the SHARED component to one side
+    over the other), or None if no prior-season cell exists (missing
+    outcome, NaN cold-start cells, or the n>=200 per-cell floor in the
+    measurement script), so the caller can fall back to the exponent-based
+    value."""
     table = _load_measured_shared_term()
-    cell = table.get(str(season), {}).get(outcome, {}).get(f"{stand}{p_throws}")
-    if cell is None or cell != cell:  # NaN check without importing math/numpy just for this
-        return None
-    return cell ** 0.5
+    prior_seasons = sorted(
+        (int(k) for k in table if k != "_meta" and k.isdigit() and int(k) < season),
+        reverse=True,
+    )
+    for ks in prior_seasons:
+        cell = table.get(str(ks), {}).get(outcome, {}).get(f"{stand}{p_throws}")
+        if cell is not None and cell == cell:  # non-missing, non-NaN
+            # defensive range guard (same clip discipline as every other
+            # multiplicative factor in this project): a real platoon
+            # displacement is a modest effect -- the largest validated cell
+            # is ~1.65x total (walk LL) -- so a cell outside [0.5, 2.0] is a
+            # noise measurement that escaped the script-side event floor
+            # (e.g. a JSON generated before MIN_CELL_EVENTS existed). Fall
+            # back rather than apply it.
+            if not (0.5 <= cell <= 2.0):
+                return None
+            return cell ** 0.5
+        # NaN/missing in the immediately-prior season: keep walking back --
+        # an older real measurement still beats the exponent fallback, and
+        # the drift note says year-over-year movement is ~2.5%.
+    return None
 
 
 def _shared_term_leg(player_col: str, player_hand: str, is_same_hand: bool, outcome: str, season: int,
@@ -388,8 +418,19 @@ def build_platoon_multipliers(pa: pd.DataFrame, player_col: str, outcome: str) -
 
         league_same_ref = hist_hand.map(lambda h: _ref_lookup(h, "same_mult"))
         league_opp_ref = hist_hand.map(lambda h: _ref_lookup(h, "opp_mult"))
-        own_same_dev = own_same_mult / league_same_ref
-        own_opp_dev = own_opp_mult / league_opp_ref
+        # Deviation clip (2026-08-03, caught by the audit-fix verification
+        # pass): for a rare category (triple_play ~1e-5) the league reference
+        # is itself built from ~50 events/season, so dividing a thin player
+        # sample's own ratio by it AMPLIFIES noise -- observed up to 9.1x
+        # multipliers vs the pre-restructure formula's 1.8x on the same
+        # cells. SPLIT_RATE_PRIOR_PA's 20 pseudo-PA add ~0 pseudo-EVENTS for
+        # rare categories, so they don't bound this. [0.25, 4.0] is wide
+        # enough to never bind on a real platoon-shape signal (validated
+        # categories' deviations live within ~[0.6, 1.7]; even genuine
+        # intent-walk shape effects stay under 4x) while capping pure-noise
+        # amplification -- same clip discipline as weather.py/expected_stats.
+        own_same_dev = (own_same_mult / league_same_ref).clip(0.25, 4.0)
+        own_opp_dev = (own_opp_mult / league_opp_ref).clip(0.25, 4.0)
 
         hist["same_hand_dev"] = (
             hist["same_reliability"] * own_same_dev.fillna(1.0) + (1 - hist["same_reliability"]) * 1.0
