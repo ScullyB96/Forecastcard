@@ -292,7 +292,7 @@ open" framing with the actual, nuanced answer and the sharper follow-up lead.
 
 ---
 
-## Bonus finding (not part of the original review) — a second, unfixed cold-start leak
+## Bonus finding (not part of the original review) — a second cold-start leak, now fixed
 
 While building Finding 4's factor tables, direct code inspection turned up a 5th instance of the
 exact cold-start look-ahead pattern that an earlier correctness audit (task #160) had found and
@@ -302,11 +302,89 @@ fixed in four sibling modules:
 ref = prior if len(prior) else X[X["season"] == season]   # the buggy pattern
 ```
 
-`game_simulator.py`'s `build_state_factors_by_season` still has it — apparently missed when the
+`game_simulator.py`'s `build_state_factors_by_season` still had it — apparently missed when the
 audit fixed the same pattern in `catcher_framing.py`, `weather.py`, `umpire_factor.py`, and
-`ttop.py`. Confirmed by direct code read; **not yet fixed or quantified on real data** (tracked as
-an open task — the true first season's state factor may still be leaking a small amount of
-look-ahead information into that season's own predictions).
+`ttop.py`. Initially confirmed by direct code read only; fixed and validated in a follow-up session.
+
+**Quantifying the leak.** Reconstructed the pre-fix behavior directly and compared it against a
+fully-neutral (1.0×) baseline for 2023 — the true cold-start season (no seasons exist before it in
+this project's data). The leak was real and not small: the worst cells were mechanically-driven
+outliers (`triple_play` at one state reached a leaked factor of 24.6×, several `sac_fly`/`sac_bunt`
+cells exceeded 5-7×), but even setting those aside, the **median absolute deviation from neutral
+across all 384 (state, outcome) cells was ~9.2 percentage points** — a systematic, not marginal,
+amount of look-ahead leaking into 2023's own predictions.
+
+**The fix.** Unlike the four sibling modules, this table has no "missing key falls back to neutral"
+convention at the call site (`GameSimulator` does `state_factors[state]` directly, not a
+`.get(state, NEUTRAL)`), so simply returning an empty dict for the cold-start season (the sibling
+modules' fix) would raise `KeyError` instead of silently leaking. Fixed correctly instead: the true
+cold-start season now gets an explicit, fully-neutral 1.0× cell for **every one of the 24
+mechanically-possible (bases-bitmask × outs) states** — the same "neutral by construction"
+resolution `park_factors.py` already uses for its own true-first-season case, just applied to a
+full lookup table instead of a lookup-with-default. Every other season is byte-identical to the
+pre-fix code (verified directly: `2024` factors before and after the change match exactly).
+
+**Guardrail backtest** (CRN-paired, n=697 games, 2023–2024, K=30/100/300 — 2023 must be included
+here, unlike the platoon fix's own guardrail, since this leak specifically lives in that season):
+
+| K | SU gap | Brier gap | MAE gap (home+away) |
+|---|---|---|---|
+| 30 | +0.86pp | -0.0007 | +0.011 |
+| 100 | -0.57pp | -0.0005 | +0.031 |
+| 300 | -0.14pp | +0.0005 | +0.029 |
+
+All three deltas at canonical K=300 are within noise-level magnitude — this is a genuine
+correctness fix (same category as the zombie-runner/park-neutralization precedent), so it ships
+regardless. Two real, favorable side effects showed up alongside the noise-level point-metric
+deltas: mean simulated total runs moved from 8.50 (leaky) to **8.82** against a real actual mean of
+8.86 (a real aggregate-scoring calibration improvement), and the PIT/z-score dispersion diagnostic
+improved on all three of its own sub-metrics (std(z) 1.0605→1.0459, frac|z|>1.96 0.0516→0.0445,
+frac|z|>2.58 0.0258→0.0215, each moving toward its stated target).
+
+**Shipped**: `game_simulator.py`'s `build_state_factors_by_season` now gives 2023 (the true
+cold-start season) a fully-neutral 24-state table instead of leaking that season's own data into
+itself.
+
+---
+
+## Follow-up investigation — the platoon fix's own strikeout-side residual
+
+The platoon structural fix (above) closed ~81%/42% of home_run's bucketed calibration error but
+only ~45-46% of strikeout's, in both handedness buckets. Investigated whether the remainder is a
+uniform residual or concentrated in a specific slice.
+
+**Reliability-tier check (ruled out).** If the residual were the double-counting mechanism
+reasserting itself, it should concentrate in low-reliability (mostly-default) matchups. It does
+the *opposite*: held out on 2025, the same-hand error is +0.12pp in low-reliability matchups
+(combined reliability <0.3) vs. +0.53pp in high-reliability ones; opp-hand shows the same reversed
+pattern (+0.27pp vs. -0.52pp). The remaining gap is not a residue of the shared-default component —
+it's concentrated exactly where a player's *own* observed platoon split data dominates.
+
+**Times-through-the-order check (the real signal).** Bucketing the same held-out residual by
+matchup handedness × times-through-the-order turned up a clean, large interaction:
+
+| hand | TTO=1 | TTO=2 | TTO=3 |
+|---|---|---|---|
+| same-hand | +1.15pp | -0.59pp | -1.26pp |
+| opp-hand | -0.09pp | -1.24pp | -0.58pp |
+
+Same-hand strikeout probability is substantially over-predicted the first time through the order
+and increasingly under-predicted on repeat looks; opposite-hand shows a similar but phase-shifted
+pattern. Cross-checked two ways: (1) **pre-existing, not created by the fix** — the identical sign
+pattern is present under the OLD (pre-fix) predictions too (same-hand TTO=1/2/3: +1.59/-0.23/-0.94pp),
+just partly masked by the double-counting bug; (2) **strikeout-specific, not general** — home_run
+shows no such sign-flipping interaction, just a small, monotonic drift with times-through (both
+hands drift from ~0 to +0.3-0.7pp by TTO=3), consistent with normal TTOP under-modeling rather than
+a platoon-specific interaction.
+
+**Interpretation.** A real platoon × times-through-the-order interaction exists for strikeout
+specifically — plausibly pitchers' first-look platoon/deception advantage erodes as batters see
+their arm angle/sequencing repeatedly, at a different rate for same- vs. opposite-handed batters —
+that the current architecture can't capture, since platoon and TTOP are each fit as independent,
+population-level multipliers and combined by straight multiplication. This is diagnosed, not
+fixed: building a corrected version would mean a new joint (handedness × times-through) factor for
+strikeout with its own fit and full-stack validation, not a one-line change, so it's left as a
+scoped, well-defined candidate for a future session rather than implemented now.
 
 ---
 
@@ -455,6 +533,7 @@ not the per-game card view, per the request. **Commit `999e435`** — deployed, 
 | `mlb/src/utils/tz.py` | New `default_run_mode()` |
 | `mlb/railway.toml` | Explicit `startCommand`; cron cadence 2×/day → 4×/day |
 | `mlb/src/models/platoon_splits.py` | **Live correctness fix**: shared league-average platoon default corrected from `league_mult**0.5` to `league_mult**0.25`, resolving a real double-counting bug (Finding 1 follow-up) |
+| `mlb/src/models/game_simulator.py` | **Live correctness fix**: `build_state_factors_by_season`'s cold-start season now gets a fully-neutral 24-state table instead of leaking its own data into itself (bonus finding) |
 | `mlb/src/models/bullpen.py` | CRN-keyed opt-in for closer/bullpen-pick sampling (Finding 2 infra) |
 | `mlb/src/models/weather_forecast.py` | CRN-keyed opt-in for weather-bucket sampling (Finding 2 infra) |
 | `mlb/src/models/validate_game_simulator.py` | Walk-blend multiplier re-wired behind an opt-in flag (Finding 2 retest infra) |
@@ -462,16 +541,11 @@ not the per-game card view, per the request. **Commit `999e435`** — deployed, 
 
 ## Open items for a future session
 
-- **Bonus finding**: fix `build_state_factors_by_season`'s cold-start leak (5th instance of an
-  already-fixed pattern elsewhere) and quantify its real-data impact, same discipline as the
-  original 4-module fix. It contaminates 2023, which sits inside the canonical 2023–2025 backtest
-  window — but it affects both arms of any paired A/B identically, so it's neutral to comparisons
-  like the platoon fix's own guardrail above; fix it before quoting any absolute (non-paired)
-  backtest number.
-- **Platoon fix's own residual**: the structural fix closed only ~45–46% of the strikeout
-  calibration gap (vs. ~81%/42% on the home_run side). Expected, not a failure — likely a second,
-  smaller strikeout-specific effect (framing/umpire interaction with handedness, or the
-  batter-side split's own shrinkage target) out of scope for this fix specifically.
+- **Platoon × times-through-the-order interaction (strikeout-specific)**: the follow-up
+  investigation above found a real, pre-existing platoon × TTO interaction concentrated in
+  strikeout (same-hand over-predicted +1.15pp at TTO=1, under-predicted -0.59/-1.26pp at TTO=2/3;
+  opposite-hand shows a phase-shifted version). Diagnosed, not fixed — would need a new joint
+  (handedness × times-through) factor for strikeout with its own fit and full-stack validation.
 - **Finding 2, deferred half**: `whiff_rate_multiplier` was fully deleted, not kept dormant — a
   from-scratch reconstruction (from its documented description) would be needed before it could be
   retested the same way the walk-blend was.

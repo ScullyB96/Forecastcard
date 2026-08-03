@@ -164,11 +164,31 @@ def build_state_factors_by_season(pa: pd.DataFrame) -> dict[int, dict[int, dict[
     one real (state) had a factor of 56.6x from just 5 historical events,
     which combined with a real park-factor extreme (28.4x) compounds to
     ~1600x for that rare category in that specific situation -- exactly the
-    kind of small-sample blowup this project has fixed everywhere else."""
+    kind of small-sample blowup this project has fixed everywhere else.
+
+    Cold-start fix (2026-08-03, follow-up to the task #160 correctness audit
+    -- this module was the one place that same "prior if available else
+    THIS season's own data" leak pattern survived, missed when the audit
+    fixed the identical bug in catcher_framing.py/weather.py/umpire_factor.py/
+    ttop.py). Unlike those, this table has no caller-side "missing key falls
+    back to neutral" convention (GameSimulator does `state_factors[state]`
+    directly -- see combine_matchup_distribution), so an empty dict for the
+    true cold-start season would KeyError instead of silently leaking. Fixed
+    the correct way instead: every one of the 24 mechanically-possible
+    (bases-bitmask x outs) states gets an explicit, fully-neutral 1.0 cell
+    for that season -- the same "neutral by construction" resolution
+    park_factors.py already uses for its own true-first-season case, just
+    applied to a full lookup table instead of a lookup-with-default."""
     out = {}
     for season in sorted(pa["season"].unique()):
         prior = pa[pa["season"] < season]
-        ref = prior if len(prior) else pa[pa["season"] == season]
+        if prior.empty:
+            out[season] = {
+                bitmask * 10 + outs: {o: 1.0 for o in OUTCOMES}
+                for bitmask in range(8) for outs in range(3)
+            }
+            continue
+        ref = prior
         overall = ref["outcome"].value_counts(normalize=True)
         factors = {}
         for state, g in ref.groupby("pre_state"):
