@@ -79,6 +79,16 @@ MARKET_ABBREV = {
     "Hits Allowed": "H", "Runs Allowed": "R", "Batters Faced": "BF",
 }
 
+# Column order for the slate-wide leaderboard, keyed by abbreviation
+# instead of full market name (several full names collapse to the same
+# abbreviation, e.g. "Batter Strikeouts" and "Strikeouts" both -> "K" --
+# that's fine, a batters table and a pitchers table never share one row,
+# so there's no real collision, just a shared rank for whichever full
+# name gets there first).
+_ABBREV_RANK: dict[str, int] = {}
+for _i, _m in enumerate(MARKET_ORDER):
+    _ABBREV_RANK.setdefault(MARKET_ABBREV.get(_m, _m), _i)
+
 # extra.role is only set by MLB's export today (NFL/NBA/NHL props have no
 # role key) -- ROLE_LABELS.get(None) below falls back to a generic "Players"
 # section so those sports still render sensibly, just without a batter/
@@ -133,11 +143,55 @@ def _group_props(rows: list[dict]) -> dict:
     return {"total": len(rows), "player_count": len(by_player), "sections": sections}
 
 
-def _props_by_game_id(sport: str, slate_key: str, games: list[dict]) -> dict[str, dict]:
-    return {
-        g["game_id"]: _group_props(db.props_for_game(sport, slate_key, g["game_id"]))
-        for g in games
-    }
+def _props_by_game_id(rows: list[dict]) -> dict[str, dict]:
+    """Bucket one slate's flat prop rows by game_id, then group each
+    game's rows into per-player stat lines. Takes the already-fetched
+    slate-wide rows (one query, see props_for_slate) rather than querying
+    per game_id -- this used to be N queries for an N-game slate."""
+    by_game: dict[str, list[dict]] = {}
+    for p in rows:
+        by_game.setdefault(p["game_id"], []).append(p)
+    return {game_id: _group_props(game_rows) for game_id, game_rows in by_game.items()}
+
+
+def _leaderboard(rows: list[dict], game_lookup: dict[str, str]) -> dict:
+    """Slate-wide view: every player's full stat line as one flat table
+    row per role (not nested per-market like _group_props), for a
+    sortable/filterable leaderboard across the whole day's games at once
+    -- "who projects best at X, across every game" rather than "what does
+    this one game's roster look like."
+
+    Columns are whatever markets are actually present for that role (not
+    hardcoded), so this works for any sport's data shape. is_prob is kept
+    per-column (not just per-cell) since a whole column is either a
+    probability or a mean -- never mixed within one column."""
+    by_role: dict[str | None, dict[int, dict]] = {}
+    prob_by_role: dict[str | None, dict[str, bool]] = {}
+    for p in rows:
+        role = (p.get("extra") or {}).get("role")
+        abbrev = MARKET_ABBREV.get(p["market"], p["market"])
+        is_prob = p.get("proj_mean") is None
+        value = p.get("over_prob") if is_prob else p.get("proj_mean")
+        prob_by_role.setdefault(role, {})[abbrev] = is_prob
+        players = by_role.setdefault(role, {})
+        entry = players.setdefault(p["player_id"], {
+            "player_id": p["player_id"], "player_name": p["player_name"],
+            "game_id": p["game_id"], "matchup": game_lookup.get(p["game_id"], ""),
+            "stats": {},
+        })
+        entry["stats"][abbrev] = value
+
+    sections = []
+    for role in sorted(by_role, key=lambda r: (r is None, r != "batter")):
+        prob_flags = prob_by_role[role]
+        columns = sorted(prob_flags, key=lambda m: (_ABBREV_RANK.get(m, len(MARKET_ORDER)), m))
+        players = sorted(by_role[role].values(), key=lambda e: sum(v or 0 for v in e["stats"].values()), reverse=True)
+        sections.append({
+            "role": role, "label": ROLE_LABELS.get(role, "Players"),
+            "columns": [{"key": c, "is_prob": prob_flags[c]} for c in columns],
+            "players": players,
+        })
+    return {"sections": sections}
 
 
 @app.get("/healthz")
@@ -239,7 +293,7 @@ def home(request: Request):
             continue
         games = _with_confidence(db.games_for_slate(sport, slate_key))
         games_by_sport[sport] = games
-        props_by_sport[sport] = _props_by_game_id(sport, slate_key, games)
+        props_by_sport[sport] = _props_by_game_id(db.props_for_slate(sport, slate_key))
     runs_by_sport = {r["sport"]: r for r in db.latest_runs()}
     return templates.TemplateResponse(request, "index.html", {
         "sports": db.SPORTS, "slate_keys": slate_keys,
@@ -265,7 +319,10 @@ def _render_sport(request: Request, sport: str, slate_key: str | None):
     if sport not in db.SPORTS:
         return RedirectResponse(url="/")
     games = _with_confidence(db.games_for_slate(sport, slate_key)) if slate_key else []
-    props_by_game_id = _props_by_game_id(sport, slate_key, games) if slate_key else {}
+    slate_props = db.props_for_slate(sport, slate_key) if slate_key else []
+    props_by_game_id = _props_by_game_id(slate_props)
+    game_lookup = {g["game_id"]: g["matchup"] for g in games}
+    leaderboard = _leaderboard(slate_props, game_lookup)
     run = db.run_for_slate(sport, slate_key) if slate_key else None
     latest = db.latest_slate_key(sport)
 
@@ -286,6 +343,7 @@ def _render_sport(request: Request, sport: str, slate_key: str | None):
     return templates.TemplateResponse(request, "sport.html", {
         "sports": db.SPORTS, "active_sport": sport, "sport": sport,
         "slate_key": slate_key, "games": games, "props_by_game_id": props_by_game_id,
+        "leaderboard": leaderboard,
         "opener": OPENERS.get(sport), "run": run,
         "available_slates": available_slates,
         "slate_options": [{"key": s, "label": _slate_label(s)} for s in available_slates],

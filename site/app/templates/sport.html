@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% import "_game_card.html" as cards %}
 {% import "_countdown.html" as opener_ui %}
+{% import "_leaderboard.html" as board %}
 {% block title %}{{ sport|upper }} Predictions{% endblock %}
 {% block content %}
 <h1>{{ sport|upper }}</h1>
@@ -33,13 +34,24 @@
     Updated {{ run.run_at|relative_time }}{{ ' — showing last available data' if stale }}
   </div>
   {% endif %}
-  <div class="game-grid">
+  {% if leaderboard.sections %}
+  <div class="view-toggle" data-view-toggle>
+    <button type="button" class="view-toggle-btn active" data-view="games">Games</button>
+    <button type="button" class="view-toggle-btn" data-view="players">Players</button>
+  </div>
+  {% endif %}
+  <div class="game-grid" data-view-panel="games">
     {% for game in games %}
       {{ cards.game_card(game, props_by_game_id, sport) }}
     {% else %}
       <p class="empty-state">No games in this slate.</p>
     {% endfor %}
   </div>
+  {% if leaderboard.sections %}
+  <div data-view-panel="players" hidden>
+    {{ board.leaderboard_panel(leaderboard, games) }}
+  </div>
+  {% endif %}
 {% elif opener %}
   {{ opener_ui.countdown(opener) }}
 {% else %}

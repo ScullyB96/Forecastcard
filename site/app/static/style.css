@@ -280,6 +280,12 @@ h2 {
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: var(--sp-4);
 }
+/* [hidden] alone loses this fight -- the UA stylesheet's `[hidden] {
+   display: none}` and this class rule tie on specificity, and the author
+   rule (this one) wins the cascade by coming later, so the Games/Players
+   toggle's `panel.hidden = true` was silently doing nothing without this
+   override. */
+[data-view-panel][hidden] { display: none; }
 
 /* ---------- countdown ---------- */
 
@@ -554,6 +560,117 @@ h2 {
   font-style: italic;
   padding: var(--sp-6) 0;
 }
+
+/* ---------- view toggle + leaderboard ---------- */
+
+.view-toggle {
+  display: inline-flex;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-4);
+  padding: 0.2rem;
+  border-radius: var(--radius-pill);
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+.view-toggle-btn {
+  font-family: var(--font-body);
+  padding: 0.35rem var(--sp-4);
+  border-radius: var(--radius-pill);
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+.view-toggle-btn:hover { color: var(--text); }
+.view-toggle-btn.active { color: var(--bg); background: var(--accent); }
+
+.game-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-4);
+}
+.game-filter-chip {
+  font-family: var(--font-body);
+  padding: 0.3rem var(--sp-3);
+  border-radius: var(--radius-pill);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+.game-filter-chip:hover { color: var(--text); border-color: var(--border-strong); }
+.game-filter-chip.active {
+  /* fixed near-black text regardless of theme -- see the identical
+     rationale on .view-toggle-btn.active / the light-mode override
+     below: var(--bg) text against --accent fails contrast in light mode. */
+  color: #000;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.leaderboard-section { margin-bottom: var(--sp-6); }
+.leaderboard-section:last-child { margin-bottom: 0; }
+.leaderboard-title {
+  margin: 0 0 var(--sp-2);
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-label);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.leaderboard-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.leaderboard-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.leaderboard-table th, .leaderboard-table td {
+  padding: var(--sp-2) var(--sp-3);
+  text-align: left;
+}
+.leaderboard-table th.num, .leaderboard-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.leaderboard-table thead th {
+  background: var(--panel);
+  color: var(--text-faint);
+  font-size: var(--fs-meta);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+}
+.leaderboard-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: color 150ms ease;
+}
+.leaderboard-table th.sortable:hover { color: var(--text); }
+.leaderboard-table th.sortable::after { content: ""; margin-left: 0.3rem; opacity: 0.4; }
+.leaderboard-table th.sort-desc::after { content: "▾"; opacity: 1; color: var(--accent); }
+.leaderboard-table th.sort-asc::after { content: "▴"; opacity: 1; color: var(--accent); }
+.leaderboard-table tbody tr { border-bottom: 1px solid var(--border); }
+.leaderboard-table tbody tr:last-child { border-bottom: none; }
+.leaderboard-table tbody tr:nth-child(odd) { background: var(--panel-2); }
+.leaderboard-table td { color: var(--text); font-weight: 600; }
+.leaderboard-matchup { color: var(--text-faint); font-weight: 500; }
+.leaderboard-table td.num { font-weight: 700; }
 
 /* ---------- factors (debug/math panel) ---------- */
 

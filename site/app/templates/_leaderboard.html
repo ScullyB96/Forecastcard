@@ -1,0 +1,47 @@
+{% macro leaderboard_panel(leaderboard, games) %}
+<div class="leaderboard" data-leaderboard>
+  {% if games|length > 1 %}
+  <div class="game-filter-bar">
+    <button type="button" class="game-filter-chip active" data-game-filter="all">All games</button>
+    {% for g in games %}
+    <button type="button" class="game-filter-chip" data-game-filter="{{ g.game_id }}">{{ g.away_team }} @ {{ g.home_team }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% for sec in leaderboard.sections %}
+  <div class="leaderboard-section">
+    {% if leaderboard.sections|length > 1 %}<h3 class="leaderboard-title">{{ sec.label }}</h3>{% endif %}
+    <div class="leaderboard-table-wrap">
+      <table class="leaderboard-table">
+        <thead>
+          <tr>
+            <th data-sort-key="0" data-sort-type="text" class="sortable">Player</th>
+            <th data-sort-key="1" data-sort-type="text" class="sortable">Game</th>
+            {% for col in sec.columns %}
+            <th data-sort-key="{{ loop.index + 1 }}" data-sort-type="num" class="sortable num">{{ col.key }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in sec.players %}
+          <tr data-game="{{ p.game_id }}">
+            <td data-value="{{ p.player_name }}">{{ p.player_name }}</td>
+            <td class="leaderboard-matchup" data-value="{{ p.matchup }}">{{ p.matchup }}</td>
+            {% for col in sec.columns %}
+            {% set v = p.stats.get(col.key) %}
+            <td class="num" data-value="{{ v if v is not none else '' }}">
+              {%- if v is none -%}—
+              {%- elif col.is_prob -%}{{ (v * 100)|round }}%
+              {%- else -%}{{ '%.1f'|format(v) }}
+              {%- endif -%}
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}

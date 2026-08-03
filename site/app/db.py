@@ -78,6 +78,19 @@ def props_for_game(sport: str, slate_key: str, game_id: str) -> list[dict]:
         return cur.fetchall()
 
 
+def props_for_slate(sport: str, slate_key: str) -> list[dict]:
+    """Every prop row for the whole slate in one query -- powers both the
+    per-game panels (grouped by game_id in Python, replacing what used to
+    be one props_for_game query per game) and the slate-wide player
+    leaderboard, off the same fetch."""
+    with _cursor() as cur:
+        cur.execute(
+            "SELECT * FROM props WHERE sport = %s AND slate_key = %s ORDER BY player_name, market",
+            (sport, slate_key),
+        )
+        return cur.fetchall()
+
+
 def slate_keys_for_sport(sport: str) -> list[str]:
     """Every slate_key with a real run AND at least one real game for
     this sport, newest first -- powers the history/browse picker on the
