@@ -74,8 +74,18 @@ def build_pregame_oaa(target_season: int) -> pd.Series:
 
 
 def _position_composite(sub_lineup: pd.DataFrame, positions: set) -> float:
+    """Mean OAA over this lineup's fielders at `positions`, with players
+    missing a prior-season OAA imputed at 0 -- OAA is centered at 0 =
+    league average BY DEFINITION, so 0 is the correct no-information
+    value (2026-08-03 audit, finding M11: the previous NaN-skipping mean
+    implicitly imputed missing fielders at their COVERED teammates'
+    average instead -- only 75.3% of infield slots have prior OAA, and
+    27% of team-games had <=2 of 4 infielders covered, so a lineup whose
+    only covered infielder was a +13 SS got a composite of +13 where the
+    correct value is ~+3.25, magnitude-inflating the factor exactly on
+    the thinnest-information lineups)."""
     vals = sub_lineup.loc[sub_lineup["position_code"].isin(positions), "oaa"]
-    return float(vals.mean()) if len(vals) else float("nan")
+    return float(vals.fillna(0.0).mean()) if len(vals) else float("nan")
 
 
 def team_game_defense_snapshot(lineups: pd.DataFrame, schedule: pd.DataFrame, season: int) -> pd.DataFrame:

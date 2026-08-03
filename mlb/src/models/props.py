@@ -541,9 +541,15 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
     # (ctx.get returns None) is byte-for-byte identical to before this existed.
     traded_overrides = ctx.get("traded_overrides")
 
-    def build_roster_profiles(team):
+    def build_roster_profiles(team, own_starter_id):
         raw = build_team_bullpen_roster(ctx["relief_log"], ctx["all_appearance_log"], team, game_date,
                                          traded_overrides=traded_overrides)
+        # exclude the day's own probable starter (2026-08-03 audit, finding
+        # M17): swingmen/bulk arms qualify for their own team's 45-day
+        # relief pool in 13% of real starts, so the simulator could draw
+        # the starter to "relieve" the very game he started -- an illegal
+        # re-entry that also double-credited his outs/K props.
+        raw.pop(own_starter_id, None)
         profiles, weights = {}, {}
         for pid, w in raw.items():
             prof = roster_pitcher_profile(pid)
@@ -552,8 +558,8 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
                 weights[pid] = w
         return profiles, weights
 
-    home_roster_profiles, home_roster_weights = build_roster_profiles(home_team)
-    away_roster_profiles, away_roster_weights = build_roster_profiles(away_team)
+    home_roster_profiles, home_roster_weights = build_roster_profiles(home_team, home_pitcher_id)
+    away_roster_profiles, away_roster_weights = build_roster_profiles(away_team, away_pitcher_id)
     # 3-tier lookup (2026-08-03 audit, finding C4): exact historical
     # (pitcher, game_pk) row for backtests -> the pitcher's live
     # as-of-next-start projection for real future games -> 5.4 only for a

@@ -127,6 +127,34 @@ def project_lineup_platoon_aware(schedule: pd.DataFrame, lineups: pd.DataFrame, 
 
     used_players = set()
     result = []
+
+    def _take(pid, pos, pos_pool):
+        """Append pid unless he was already drafted into an earlier slot
+        (2026-08-03 audit, finding M18: the baseline-retention branches
+        appended without checking used_players, so a player platoon-swapped
+        into an earlier slot could ALSO keep his own later baseline slot --
+        2.56% of real projected lineups contained a duplicate batter, an
+        8-man lineup with one player double-drafted). If taken, fall back
+        through widening tiers: most-started unused player at this position
+        (min_starts pool) -> ANY unused player with history at this position
+        -> ANY unused player on the roster (a real 9th distinct batter
+        always beats a duplicate) -> only then let the duplicate stand."""
+        if pid not in used_players:
+            result.append(pid)
+            used_players.add(pid)
+            return
+        for pool in (
+            pos_pool[~pos_pool["player_id"].isin(used_players)],
+            pivot[(pivot["position_code"] == pos) & (~pivot["player_id"].isin(used_players))],
+            pivot[~pivot["player_id"].isin(used_players)],
+        ):
+            if len(pool):
+                alt = int(pool.sort_values("total", ascending=False).iloc[0]["player_id"])
+                result.append(alt)
+                used_players.add(alt)
+                return
+        result.append(pid)
+
     for row in baseline.itertuples():
         pos, current_pid = row.position_code, row.player_id
         pos_pool = pivot[(pivot["position_code"] == pos) & (pivot["total"] >= min_starts)]
@@ -138,16 +166,14 @@ def project_lineup_platoon_aware(schedule: pd.DataFrame, lineups: pd.DataFrame, 
         if current_share is None or current_share >= 0.35:
             # no evidence the current player is a platoon weak-side against
             # this specific hand at this position -- trust the baseline
-            result.append(current_pid)
-            used_players.add(current_pid)
+            _take(current_pid, pos, pos_pool)
             continue
 
         alt_pool = pos_pool[(pos_pool["player_id"] != current_pid) & (~pos_pool["player_id"].isin(used_players))].copy()
         alt_pool["share"] = alt_pool[opp_hand] / alt_pool["total"]
         alt_pool = alt_pool[(alt_pool[opp_hand] >= min_starts) & (alt_pool["share"] >= 0.65)]
         if alt_pool.empty:
-            result.append(current_pid)
-            used_players.add(current_pid)
+            _take(current_pid, pos, pos_pool)
             continue
 
         best_pid = int(alt_pool.sort_values(opp_hand, ascending=False).iloc[0]["player_id"])
