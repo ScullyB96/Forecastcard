@@ -78,4 +78,8 @@ def build_position_player_profile(pa: pd.DataFrame) -> dict:
     return {
         "rates": {o: rates.get(o, 0.0) for o in OUTCOMES},
         "hand": "R", "same_mult": neutral, "opp_mult": neutral,
+        # finding M4: the TTOP table is starter-only within-pitcher -- a
+        # position player mopping up is the opposite of a starter facing a
+        # lineup a 3rd time; his pooled rates already ARE his context.
+        "apply_ttop": False,
     }

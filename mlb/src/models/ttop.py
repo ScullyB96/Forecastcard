@@ -40,42 +40,94 @@ TTOP_FACTOR_CLIP_MIN, TTOP_FACTOR_CLIP_MAX = 0.03, 20.0  # task #160 (2026-07-26
 
 
 def build_ttop_factors_by_season(pa: pd.DataFrame) -> dict[int, dict[int, dict[str, float]]]:
-    """Walk-forward-safe (prior-seasons-only): factors[season][times_through][outcome]
-    = rate(outcome | times_through) / rate(outcome | overall). Same plain-ratio,
-    Bayesian-shrunk design as build_state_factors_by_season (not odds-ratio:
-    some categories can be exactly zero in a bucket), and deliberately
-    LEAGUE-AVERAGE, not pitcher-specific -- see module docstring for why.
-    Each times_through bucket is large (hundreds of thousands of PAs) so
-    shrinkage rarely moves these much in practice, but applying it keeps
-    every "environmental multiplier" table in this project on the same
-    small-sample-safe footing (added 2026-07-21, same audit finding as
-    game_simulator.py's state_factors)."""
+    """Walk-forward-safe (prior-seasons-only): factors[season][times_through][outcome],
+    fit WITHIN-PITCHER on STARTER PAs only (2026-08-03 audit, finding M4).
+
+    The previous pooled estimator (rate(o | TT) / rate(o | overall), all PAs)
+    conflated three things: (1) COMPOSITION -- 56.4% of TT1 PAs are thrown by
+    relievers, whose rate mix differs from starters', so every reliever got
+    e.g. x1.055 strikeout at TT1 on top of profile rates that are already
+    reliever-high; decomposition on the 2023-24 window showed the pooled TT2
+    home_run bump (+7.5%) is ~100% composition; (2) day-level SURVIVOR
+    SELECTION -- reaching TT3 requires having a good day, so pooled TT3
+    "improvements" (the -5.8% walk reduction is entirely this) are selection,
+    not familiarity, and the hook-frailty mechanism (task #144/#145) already
+    models that same day-level selection explicitly; (3) the real
+    FAMILIARITY effect the published TTOP literature describes. Only (3)
+    belongs in this multiplier.
+
+    New estimator, per (times_through, outcome):
+        factor = observed events / EXPECTED events,
+    where expected sums each PA's own pitcher's overall starter-PA rate in
+    the fit window -- every pitcher is compared to HIMSELF, so pitcher-mix
+    composition cancels exactly. Fit on starter PAs only (the pitcher who
+    threw his team's first PA of the game), then renormalized so the
+    starter-PA-mix-weighted mean factor is exactly 1.0 per outcome: a
+    starter's total expected rates are preserved and the factor only
+    REDISTRIBUTES across passes. Same Bayesian shrinkage toward 1 and clip
+    as before (rare outcomes). Relievers should get NO factor at all --
+    game_simulator.simulate_half_inning skips TTOP for profiles stamped
+    apply_ttop=False (see the reliever-profile build sites in props.py /
+    validate_game_simulator.py).
+
+    Residual caveat (deliberate, documented): a within-pitcher expected
+    baseline removes composition but only part of day-level selection (TT3
+    PAs still come disproportionately from good days, which biases the
+    familiarity penalty CONSERVATIVELY, toward 1) -- the remaining overlap
+    with the hook mechanism is a Phase D re-baseline question, not fixable
+    by this table alone."""
     out = {}
     capped_all = pa["n_thruorder_pitcher"].clip(upper=MAX_TIMES_THROUGH)
+    # starter = the pitcher of each (game, batting-side)'s first PA
+    first_pa = pa.sort_values("at_bat_number").drop_duplicates(["game_pk", "inning_topbot"])
+    starter_keys = set(zip(first_pa["game_pk"], first_pa["inning_topbot"], first_pa["pitcher"]))
+    is_starter_pa = pd.Series(
+        list(zip(pa["game_pk"], pa["inning_topbot"], pa["pitcher"])), index=pa.index
+    ).isin(starter_keys)
+
     for season in sorted(pa["season"].unique()):
-        prior = pa[pa["season"] < season]
-        if prior.empty:
+        prior_mask = pa["season"] < season
+        if not prior_mask.any():
             # task #160 (2026-07-26 correctness audit) -- same real look-
             # ahead leak and same fix as catcher_framing.py/weather.py/
             # umpire_factor.py's identical cold-start pattern: the true
             # first season previously fell back to ITS OWN full data.
             out[season] = {}
             continue
-        ref = prior
+        ref = pa[prior_mask & is_starter_pa]
         capped = capped_all.loc[ref.index]
-        overall = ref["outcome"].value_counts(normalize=True)
+
+        # each pitcher's own overall starter-PA outcome rates in the window
+        pitcher_rates = (
+            pd.crosstab(ref["pitcher"], ref["outcome"], normalize="index")
+            .reindex(columns=OUTCOMES, fill_value=0.0)
+        )
+        expected_per_pa = pitcher_rates.reindex(ref["pitcher"]).to_numpy()  # (n_pa, n_outcomes)
+        expected_df = pd.DataFrame(expected_per_pa, index=ref.index, columns=OUTCOMES)
+
+        pooled = ref["outcome"].value_counts(normalize=True)
         factors = {}
         for times_through, g in ref.groupby(capped):
-            counts = g["outcome"].value_counts()
-            n_bucket = len(g)
+            observed = g["outcome"].value_counts()
+            expected = expected_df.loc[g.index].sum()
             cell = {}
             for o in OUTCOMES:
-                overall_rate = overall.get(o, 1e-9)
-                shrunk_rate = (
-                    (counts.get(o, 0) + TTOP_FACTOR_PRIOR_PA * overall_rate) / (n_bucket + TTOP_FACTOR_PRIOR_PA)
-                )
-                factor = shrunk_rate / overall_rate if overall_rate > 1e-9 else 1.0
+                pool_rate = pooled.get(o, 1e-9)
+                # shrink the observed/expected ratio toward 1 with
+                # TTOP_FACTOR_PRIOR_PA pseudo-PA at the pooled rate --
+                # same small-sample discipline as before, adapted to the
+                # observed-vs-expected form
+                num = observed.get(o, 0) + TTOP_FACTOR_PRIOR_PA * pool_rate
+                den = expected[o] + TTOP_FACTOR_PRIOR_PA * pool_rate
+                factor = num / den if den > 1e-9 else 1.0
                 cell[o] = max(TTOP_FACTOR_CLIP_MIN, min(TTOP_FACTOR_CLIP_MAX, factor))
             factors[int(times_through)] = cell
+        # renormalize to the starter PA mix so E_mix[factor] == 1 per outcome
+        mix = capped.value_counts(normalize=True)
+        for o in OUTCOMES:
+            norm = sum(mix.get(tt, 0.0) * cell_f[o] for tt, cell_f in factors.items())
+            if norm > 1e-9:
+                for cell_f in factors.values():
+                    cell_f[o] = cell_f[o] / norm
         out[season] = factors
     return out

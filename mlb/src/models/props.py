@@ -496,13 +496,16 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         return build_profile(row, prow, ctx["pitcher_hand"].get(pid, "R"),
                               pregame_gb_rate_pitcher=gb_p, pregame_fb_rate_pitcher=fb_p)
 
-    def _stamp_pid(prof, pid):
+    def _stamp_pid(prof, pid, apply_ttop=True):
         # Per-PA pitcher attribution (2026-08-03 audit, finding M15): every
         # pitcher profile the simulator can ever use in this path carries its
         # own real id, so simulate_half_inning can stamp WHO threw each PA at
         # the moment it happens. Copies rather than mutates -- the generic
         # debut profile is a shared ctx object served to multiple pids.
-        return None if prof is None else {**prof, "pid": pid}
+        # apply_ttop=False for RELIEVERS (finding M4): the TTOP table is fit
+        # within-pitcher on starter PAs; a reliever's rates are already
+        # first-pass rates, so the simulator skips the factor for him.
+        return None if prof is None else {**prof, "pid": pid, "apply_ttop": apply_ttop}
 
     home_lineup = [batter_profile(pid) for pid in home_ids]
     away_lineup = [batter_profile(pid) for pid in away_ids]
@@ -566,7 +569,8 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             return None
         neutral = {o: 1.0 for o in OUTCOMES}
         return {"rates": {o: row[f"pregame_rate_{o}"] for o in OUTCOMES}, "hand": "R",
-                "same_mult": neutral, "opp_mult": neutral, "pid": "BULLPEN_FALLBACK"}
+                "same_mult": neutral, "opp_mult": neutral, "pid": "BULLPEN_FALLBACK",
+                "apply_ttop": False}
 
     # Task: trade-deadline hardening -- optional {pitcher_id: {"new_team":,
     # "effective_date":}} (see bullpen.build_traded_pitcher_overrides), set
@@ -587,7 +591,7 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         for pid, w in raw.items():
             prof = roster_pitcher_profile(pid)
             if prof is not None:
-                profiles[pid] = _stamp_pid(prof, pid)
+                profiles[pid] = _stamp_pid(prof, pid, apply_ttop=False)
                 weights[pid] = w
         return profiles, weights
 

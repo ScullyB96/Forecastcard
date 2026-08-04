@@ -543,8 +543,20 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
         # known pitcher, never a guess.
         home_pitcher_by_inning = top_pa.groupby("inning")["pitcher"].first()
         away_pitcher_by_inning = bot_pa.groupby("inning")["pitcher"].first()
-        home_bullpen = {int(inn): pitcher_profile(pid) for inn, pid in home_pitcher_by_inning.items() if pid in psnap.index}
-        away_bullpen = {int(inn): pitcher_profile(pid) for inn, pid in away_pitcher_by_inning.items() if pid in psnap.index}
+        # RELIEVER entries (any pitcher other than the game's starter) are
+        # stamped apply_ttop=False (finding M4): the TTOP table is fit
+        # within-pitcher on starter PAs, and a reliever's own rates already
+        # come from first-pass PAs -- see game_simulator.simulate_half_inning.
+        home_bullpen = {
+            int(inn): (pitcher_profile(pid) if pid == home_pitcher_id
+                       else {**pitcher_profile(pid), "apply_ttop": False})
+            for inn, pid in home_pitcher_by_inning.items() if pid in psnap.index
+        }
+        away_bullpen = {
+            int(inn): (pitcher_profile(pid) if pid == away_pitcher_id
+                       else {**pitcher_profile(pid), "apply_ttop": False})
+            for inn, pid in away_pitcher_by_inning.items() if pid in psnap.index
+        }
 
         home_team = schedules[season].loc[schedules[season]["game_pk"] == game_pk, "home_team"].iloc[0]
         away_team = schedules[season].loc[schedules[season]["game_pk"] == game_pk, "away_team"].iloc[0]

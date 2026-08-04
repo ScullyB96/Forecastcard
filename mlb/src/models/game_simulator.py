@@ -710,7 +710,16 @@ class GameSimulator:
                 wf = weather_factors.get(f"{batter_stand}_{pull_tercile}")
             else:
                 wf = None
-            if thruorder_counts is not None and self.ttop_factors is not None:
+            # apply_ttop (2026-08-03 audit, finding M4): the TTOP table is now
+            # fit within-pitcher on STARTER PAs only -- a reliever's profile
+            # rates already come from overwhelmingly-first-pass PAs, so
+            # applying the starter TT1 factor to him double-counts (the old
+            # pooled table gave every reliever x1.055 strikeout on top of
+            # already-reliever-high rates). Reliever/fallback/blowout profiles
+            # are stamped apply_ttop=False at their build sites; a profile
+            # without the key (starters, older callers) keeps the factor.
+            if thruorder_counts is not None and self.ttop_factors is not None \
+                    and pitcher.get("apply_ttop", True):
                 times_through = min(thruorder_counts.get(lineup_idx, 0) + 1, 3)
                 ttop = self.ttop_factors.get(times_through)
             else:
