@@ -79,9 +79,21 @@ def measure_for_season(pa: pd.DataFrame, shared: dict, season: int) -> dict:
     functions -- see build_shared_tables)."""
     pa_season = pa[pa["season"] == season]
     cols = ["batter", "pitcher", "game_pk", "home_team", "stand", "p_throws",
-            "pre_state", "n_thruorder_pitcher", "outcome"]
+            "pre_state", "n_thruorder_pitcher", "outcome", "inning_topbot", "at_bat_number"]
     df = pa_season[cols].copy()
     df["times_through"] = df["n_thruorder_pitcher"].clip(upper=3)
+    # STARTER flag (2026-08-03 audit, finding M4 follow-through): the TTOP
+    # table is now fit within-pitcher on STARTER PAs and the simulator skips
+    # it for relievers (apply_ttop=False) -- this baseline must mirror that
+    # exactly, or the ~56% reliever share of TT1 PAs absorbs the starter TT1
+    # factor and the measured residual shifts UNIFORMLY across all four hand
+    # cells (observed: every strikeout cell down ~4% -- not handedness
+    # structure, a baseline mismatch).
+    first = pa_season.sort_values("at_bat_number").drop_duplicates(["game_pk", "inning_topbot"])
+    starter_keys = set(zip(first["game_pk"], first["inning_topbot"], first["pitcher"]))
+    df["is_starter_pa"] = pd.Series(
+        list(zip(df["game_pk"], df["inning_topbot"], df["pitcher"])), index=df.index
+    ).isin(starter_keys)
 
     batter_snap = shared["batter_snap"]
     pitcher_snap = shared["pitcher_snap"]
@@ -116,6 +128,9 @@ def measure_for_season(pa: pd.DataFrame, shared: dict, season: int) -> dict:
 
         state_v = df["state_row"].apply(lambda c: c.get(outcome, 1.0) if isinstance(c, dict) else 1.0).to_numpy(dtype=np.float64)
         ttop_v = df["ttop_row"].apply(lambda c: c.get(outcome, 1.0) if isinstance(c, dict) else 1.0).to_numpy(dtype=np.float64)
+        # reliever PAs get NO ttop factor -- mirrors the simulator's
+        # apply_ttop=False semantics exactly (see comment at is_starter_pa)
+        ttop_v = np.where(df["is_starter_pa"].to_numpy(), ttop_v, 1.0)
         if outcome in park_wide.columns:
             park_v = np.array(
                 [park_wide.loc[(t, season), outcome] if (t, season) in park_wide.index else 1.0 for t in df["home_team"]],
