@@ -268,10 +268,23 @@ def build_outcome_park_factors(pa: pd.DataFrame) -> pd.DataFrame:
     rates["home_rate_rolling"] = (home_roll_ev + PARK_FACTOR_PRIOR_PA * league_rate) / (home_roll_pa + PARK_FACTOR_PRIOR_PA)
     rates["road_rate_rolling"] = (road_roll_ev + PARK_FACTOR_PRIOR_PA * league_rate) / (road_roll_pa + PARK_FACTOR_PRIOR_PA)
     raw_factor = rates["home_rate_rolling"] / rates["road_rate_rolling"]
+    # A venue-season with ZERO same-venue prior observations has raw_factor
+    # exactly 1.0 by construction (the shrinkage prior fills both sides of
+    # the ratio) -- that is NO information, not a measured neutral factor
+    # (2026-08-03 audit, finding M9). The old normalize-everything step then
+    # divided that placeholder by the group mean (1.0326 for HR in 2025), so
+    # a brand-new park was simulated as a ~3% HR-SUPPRESSING park on zero
+    # observations (Steinbrenner Field, the short-porch Yankee-Stadium
+    # clone, all of 2025), and the placeholders dragged the normalizing mean
+    # itself toward 1 for the other teams. Fix: exclude no-history rows from
+    # the normalizing mean and pin their final factor to exactly neutral 1.0
+    # (byte-equivalent downstream to the missing-key/NaN "no adjustment"
+    # path those callers already have).
+    no_history = (home_roll_pa.fillna(0) == 0) | (road_roll_pa.fillna(0) == 0)
     # normalize each (season, outcome) group to a population mean of 1.0 --
-    # only over teams with a real (non-NaN, i.e. prior-data-available) factor
-    group_mean = raw_factor.groupby([rates["season"], rates["outcome"]]).transform("mean")
-    rates["park_factor"] = raw_factor / group_mean
+    # only over venues with real same-venue prior data
+    group_mean = raw_factor.where(~no_history).groupby([rates["season"], rates["outcome"]]).transform("mean")
+    rates["park_factor"] = (raw_factor / group_mean).where(~no_history, 1.0)
     return rates[["season", "team", "outcome", "park_factor"]]
 
 
