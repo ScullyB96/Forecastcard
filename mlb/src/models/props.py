@@ -815,8 +815,16 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
 # p_1plus_rbi now joins p_1plus_hit/p_1plus_hr as correctly uncorrected. See
 # MODEL_DOCUMENTATION.md sec 8.3 for the full before/after numbers.
 BATTER_PROP_CALIBRATION = {
-    "p_2plus_hits": (0.1106, 0.4892),  # 5/5 splits
-    "p_1plus_bb": (0.0804, 0.6442),  # 4/5 splits
+    # REFIT 2026-08-03 on the post-audit stack (finding M19): fit against the
+    # {prop}_raw bypass columns (see _apply_batter_prop_calibration -- the
+    # old slopes were fit 2026-07-23/25, before the platoon/TTOP/weather/
+    # shock fixes changed the distributions they correct), 150 fresh games x
+    # 150 trials, 5-fold CV by game, affine kept only where >=4/5 held-out
+    # folds improve Brier -- the SAME two props as the original fit pass,
+    # the other three (1plus_hit 3/5, 1plus_hr 0/5 -- raw already
+    # well-calibrated, slope 1.04 -- and 1plus_rbi 3/5) stay uncalibrated.
+    "p_2plus_hits": (0.1012, 0.5317),  # 4/5 splits (was 0.1106, 0.4892)
+    "p_1plus_bb": (0.0618, 0.6950),  # 4/5 splits (was 0.0804, 0.6442)
 }
 
 
