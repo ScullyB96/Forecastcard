@@ -8,11 +8,13 @@ what an Incoming Webhook is for: one secret URL, no app-install flow,
 posts as a normal message into one fixed channel. Upgrade to a real Slack
 App with a bot token only if two-way interactivity (buttons, slash
 commands) is ever wanted -- not needed for this.
-"""
+
+Fully self-contained: builds its own message shape and posts it, with no
+knowledge of Discord (see discord_notify.py's own, independent sibling)
+or of slate resolution/dedup (see main.py's notify route, which owns
+that ONCE for whichever platforms are configured)."""
 
 import requests
-
-from app import db
 
 SPORT_LABELS = {"mlb": "MLB", "nfl": "NFL", "nba": "NBA", "nhl": "NHL"}
 MAX_GAMES_SHOWN = 8  # keep the digest scannable -- the site link is where full depth lives
@@ -67,34 +69,12 @@ def build_slack_message(sport: str, slate_key: str, games: list[dict], site_url:
     return {"text": header, "blocks": blocks}
 
 
-def post_daily_picks(sport: str, slate_key: str | None, webhook_url: str, site_url: str) -> dict:
-    """Fetches today's slate for `sport` (or the latest one, if slate_key
-    is None) and posts the digest to `webhook_url` -- but ONLY the first
-    time this (sport, slate_key) pair is ever seen (see db.mark_notified).
-    A sport's own cron can call the /internal/notify trigger several times
-    a day as it refreshes the SAME slate intraday (MLB 4x, NBA/NHL 2x) --
-    without this dedup, "daily picks" would spam the channel once per
-    firing instead of once per day. Returns a status dict rather than
-    raising on a non-2xx Slack response -- this runs as the tail end of an
-    already-completed daily pipeline, so a Slack hiccup should be logged,
-    not treated as the whole run failing (same "external network hiccup
-    must not break the run" convention every sport's own weather-forecast/
-    RotoWire fallback already follows)."""
-    resolved_slate = slate_key or db.latest_slate_key(sport)
-    if resolved_slate is None:
-        return {"status": "skipped", "reason": "no slate available yet"}
-
-    if not db.mark_notified(sport, resolved_slate):
-        return {"status": "skipped", "reason": "already notified for this slate", "slate_key": resolved_slate}
-
-    games = db.games_for_slate(sport, resolved_slate)
-    payload = build_slack_message(sport, resolved_slate, games, site_url)
-
+def post_to_slack(webhook_url: str, payload: dict) -> dict:
+    """POSTs `payload` to a Slack Incoming Webhook. Returns a status dict
+    rather than raising on a non-2xx response -- this runs as the tail
+    end of an already-completed daily pipeline, so a Slack hiccup should
+    be logged, not treated as the whole run failing (same "external
+    network hiccup must not break the run" convention every sport's own
+    weather-forecast/RotoWire fallback already follows)."""
     resp = requests.post(webhook_url, json=payload, timeout=10)
-    return {
-        "status": "ok" if resp.ok else "error",
-        "slate_key": resolved_slate,
-        "games_included": min(len(games), MAX_GAMES_SHOWN),
-        "http_status": resp.status_code,
-        "slack_response": resp.text[:200],
-    }
+    return {"status": "ok" if resp.ok else "error", "http_status": resp.status_code, "response": resp.text[:200]}

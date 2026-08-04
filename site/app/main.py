@@ -12,7 +12,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import db, slack_notify
+from app import db, discord_notify, slack_notify
 from app.access import AccessGateMiddleware, COOKIE_NAME, make_session_cookie_value, site_password
 from app.season_openers import OPENERS
 from app.team_meta import team_info
@@ -220,35 +220,57 @@ def login_submit(request: Request, password: str = Form(...), next: str = Form("
 
 
 @app.post("/internal/notify/{sport}")
-def notify_slack(sport: str, request: Request, slate_key: str | None = None):
+def notify(sport: str, request: Request, slate_key: str | None = None):
     """Machine-to-machine trigger: a sport's own daily pipeline calls this
     as its last step (see each railway.toml's startCommand) to post that
-    day's picks digest to Slack. Bypasses the user-facing password gate
-    (see access.py's PUBLIC_PATHS) -- protected instead by a constant-time
-    comparison against NOTIFY_TOKEN, sent as a header (never a query
-    param, so it never lands in access logs).
+    day's picks digest to whichever chat platform(s) are configured.
+    Bypasses the user-facing password gate (see access.py's PUBLIC_PATHS)
+    -- protected instead by a constant-time comparison against
+    NOTIFY_TOKEN, sent as a header (never a query param, so it never
+    lands in access logs).
 
-    Both SLACK_WEBHOOK_URL and NOTIFY_TOKEN being unset is the default,
-    no-Slack-configured state -- every sport's pipeline can call this
-    unconditionally without needing its own feature flag; it just reports
-    "skipped" until both are set here on the web service."""
+    Slack and Discord are fully independent -- either, both, or neither
+    can be configured (SLACK_WEBHOOK_URL / DISCORD_WEBHOOK_URL), each
+    reported separately in the response. The slate is resolved and
+    dedup-checked (db.mark_notified) exactly ONCE here, up front, shared
+    by both platforms -- a sport's own cron can call this several times a
+    day as it refreshes the SAME slate intraday (MLB 4x, NBA/NHL 2x), and
+    only the FIRST firing to touch a given (sport, slate_key) actually
+    posts anywhere; every later same-day firing for that slate is a
+    silent no-op on both platforms at once."""
     token = os.environ.get("NOTIFY_TOKEN")
     if not token or not hmac.compare_digest(request.headers.get("x-notify-token", ""), token):
         raise HTTPException(status_code=401, detail="invalid or missing notify token")
     if sport not in db.SPORTS:
         raise HTTPException(status_code=404, detail="unknown sport")
 
-    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
-    if not webhook_url:
-        return {"status": "skipped", "reason": "SLACK_WEBHOOK_URL not configured"}
+    slack_webhook = os.environ.get("SLACK_WEBHOOK_URL")
+    discord_webhook = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not slack_webhook and not discord_webhook:
+        return {"status": "skipped", "reason": "no webhook configured (SLACK_WEBHOOK_URL / DISCORD_WEBHOOK_URL)"}
 
+    resolved_slate = slate_key or db.latest_slate_key(sport)
+    if resolved_slate is None:
+        return {"status": "skipped", "reason": "no slate available yet"}
+    if not db.mark_notified(sport, resolved_slate):
+        return {"status": "skipped", "reason": "already notified for this slate", "slate_key": resolved_slate}
+
+    games = db.games_for_slate(sport, resolved_slate)
     # RAILWAY_PUBLIC_DOMAIN is auto-injected by Railway for any service with
-    # a public domain -- the link in the Slack message must point at the
-    # PUBLIC url regardless of which (private-network) host this request
-    # itself arrived on.
+    # a public domain -- the link in the message must point at the PUBLIC
+    # url regardless of which (private-network) host this request itself
+    # arrived on.
     public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     site_url = f"https://{public_domain}" if public_domain else str(request.base_url)
-    return slack_notify.post_daily_picks(sport, slate_key, webhook_url, site_url)
+
+    result = {"slate_key": resolved_slate, "games_included": min(len(games), slack_notify.MAX_GAMES_SHOWN)}
+    if slack_webhook:
+        payload = slack_notify.build_slack_message(sport, resolved_slate, games, site_url)
+        result["slack"] = slack_notify.post_to_slack(slack_webhook, payload)
+    if discord_webhook:
+        payload = discord_notify.build_discord_payload(sport, resolved_slate, games, site_url)
+        result["discord"] = discord_notify.post_to_discord(discord_webhook, payload)
+    return result
 
 
 @app.get("/logout")
