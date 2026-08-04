@@ -288,6 +288,23 @@ def notify(sport: str, request: Request, slate_key: str | None = None, force: bo
         result["discord"] = post_result
         if post_result.get("message_id"):
             db.set_discord_message_id(sport, resolved_slate, post_result["message_id"])
+
+    # Top-N home run picks (2026-08-04): a SEPARATE digest from the
+    # per-game picks above, sent alongside it -- naturally empty (and so
+    # silently skipped) for any sport/slate with no "HR" market rows
+    # (every non-MLB sport; see db.top_hr_props's own docstring), no
+    # sport-name check needed. Shares the SAME dedup gate as the game
+    # digest above (both are part of one daily notification event) rather
+    # than tracking its own -- if force=true bypassed the skip for the
+    # game digest, it does the same here.
+    hr_props = db.top_hr_props(sport, resolved_slate, limit=10)
+    if hr_props:
+        if slack_webhook:
+            payload = slack_notify.build_slack_hr_message(sport, resolved_slate, hr_props, site_url)
+            result["slack_hr"] = slack_notify.post_to_slack(slack_webhook, payload)
+        if discord_webhook:
+            payload = discord_notify.build_discord_hr_payload(sport, resolved_slate, hr_props)
+            result["discord_hr"] = discord_notify.post_to_discord(discord_webhook, payload)
     return result
 
 

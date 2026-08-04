@@ -91,6 +91,33 @@ def props_for_slate(sport: str, slate_key: str) -> list[dict]:
         return cur.fetchall()
 
 
+def top_hr_props(sport: str, slate_key: str, limit: int = 10) -> list[dict]:
+    """The `limit` highest projected-mean-HR player rows for this slate,
+    each joined to its game's `matchup` string for context (a prop row's
+    own `team` column is always NULL by design -- see export_to_site_db's
+    _prop_rows -- so the matchup is the only per-player team context
+    available without a schema change). Ranked by `proj_mean` (the real
+    projected HR count for that game, e.g. 0.42), not a probability --
+    the site currently only exports "mean" markets (see export_to_site_db
+    .py's BATTER_MARKETS comment), so there is no p_1plus_hr column to
+    rank by instead. Empty for any sport/slate with no "HR" market rows
+    (every non-MLB sport, and MLB slates before props exist yet) -- no
+    sport-name check needed, the data itself decides."""
+    with _cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.player_name, p.proj_mean, g.matchup
+            FROM props p
+            JOIN games g ON g.sport = p.sport AND g.slate_key = p.slate_key AND g.game_id = p.game_id
+            WHERE p.sport = %s AND p.slate_key = %s AND p.market = 'HR' AND p.proj_mean IS NOT NULL
+            ORDER BY p.proj_mean DESC
+            LIMIT %s
+            """,
+            (sport, slate_key, limit),
+        )
+        return cur.fetchall()
+
+
 def slate_keys_for_sport(sport: str) -> list[str]:
     """Every slate_key with a real run AND at least one real game for
     this sport, newest first -- powers the history/browse picker on the

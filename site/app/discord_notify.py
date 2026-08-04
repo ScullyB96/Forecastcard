@@ -58,6 +58,20 @@ def build_discord_payload(sport: str, slate_key: str, games: list[dict], site_ur
     return {"embeds": [{"title": title, "description": "\n".join(lines)}]}
 
 
+def build_discord_hr_payload(sport: str, slate_key: str, hr_props: list[dict]) -> dict:
+    """A Discord payload for the top-N home-run picks (see db.top_hr_props)
+    -- a separate embed from build_discord_payload's per-game picks, sent
+    alongside it. Same "coming soon" convention as the game-picks embed
+    (no site link yet)."""
+    label = SPORT_LABELS.get(sport, sport.upper())
+    title = f"{label} top {len(hr_props)} home run picks -- {slate_key}"
+    if not hr_props:
+        return {"embeds": [{"title": f"{label} -- no home run picks available yet ({slate_key})"}]}
+    lines = [f"**{p['player_name']}** -- {p['proj_mean']:.2f} projected HR ({p['matchup']})" for p in hr_props]
+    lines.append("*Full player props on the website -- coming soon*")
+    return {"embeds": [{"title": title, "description": "\n".join(lines)}]}
+
+
 def post_to_discord(webhook_url: str, payload: dict) -> dict:
     """POSTs `payload` to a Discord Incoming Webhook. `wait=true` makes
     Discord return the created message's id (a plain POST returns an

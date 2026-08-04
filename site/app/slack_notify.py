@@ -69,6 +69,31 @@ def build_slack_message(sport: str, slate_key: str, games: list[dict], site_url:
     return {"text": header, "blocks": blocks}
 
 
+def build_slack_hr_message(sport: str, slate_key: str, hr_props: list[dict], site_url: str) -> dict:
+    """A Slack Block Kit payload for the top-N home-run picks (see
+    db.top_hr_props) -- a separate digest from build_slack_message's
+    per-game picks, sent alongside it. `hr_props` rows are already
+    ranked by projected mean HR count (a real projected number, not a
+    probability -- see db.top_hr_props's own docstring for why) and
+    joined to their game's matchup string for context. Always returns a
+    real payload (never None) for the same reason build_slack_message
+    does -- the caller (main.py) decides whether hr_props is non-empty
+    enough to be worth sending at all."""
+    label = SPORT_LABELS.get(sport, sport.upper())
+    if not hr_props:
+        text = f"{label} -- no home run picks available yet ({slate_key})"
+        return {"text": text, "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]}
+    lines = [f"*{p['player_name']}* -- {p['proj_mean']:.2f} projected HR ({p['matchup']})" for p in hr_props]
+    header = f"{label} top {len(hr_props)} home run picks -- {slate_key}"
+    link = f"{site_url.rstrip('/')}/{sport}/{slate_key}"
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": header}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"<{link}|Full player props>"}},
+    ]
+    return {"text": header, "blocks": blocks}
+
+
 def post_to_slack(webhook_url: str, payload: dict) -> dict:
     """POSTs `payload` to a Slack Incoming Webhook. Returns a status dict
     rather than raising on a non-2xx response -- this runs as the tail
