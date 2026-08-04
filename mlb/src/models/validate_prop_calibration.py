@@ -170,6 +170,13 @@ if __name__ == "__main__":
                                    ("p_1plus_hr", "actual_1plus_hr"), ("p_1plus_bb", "actual_1plus_bb"),
                                    ("p_1plus_rbi", "actual_1plus_rbi")]:
         report_calibration(bp, prop_col, actual_col, prop_col)
+        # RAW (pre-calibration) report (M19 bypass, see props.py's
+        # _apply_batter_prop_calibration): THIS is the column any
+        # BATTER_PROP_CALIBRATION refit must be fit against -- fitting on
+        # the calibrated column composes the old slopes into the new ones.
+        raw_col = f"{prop_col}_raw"
+        if raw_col in bp.columns:
+            report_calibration(bp, raw_col, actual_col, f"{prop_col} (RAW -- refit against this)")
 
     pp = result["pitcher_props"]
     print(f"\n\n{'='*30} PITCHER PROPS {'='*30}")

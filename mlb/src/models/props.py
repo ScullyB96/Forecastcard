@@ -823,6 +823,13 @@ BATTER_PROP_CALIBRATION = {
 
 def _apply_batter_prop_calibration(df: pd.DataFrame) -> pd.DataFrame:
     for prop, (a, b) in BATTER_PROP_CALIBRATION.items():
+        # RAW bypass (2026-08-03 audit, M19 prerequisite): keep the
+        # pre-calibration Monte Carlo frequency alongside the calibrated
+        # value -- any future refit of BATTER_PROP_CALIBRATION must fit
+        # actuals against {prop}_raw, never against the already-calibrated
+        # column (a slope fit on post-calibration output composes the old
+        # slopes into the new ones -- refit circularity).
+        df[f"{prop}_raw"] = df[prop]
         df[prop] = np.clip(a + b * df[prop], 0.001, 0.999)
     return df
 
