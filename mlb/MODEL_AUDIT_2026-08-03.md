@@ -359,5 +359,18 @@ Committed, each individually verified before the next (2026-08-03/04):
   where shrinkage dilutes it. Task #60's missing artifact is now replaced by this real one
   (scratchpad evaluate_m7.py, output in the M7 commit message).
 
-Open: M5 (SB layer decision — CRN A/B in flight), M3 (effective_n redesign, joint with
-Phase D dispersion re-validation), M6/M19 + constant re-tunes + full re-baseline (Phase D).
+- **M5 (SB layer): RETIRED.** CRN-paired A/B (n=697 common games, K=300, 2023-24; OFF arm =
+  empty pregame SB table): SU 0.5997 vs 0.5882 at K=300 but 0.5552 vs 0.5667 at K=100 (sign
+  flips inside noise), Brier gap +0.0009, MAE tied — the pre-registered keep-bar (SU loss
+  >1.5pp at K=300 or Brier loss >0.002) not met, so volume correctness wins: the embedded
+  transition movement is now the single source of steals. baserunning.py + SB fetch retained
+  for a future de-embed-and-re-add-identity redesign.
+- **Platoon shared term re-measured** on the fixed stack (its _meta requires this after any
+  handedness-adjacent change — M4/M10 qualified). First pass exposed and fixed a measurement
+  baseline mismatch with M4 (TTOP applied to reliever PAs shifted every K cell uniformly
+  ~4%); corrected table keeps validated-category structure with <1% mean drift.
+
+Open: M3 (effective_n redesign, joint with dispersion re-validation), M6 (renorm-aware
+mean-preserving shock — implemented + verified locally, held for the paired SHOCK_SIGMA
+re-sweep so they land atomically), M19 coefficient refit, full re-baseline + 2026-H1
+holdout + ledger entry.
