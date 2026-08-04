@@ -53,13 +53,27 @@ import numpy as np
 import pandas as pd
 
 from src.ingest.build_pa_table import build_and_save_pa_table
-from src.ingest.fetch import fetch_schedule_day, fetch_transactions
+from src.ingest.fetch import (
+    current_mlb_season,
+    fetch_schedule_day,
+    fetch_schedule_season,
+    fetch_statcast_season,
+    fetch_transactions,
+    verify_and_backfill_statcast,
+)
 from src.ingest.fetch_rotowire_lineups import build_todays_rotowire_lineups, rotowire_lineup_for_team, rotowire_pitcher_for_team
-from src.models.bullpen import build_traded_pitcher_overrides, TRADE_OVERRIDE_LOOKBACK_DAYS
+from src.models.bullpen import (
+    build_all_appearance_log,
+    build_closer_appearance_log,
+    build_live_expected_innings,
+    build_relief_appearance_log,
+    build_traded_pitcher_overrides,
+    TRADE_OVERRIDE_LOOKBACK_DAYS,
+)
 from src.models.lineup_projection import project_lineup_platoon_aware
 from src.models.props import build_pregame_context, generate_game_props
 from src.models.validate_game_simulator import predominant_hand
-from src.pipeline.daily_update import refresh_all_data
+from src.pipeline.daily_update import refresh_all_data, HISTORY_START_SEASON
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 from src.utils.tz import eastern_today, default_slate_date, default_run_mode
 
@@ -114,6 +128,48 @@ def refresh_game_weather(ctx: dict) -> None:
     ctx["game_weather"] = all_schedules[
         ["game_pk", "weather_condition", "weather_temp", "weather_wind"]
     ].drop_duplicates("game_pk").set_index("game_pk")
+
+
+def refresh_bullpen_recency(ctx: dict) -> "pd.Series | None":
+    """2026-08-03 audit, finding M21: the only full context rebuild runs at
+    ~9pm ET on D-1 -- MID-SLATE, before most of that night's games finish --
+    so the cached relief/appearance/closer logs a slate-day light run reuses
+    reflect D-2, and a closer who threw 25 pitches last night is sampled as
+    fully rested (directly contradicting bullpen.py's "rest-day availability
+    for this exact date" claim). This refreshes exactly the RECENCY-dependent
+    context pieces on a light run: incremental current-season Statcast fetch
+    (cheap after the C3 completeness guard -- only genuinely new dates), PA
+    table rebuild, then the four logs whose whole job is "who pitched how
+    recently" (relief_log / all_appearance_log / closer_log /
+    expected_innings_live) plus pitcher_hand (so a pitcher who debuted last
+    night resolves). The expensive walk-forward rate tables stay cached --
+    one night of new data doesn't meaningfully move a Marcel estimate, but
+    it's the ENTIRE signal for rest-day availability.
+
+    Returns the fresh pitcher_hand Series, or None on any failure -- a
+    failed refresh degrades to the pre-M21 behavior (stale-by-one-day logs)
+    rather than killing the run, since the lineup/weather refresh this light
+    run also performs is strictly more valuable than perfectly-fresh logs."""
+    try:
+        season = current_mlb_season()
+        seasons = list(range(HISTORY_START_SEASON, season + 1))
+        print("light mode: incremental Statcast refresh for last night's games (finding M21)...", flush=True)
+        fetch_schedule_season(season)
+        fetch_statcast_season(season)
+        verify_and_backfill_statcast(season)
+        print("light mode: rebuilding PA table + bullpen recency logs...", flush=True)
+        build_and_save_pa_table(seasons)
+        pa = pd.read_parquet(DATA_PROCESSED / f"pa_table_{min(seasons)}_{max(seasons)}.parquet")
+        ctx["relief_log"] = build_relief_appearance_log(pa)
+        ctx["all_appearance_log"] = build_all_appearance_log(pa)
+        ctx["closer_log"] = build_closer_appearance_log(pa)
+        ctx["expected_innings_live"] = build_live_expected_innings(pa)
+        print("light mode: bullpen recency logs now include last night's games", flush=True)
+        return predominant_hand(pa, "pitcher")
+    except Exception as e:
+        print(f"  WARNING: bullpen recency refresh failed ({e}) -- "
+              f"reusing cached (D-2) logs this run, same as pre-M21 behavior", flush=True)
+        return None
 
 
 def lineup_for_game(schedule: pd.DataFrame, lineups: pd.DataFrame, pitcher_hand: pd.Series, game_pk: int,
@@ -227,6 +283,12 @@ if __name__ == "__main__":
     print("fetching this date's schedule/probable pitchers...", flush=True)
     fetch_schedule_day(target_date)
     if mode == "light":
+        # last night's games first (finding M21): the schedule re-fetch inside
+        # refresh_bullpen_recency also picks up newly-finalized statuses, so
+        # the weather refresh below reads the freshest schedule parquets.
+        fresh_hand = refresh_bullpen_recency(ctx)
+        if fresh_hand is not None:
+            pitcher_hand = fresh_hand
         print("light mode: refreshing real posted weather from today's just-fetched schedule...", flush=True)
         refresh_game_weather(ctx)
 
