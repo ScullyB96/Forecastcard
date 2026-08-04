@@ -92,21 +92,27 @@ WIDEN_W = 1.0  # task #134 (Phase 1 pivot): rate-spread-restoring stretch factor
                # MODEL_DOCUMENTATION.md sec 11.13, a clean negative result) and was never
                # deployed. Scratchpad sweep scripts import build_profile directly and
                # override this per-run rather than editing it here.
-SHOCK_SIGMA = 0.40  # task #137 (Phase 1, the latent per-pitcher-appearance shock): FROZEN
-                    # production value, 2026-07-23. Fit in-sim on 2023-2024 (std(z)=1.0 crossing
-                    # ~0.40-0.44), validated on 2025 held out (std(z) 1.154->1.033, tail coverage
-                    # improved, SU/Brier/MAE within noise under CRN pairing), confirmed on the
-                    # canonical n=7237 protocol (std(z) 1.136->1.015 -- the best dispersion
-                    # result of the whole session) with a small SU/Brier/MAE dip that a
-                    # follow-up K-scaling check (K=30/100/300) showed shrinking toward zero as
-                    # K grows -- a K=50 estimator artifact, not a real model cost. See
-                    # MODEL_DOCUMENTATION.md sec 11.14 for the full story before ever changing
-                    # this constant -- in particular, this value is a SIMULATOR-INTERNAL
-                    # calibration constant (attenuated by odds-space renormalization + game-flow
-                    # damping), not a literal claim about real pitcher day-to-day variance, and
-                    # it may be absorbing other missing variance (e.g. a batter-side day-effect,
-                    # if ever added) -- refit down at that point, don't just stack a second
-                    # mechanism on top of this one unchanged.
+SHOCK_SIGMA = 0.15  # task #137 shock, RE-SWEPT 2026-08-03 (audit finding M6 pairing): the
+                    # original frozen 0.40 was fit WITH the shock's hidden mean bias present
+                    # (the old exp(sigma^2/2) correction was mean-preserving only pre-renorm;
+                    # post-renorm it suppressed on-base categories -3.35%, ~-0.23 runs/team/
+                    # game) AND with the pre-audit stack's larger variance deficit. With the
+                    # renorm-aware mean-preserving mechanism (game_simulator.
+                    # _build_shock_renorm_table) and the full Phase A-C fix stack, the
+                    # 2026-08-03 CRN-paired sweep (2023-24 fit window, n=500, K=150,
+                    # sigma in {0, .10, .15, .20, .25, .30, .40}) found BOTH criteria
+                    # agreeing at 0.15: std(z)=0.9992 (target 1.0) and the smallest
+                    # total-runs bias of any arm (-0.048/game; the old 0.40 on the fixed
+                    # mechanism gives std(z)=0.863 and +1.00/game -- over-shocked AND
+                    # inflated). Notably sigma=0 now gives std(z)=1.028: the audit fixes
+                    # themselves resolved most of the under-dispersion (1.136-1.154) this
+                    # mechanism was originally sized against, which is exactly the
+                    # "absorbing other missing variance -- refit down" scenario the
+                    # original freeze note anticipated. 2025 held-out confirmation happens
+                    # in the post-audit full re-baseline (same protocol as the original
+                    # fit). See MODEL_DOCUMENTATION.md sec 11.14 for the mechanism's
+                    # original story; this remains a SIMULATOR-INTERNAL calibration
+                    # constant, not a literal claim about real pitcher day-to-day variance.
 TEST_SEASONS = {2023, 2024, 2025}  # added 2023 (2026-07-22, critique claim 6) -- all under the
                                    # identical 2023+ rules regime (pitch clock, shift ban, big
                                    # bases, zombie runner), giving ~6500-7000+ games instead of

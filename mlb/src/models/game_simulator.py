@@ -48,19 +48,46 @@ OUTCOMES = list(STABILIZATION_PA.keys())
 SHOCKED_CATEGORIES = {"walk", "hit_by_pitch", "single", "double", "triple", "home_run"}
 
 
-def _pitcher_shock_factors(g: float, sigma: float) -> dict[str, float]:
-    """The mean-preserving lognormal odds-space multiplier for one drawn
-    shock value g ~ N(0, sigma^2) -- see GameSimulator._draw_pitcher_shock for
-    where g comes from and the module docstring's Phase 1 section for the
-    real-data measurement (component-level fit: sigma~0.10-0.22, confirmed
-    independently on 2023-2024 and 2025) that motivated this mechanism.
-    Dividing by exp(sigma^2/2) (the exact lognormal mean of exp(g)) makes
-    E[mult]=1.0 across many draws -- a real variance injection into
-    combine_matchup_distribution's per-PA distribution, not a hidden bias
-    shift (the failure mode task #134's rate-widening sweep hit)."""
-    mean_correction = np.exp(sigma ** 2 / 2) if sigma > 0 else 1.0
-    mult = np.exp(g) / mean_correction
-    return {o: (mult if o in SHOCKED_CATEGORIES else 1.0) for o in OUTCOMES}
+def _build_shock_renorm_table(sigma: float, n_s: int = 99, n_gh: int = 40) -> tuple[np.ndarray, np.ndarray]:
+    """Precomputed correction c(s) making the pitcher shock mean-preserving
+    THROUGH combine_matchup_distribution's renormalization (2026-08-03
+    audit, finding M6). The old exp(sigma^2/2) division made E[mult]=1 only
+    BEFORE the renorm; post-renorm, a shocked category's probability is
+    p*m / (s*m + 1-s) where s is the shocked-mass share -- concave in m
+    (Jensen), so shocked (on-base) categories were systematically
+    SUPPRESSED: measured -3.34% at sigma=0.40, a hidden ~-0.23 runs/team/
+    game mean shift, and the frozen sigma itself was selected by an A/B
+    whose arms differed in mean, not just variance.
+
+    For each s on a grid, solves (Gauss-Hermite over g ~ N(0, sigma^2),
+    bisection over c) for the c satisfying
+        E_g[ (e^g / c) / (s * e^g / c + 1 - s) ] = 1,
+    i.e. the post-renorm expected multiplier on shocked mass is exactly 1.
+    Limits check out analytically: s->0 gives c = E[e^g] = exp(sigma^2/2)
+    (the old pre-renorm correction), s->1 gives 1 for any c (renorm kills
+    the shock entirely). Applied per PA via linear interpolation on the
+    PA's own pre-shock shocked-mass share -- the same drawn g serves every
+    PA of the appearance, only the correction adapts to context."""
+    nodes, weights = np.polynomial.hermite.hermgauss(n_gh)
+    g = np.sqrt(2.0) * sigma * nodes
+    w = weights / np.sqrt(np.pi)
+    m = np.exp(g)
+    s_grid = np.linspace(0.0, 0.99, n_s)
+    c_grid = np.empty(n_s)
+    for i, s in enumerate(s_grid):
+        if s <= 0.0:
+            c_grid[i] = float(np.sum(w * m))  # = exp(sigma^2/2)
+            continue
+        lo, hi = 1e-6, float(np.sum(w * m)) * 4.0
+        for _ in range(80):
+            c = 0.5 * (lo + hi)
+            val = float(np.sum(w * (m / c) / (s * (m / c) + 1.0 - s)))
+            if val > 1.0:
+                lo = c
+            else:
+                hi = c
+        c_grid[i] = 0.5 * (lo + hi)
+    return s_grid, c_grid
 
 
 def build_wide_pregame_rates(pa: pd.DataFrame, player_col: str,
@@ -275,11 +302,12 @@ def combine_matchup_distribution(batter_rates: dict[str, float], pitcher_rates: 
     own per-team normalization step cancels out -- then renormalize the full
     vector to sum to 1 (mutually exclusive categories) -- the natural
     multi-category extension of the (inherently binary) odds-ratio method.
-    pitcher_shock_factors: optional (task #137) per-outcome multiplier from
-    this pitcher's CURRENT appearance's latent "stuff" shock -- see
-    _pitcher_shock_factors/GameSimulator._draw_pitcher_shock. Mean-preserving
-    across trials by construction; applied the same way as every other
-    factor dict here."""
+    pitcher_shock_factors: optional (task #137) -- this pitcher's CURRENT
+    appearance's latent "stuff" shock as {"mult": e^g, "s_grid", "c_grid"}
+    (see GameSimulator._draw_pitcher_shock / _build_shock_renorm_table).
+    Unlike the other factor dicts, applied AFTER the deterministic factors
+    with a per-PA renorm-aware correction so it is mean-preserving THROUGH
+    the final renormalization (finding M6), not just before it."""
     unnorm = {}
     for o in OUTCOMES:
         lg, b, p = league_rates[o], batter_rates[o], pitcher_rates[o]
@@ -301,9 +329,22 @@ def combine_matchup_distribution(batter_rates: dict[str, float], pitcher_rates: 
             prob *= catcher_factors[o]
         if hfa_factors is not None:
             prob *= hfa_factors[o]
-        if pitcher_shock_factors is not None:
-            prob *= pitcher_shock_factors[o]
         unnorm[o] = prob
+    if pitcher_shock_factors is not None:
+        # RENORM-AWARE shock application (2026-08-03 audit, finding M6):
+        # the shock is applied AFTER every deterministic factor, scaled by
+        # a correction interpolated at THIS PA's own shocked-mass share s,
+        # so that E_g[renormalized shocked probability] equals the no-shock
+        # probability exactly (see _build_shock_renorm_table). The old
+        # exp(sigma^2/2) division was mean-preserving only pre-renorm; the
+        # renorm map is concave in the multiplier (Jensen), which silently
+        # suppressed on-base categories by -3.34% at sigma=0.40.
+        total = sum(unnorm.values())
+        s = sum(unnorm[o] for o in SHOCKED_CATEGORIES) / total
+        c = float(np.interp(s, pitcher_shock_factors["s_grid"], pitcher_shock_factors["c_grid"]))
+        mult = pitcher_shock_factors["mult"] / c
+        for o in SHOCKED_CATEGORIES:
+            unnorm[o] *= mult
     total = sum(unnorm.values())
     return {o: v / total for o, v in unnorm.items()}
 
@@ -446,6 +487,13 @@ class GameSimulator:
         # byte-identical to the pre-task-#137 codebase (no shock draw of any
         # kind happens, so the plain-rng sequential stream is untouched).
         self.shock_sigma = shock_sigma
+        # finding M6 (renorm-aware mean preservation): precomputed once per
+        # simulator -- see _build_shock_renorm_table. None when the shock is
+        # off (exact no-op path preserved).
+        if shock_sigma > 0:
+            self._shock_s_grid, self._shock_c_grid = _build_shock_renorm_table(shock_sigma)
+        else:
+            self._shock_s_grid = self._shock_c_grid = None
 
     def _draw_pitcher_shock(self, crn_game_pk: int | None, crn_trial: int | None,
                              side_tag: int, appearance_idx: int) -> dict[str, float] | None:
@@ -480,7 +528,11 @@ class GameSimulator:
                             DECISION_PITCHER_SHOCK)
         else:
             g = self.rng.normal(0.0, self.shock_sigma)
-        return _pitcher_shock_factors(g, self.shock_sigma)
+        # finding M6: the raw e^g plus the shared renorm-aware correction
+        # table -- the context-dependent correction is applied per PA inside
+        # combine_matchup_distribution, not baked in here, because it depends
+        # on each PA's own shocked-mass share.
+        return {"mult": float(np.exp(g)), "s_grid": self._shock_s_grid, "c_grid": self._shock_c_grid}
 
     def simulate_half_inning(self, lineup: list[dict], start_idx: int,
                               pitcher: dict, walkoff_margin: int | None = None,
