@@ -290,7 +290,7 @@ def build_preseason_priors(pa: pd.DataFrame, player_col: str, outcome: str, targ
                             park_factors_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """The Marcel-style weighted, regressed prior for `target_season`, built
     only from seasons STRICTLY BEFORE it (no leakage)."""
-    empty_cols = [player_col, "preseason_rate", "prior_weight_pa"]
+    empty_cols = [player_col, "preseason_rate", "prior_weight_pa", "raw_prior_pa"]
     prior_seasons = pa[pa["season"] < target_season]
 
     if prior_seasons.empty:
@@ -465,6 +465,7 @@ def build_pregame_rates(pa: pd.DataFrame, player_col: str, outcome: str,
         # players WITH some prior history) is untouched either way.
         sdf["preseason_rate"] = sdf["preseason_rate"].fillna(cold_start_rate)
         sdf["prior_weight_pa"] = sdf["prior_weight_pa"].fillna(K)
+        sdf["raw_prior_pa"] = sdf["raw_prior_pa"].fillna(0.0)
 
         grp = sdf.groupby(player_col)
         sdf["season_events_before"] = grp["is_outcome_pn"].cumsum() - sdf["is_outcome_pn"]
@@ -473,15 +474,25 @@ def build_pregame_rates(pa: pd.DataFrame, player_col: str, outcome: str,
         num = sdf["prior_weight_pa"] * sdf["preseason_rate"] + sdf["season_events_before"]
         den = sdf["prior_weight_pa"] + sdf["season_pa_before"]
         sdf["pregame_rate"] = num / den
-        # the Bayesian-blend denominator IS the effective pseudo+real sample size backing
-        # pregame_rate -- i.e. pregame_rate is exactly the mean of a Beta(alpha, beta)
-        # posterior with alpha=pregame_rate*effective_n, beta=(1-pregame_rate)*effective_n.
-        # Exposed for task #127 (posterior-sampled rates): a caller wanting genuine
-        # parameter uncertainty (not just outcome-sampling noise) can draw ONE Beta sample
-        # per trial from this instead of using the point estimate every trial -- see
-        # sample_posterior_rate below. Purely additive (an extra output column), no
-        # existing caller's behavior changes by this alone.
-        sdf["effective_n"] = den
+        # effective_n: the pseudo+real sample size backing pregame_rate AS A
+        # POSTERIOR WIDTH -- pregame_rate is the mean of Beta(alpha, beta)
+        # with alpha=rate*effective_n, beta=(1-rate)*effective_n. Exposed for
+        # task #127 (posterior-sampled rates); see sample_posterior_rate.
+        # NOT the blend denominator `den` (2026-08-03 audit, finding M3):
+        # `den` uses the K-capped prior weight -- a deliberate MEAN-side
+        # reactivity choice -- but inheriting that cap as the WIDTH meant a
+        # veteran with 1,471 raw prior PA sampled his strikeout talent with
+        # n=60 (+/-4.6pp per trial, ~5x too wide), with fast-stabilizing
+        # categories (the best-known talents) getting the MOST parameter
+        # noise -- inverted vs. the stabilization literature K comes from.
+        # The information actually backing the estimate is the league prior
+        # (worth K) + the player's own raw prior PA + this season's real PA.
+        # Mean and width deliberately use different pseudo-counts: the mean
+        # keeps the reactivity cap, the width reflects true information.
+        # Currently DORMANT downstream (resample_profile_rates has no
+        # callers; dispersion is handled by the sigma=0.15 shock) -- this
+        # makes the exposed column coherent for whenever it's turned on.
+        sdf["effective_n"] = K + sdf["raw_prior_pa"] + sdf["season_pa_before"]
         out_frames.append(sdf)
 
     result = pd.concat(out_frames, ignore_index=True)
