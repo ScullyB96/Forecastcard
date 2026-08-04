@@ -127,11 +127,15 @@ HIT_EVENTS = ["single", "double", "triple", "home_run"]
 BIP_OUT_EVENTS = ["field_out", "double_play", "fielders_choice", "field_error",
                   "sac_fly", "sac_bunt", "triple_play", "catcher_interf"]
 
-XBACON_PRIOR_BIP = 300  # Bayesian-shrinkage prior, pseudo-balls-in-play. A method-of-
-                         # moments fit on real data (decomposing observed batter-season
-                         # xBACON variance into true-skill variance + per-batted-ball
-                         # noise/n) gave ~138 pseudo-BIP; rounded up for a safety margin,
-                         # same practice as catcher_framing.py's CATCHER_FRAMING_PRIOR_PITCHES.
+XBACON_PRIOR_BIP = 200  # Bayesian-shrinkage prior, pseudo-balls-in-play, in RAW
+                         # (unweighted) BIP units. Re-derived 2026-08-03 (audit finding
+                         # M1): the reliability formula previously compared this against
+                         # the MARCEL_WEIGHTS-weighted BIP count (~4x raw), so the old
+                         # 300 was effectively ~75 raw. Held-out sweep (fit target 2024,
+                         # confirm 2025, batters with >=100 realized BIP): MSE minimized
+                         # at K=200 in both years (2025: 0.000523 vs 0.000545 at the old
+                         # effective 75). An earlier method-of-moments fit gave ~138
+                         # pseudo-BIP -- consistent with this direct sweep's 150-300 plateau.
 
 
 def _season_bip_sums(pa: pd.DataFrame) -> pd.DataFrame:
@@ -164,25 +168,33 @@ def _preseason_xbacon_priors(pa: pd.DataFrame, target_season: int) -> tuple[pd.D
     priors = []
     for batter, g in season_sums.groupby("batter"):
         g = g.set_index("season")
-        num, den = 0.0, 0.0
+        num, den, raw_bip = 0.0, 0.0, 0.0
         for i, w in enumerate(MARCEL_WEIGHTS):
             s = target_season - 1 - i
             if s in g.index:
                 num += w * g.loc[s, "xba_sum"]
                 den += w * g.loc[s, "bip"]
+                raw_bip += g.loc[s, "bip"]
         if den == 0:
             continue
-        priors.append({"batter": batter, "prior_bip": den, "prior_xba_sum": num})
+        priors.append({"batter": batter, "prior_bip": den, "prior_xba_sum": num, "raw_prior_bip": raw_bip})
     priors_df = pd.DataFrame(priors)
     if priors_df.empty:
         return pd.DataFrame(columns=empty_cols), league_xbacon
 
-    priors_df["reliability"] = priors_df["prior_bip"] / (priors_df["prior_bip"] + XBACON_PRIOR_BIP)
+    # RELIABILITY and the in-season blend anchor must use RAW (unweighted)
+    # BIP -- not the MARCEL_WEIGHTS-weighted `prior_bip`, whose 5/4/3 weights
+    # inflate the "sample size" ~4x against a stabilization constant
+    # denominated in real BIP (2026-08-03 audit, finding M1 -- the same
+    # units-mismatch bug class task #53 fixed in true_talent.py and that the
+    # GB/FB sibling below was already fixed for). The rate itself (raw_xbacon)
+    # correctly keeps using the weighted sums.
+    priors_df["reliability"] = priors_df["raw_prior_bip"] / (priors_df["raw_prior_bip"] + XBACON_PRIOR_BIP)
     raw_xbacon = priors_df["prior_xba_sum"] / priors_df["prior_bip"]
     priors_df["preseason_xbacon"] = (
         priors_df["reliability"] * raw_xbacon + (1 - priors_df["reliability"]) * league_xbacon
     )
-    priors_df["prior_weight_bip"] = np.minimum(priors_df["prior_bip"], XBACON_PRIOR_BIP)
+    priors_df["prior_weight_bip"] = np.minimum(priors_df["raw_prior_bip"], XBACON_PRIOR_BIP)
     return priors_df[empty_cols], league_xbacon
 
 
@@ -234,12 +246,19 @@ def player_game_xbacon_snapshot(pa: pd.DataFrame) -> pd.DataFrame:
     return wide.sort_values("at_bat_number").groupby(["game_pk", "batter"], as_index=False).nth(0)
 
 
-BARREL_PRIOR_BIP = 300  # Bayesian-shrinkage prior, pseudo-balls-in-play. A method-of-
-                         # moments fit here was numerically unstable (observed variance
-                         # barely exceeded the estimated binomial-noise term, producing an
-                         # implausibly large prior_n) -- used the same value as
-                         # XBACON_PRIOR_BIP instead, a reasonable, consistent default
-                         # rather than trusting an unstable derivation.
+BARREL_PRIOR_BIP = 75   # Bayesian-shrinkage prior, pseudo-balls-in-play, in RAW
+                         # (unweighted) BIP units. Re-derived 2026-08-03 (audit finding
+                         # M1, see XBACON_PRIOR_BIP): barrel rate is a FAST-stabilizing,
+                         # wide-true-talent-spread skill, so it wants far less shrinkage
+                         # than xBACON. Held-out sweep: 2024 fit target had K=75 and
+                         # K=100 statistically tied (0.000825 vs 0.000824), 2025 confirm
+                         # preferred 75 (0.000878 vs 0.000903; old nominal 300 in raw
+                         # units: 0.001149). 75 is also what the old weighted-units code
+                         # EFFECTIVELY did (~300/4) -- accidentally near-optimal, which
+                         # is WHY the units bug survived aggregate checks for this
+                         # metric -- so this pick fixes the semantics with no behavior
+                         # regression. Replaces the previous borrowed-from-xBACON
+                         # default that a method-of-moments fit couldn't pin down.
 
 
 def _season_barrel_sums(pa: pd.DataFrame) -> pd.DataFrame:
@@ -271,25 +290,28 @@ def _preseason_barrel_priors(pa: pd.DataFrame, target_season: int) -> tuple[pd.D
     priors = []
     for batter, g in season_sums.groupby("batter"):
         g = g.set_index("season")
-        num, den = 0.0, 0.0
+        num, den, raw_bip = 0.0, 0.0, 0.0
         for i, w in enumerate(MARCEL_WEIGHTS):
             s = target_season - 1 - i
             if s in g.index:
                 num += w * g.loc[s, "barrels"]
                 den += w * g.loc[s, "bip"]
+                raw_bip += g.loc[s, "bip"]
         if den == 0:
             continue
-        priors.append({"batter": batter, "prior_bip": den, "prior_barrels": num})
+        priors.append({"batter": batter, "prior_bip": den, "prior_barrels": num, "raw_prior_bip": raw_bip})
     priors_df = pd.DataFrame(priors)
     if priors_df.empty:
         return pd.DataFrame(columns=empty_cols), league_rate
 
-    priors_df["reliability"] = priors_df["prior_bip"] / (priors_df["prior_bip"] + BARREL_PRIOR_BIP)
+    # RELIABILITY/blend anchor use RAW (unweighted) BIP -- see the identical
+    # units-mismatch note in _preseason_xbacon_priors (finding M1, task #53 class).
+    priors_df["reliability"] = priors_df["raw_prior_bip"] / (priors_df["raw_prior_bip"] + BARREL_PRIOR_BIP)
     raw_rate = priors_df["prior_barrels"] / priors_df["prior_bip"]
     priors_df["preseason_barrel_rate"] = (
         priors_df["reliability"] * raw_rate + (1 - priors_df["reliability"]) * league_rate
     )
-    priors_df["prior_weight_bip"] = np.minimum(priors_df["prior_bip"], BARREL_PRIOR_BIP)
+    priors_df["prior_weight_bip"] = np.minimum(priors_df["raw_prior_bip"], BARREL_PRIOR_BIP)
     return priors_df[empty_cols], league_rate
 
 
@@ -370,10 +392,16 @@ def player_game_barrel_snapshot(pa: pd.DataFrame) -> pd.DataFrame:
 # BARREL_PRIOR_BIP) toward the league-average rate (~17% every season
 # 2023-2026, quite stable) modestly IMPROVES both the R^2 gain (+0.0226 vs.
 # +0.0171 unshrunk, averaged) and the tail (max 5.64x vs. 5.90x) -- used here.
-PULLED_AIR_PRIOR_BIP = 300  # same value as BARREL_PRIOR_BIP -- a reasonable, consistent
-                             # default; league pulled-air rate is stable enough
-                             # (~0.168-0.179 across 2023-2026) that shrinkage strength
-                             # isn't especially sensitive to the exact prior weight.
+PULLED_AIR_PRIOR_BIP = 800  # Bayesian-shrinkage prior, pseudo-balls-in-play, in RAW
+                             # (unweighted) BIP units. Re-derived 2026-08-03 (audit
+                             # finding M1, see XBACON_PRIOR_BIP): individual pulled-air
+                             # rate is mostly noise around a small real signal, so it
+                             # wants HEAVY shrinkage -- held-out sweep minimized at K=800
+                             # on the 2024 fit target, with 2025 confirming a flat
+                             # 800-1600 plateau (2025: 0.001127 at 800, vs 0.001649 at
+                             # the old nominal 300 and 0.002826 at the old code's
+                             # effective ~75 raw; league-only would be 0.001459, so this
+                             # much shrinkage still beats ignoring the batter entirely).
 
 
 def _clean_pulled_air_inputs(pa: pd.DataFrame) -> pd.DataFrame:
@@ -426,25 +454,28 @@ def _preseason_pulled_air_priors(pa: pd.DataFrame, target_season: int) -> tuple[
     priors = []
     for batter, g in season_sums.groupby("batter"):
         g = g.set_index("season")
-        num, den = 0.0, 0.0
+        num, den, raw_bip = 0.0, 0.0, 0.0
         for i, w in enumerate(MARCEL_WEIGHTS):
             s = target_season - 1 - i
             if s in g.index:
                 num += w * g.loc[s, "pulled_air"]
                 den += w * g.loc[s, "bip"]
+                raw_bip += g.loc[s, "bip"]
         if den == 0:
             continue
-        priors.append({"batter": batter, "prior_bip": den, "prior_pulled_air": num})
+        priors.append({"batter": batter, "prior_bip": den, "prior_pulled_air": num, "raw_prior_bip": raw_bip})
     priors_df = pd.DataFrame(priors)
     if priors_df.empty:
         return pd.DataFrame(columns=empty_cols), league_rate
 
-    priors_df["reliability"] = priors_df["prior_bip"] / (priors_df["prior_bip"] + PULLED_AIR_PRIOR_BIP)
+    # RELIABILITY/blend anchor use RAW (unweighted) BIP -- see the identical
+    # units-mismatch note in _preseason_xbacon_priors (finding M1, task #53 class).
+    priors_df["reliability"] = priors_df["raw_prior_bip"] / (priors_df["raw_prior_bip"] + PULLED_AIR_PRIOR_BIP)
     raw_rate = priors_df["prior_pulled_air"] / priors_df["prior_bip"]
     priors_df["preseason_pulled_air_rate"] = (
         priors_df["reliability"] * raw_rate + (1 - priors_df["reliability"]) * league_rate
     )
-    priors_df["prior_weight_bip"] = np.minimum(priors_df["prior_bip"], PULLED_AIR_PRIOR_BIP)
+    priors_df["prior_weight_bip"] = np.minimum(priors_df["raw_prior_bip"], PULLED_AIR_PRIOR_BIP)
     return priors_df[empty_cols], league_rate
 
 
