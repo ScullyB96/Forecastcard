@@ -125,6 +125,25 @@ def run_for_slate(sport: str, slate_key: str) -> dict | None:
         return cur.fetchone()
 
 
+def mark_notified(sport: str, slate_key: str) -> bool:
+    """Records that this (sport, slate_key) has been Slack-notified (see
+    schema.sql's slack_notifications table / app/slack_notify.py).
+    Returns True only if THIS call actually inserted the row -- i.e. this
+    is genuinely the first notification for this slate. Returns False if
+    a row already existed, meaning a caller should treat this as a
+    silent no-op rather than posting to Slack again."""
+    with _cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO slack_notifications (sport, slate_key)
+            VALUES (%s, %s)
+            ON CONFLICT (sport, slate_key) DO NOTHING
+            """,
+            (sport, slate_key),
+        )
+        return cur.rowcount == 1
+
+
 def latest_runs() -> list[dict]:
     """One row per sport: its most recent run, for a simple health/"last
     updated" view. LEFT JOIN-free by construction -- just the max run_at

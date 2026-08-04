@@ -15,7 +15,13 @@ from starlette.responses import RedirectResponse
 
 COOKIE_NAME = "site_session"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
-PUBLIC_PATHS = {"/login", "/static", "/healthz"}
+PUBLIC_PATHS = {"/login", "/static", "/healthz", "/internal"}
+# /internal bypasses the user-facing password gate deliberately -- it's
+# machine-to-machine (a sport worker calling the web service to trigger a
+# Slack post), never hit by a browser, and is protected by its own
+# constant-time bearer-token check (NOTIFY_TOKEN) instead -- see
+# main.py's notify_slack route. Never add a route under this prefix that
+# reads or returns anything sensitive without that same token check.
 
 
 def site_password() -> str | None:

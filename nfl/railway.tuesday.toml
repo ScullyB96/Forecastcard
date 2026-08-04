@@ -21,6 +21,10 @@ builder = "NIXPACKS"
 buildCommand = "pip install --no-deps nfl_data_py==0.3.3 && pip install -r requirements.txt"
 
 [deploy]
-startCommand = "python -m src.pipeline.weekly_update && python -m src.pipeline.export_to_site_db"
+# Slack daily-picks digest (2026-08-04) -- see mlb/railway.toml's own
+# comment for the full design; see railway.sunday.toml's own comment for
+# why NFL's weekly slate_key still dedups correctly across this and the
+# Sunday cron.
+startCommand = "python -m src.pipeline.weekly_update && python -m src.pipeline.export_to_site_db && curl -s -X POST -H \"X-Notify-Token: $NOTIFY_TOKEN\" \"$NOTIFY_URL/internal/notify/nfl\" || true"
 cronSchedule = "21 13 * * 2"
 restartPolicyType = "NEVER"

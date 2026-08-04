@@ -4,14 +4,15 @@ never imports model code from mlb/nfl/nba/nhl directly (see site/README.md
 for the full contract)."""
 
 import hmac
+import os
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import db
+from app import db, slack_notify
 from app.access import AccessGateMiddleware, COOKIE_NAME, make_session_cookie_value, site_password
 from app.season_openers import OPENERS
 from app.team_meta import team_info
@@ -216,6 +217,38 @@ def login_submit(request: Request, password: str = Form(...), next: str = Form("
         response.set_cookie("site_session", make_session_cookie_value(), httponly=True, samesite="lax")
         return response
     return templates.TemplateResponse(request, "login.html", {"next": next, "error": True}, status_code=401)
+
+
+@app.post("/internal/notify/{sport}")
+def notify_slack(sport: str, request: Request, slate_key: str | None = None):
+    """Machine-to-machine trigger: a sport's own daily pipeline calls this
+    as its last step (see each railway.toml's startCommand) to post that
+    day's picks digest to Slack. Bypasses the user-facing password gate
+    (see access.py's PUBLIC_PATHS) -- protected instead by a constant-time
+    comparison against NOTIFY_TOKEN, sent as a header (never a query
+    param, so it never lands in access logs).
+
+    Both SLACK_WEBHOOK_URL and NOTIFY_TOKEN being unset is the default,
+    no-Slack-configured state -- every sport's pipeline can call this
+    unconditionally without needing its own feature flag; it just reports
+    "skipped" until both are set here on the web service."""
+    token = os.environ.get("NOTIFY_TOKEN")
+    if not token or not hmac.compare_digest(request.headers.get("x-notify-token", ""), token):
+        raise HTTPException(status_code=401, detail="invalid or missing notify token")
+    if sport not in db.SPORTS:
+        raise HTTPException(status_code=404, detail="unknown sport")
+
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        return {"status": "skipped", "reason": "SLACK_WEBHOOK_URL not configured"}
+
+    # RAILWAY_PUBLIC_DOMAIN is auto-injected by Railway for any service with
+    # a public domain -- the link in the Slack message must point at the
+    # PUBLIC url regardless of which (private-network) host this request
+    # itself arrived on.
+    public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    site_url = f"https://{public_domain}" if public_domain else str(request.base_url)
+    return slack_notify.post_daily_picks(sport, slate_key, webhook_url, site_url)
 
 
 @app.get("/logout")

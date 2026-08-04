@@ -45,6 +45,20 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "python -m src.pipeline.generate_daily_props auto 1000 auto && python -m src.pipeline.export_to_site_db"
+# Slack daily-picks digest (2026-08-04): the trailing curl calls the site
+# service's own /internal/notify/mlb trigger (see site/app/main.py,
+# site/app/slack_notify.py) after every export. Safe to call after ALL 4
+# firings, not just the first: the notify route dedups by (sport,
+# slate_key) itself (site/app/db.mark_notified), so only the FIRST
+# firing to touch a given day's slate actually posts to Slack -- in
+# practice that's the 01:00 UTC full rebuild (posts the night-before
+# digest for tomorrow's slate); the 3 same-day light refreshes just
+# silently no-op against that same slate_key. `|| true` so a Slack/
+# network hiccup here can never fail the whole cron run (same
+# "external hiccup must not break the run" convention as every other
+# fallback in this pipeline) -- NOTIFY_URL/NOTIFY_TOKEN unset is also
+# a no-op (curl fails harmlessly), so this is safe even before those
+# are configured.
+startCommand = "python -m src.pipeline.generate_daily_props auto 1000 auto && python -m src.pipeline.export_to_site_db && curl -s -X POST -H \"X-Notify-Token: $NOTIFY_TOKEN\" \"$NOTIFY_URL/internal/notify/mlb\" || true"
 cronSchedule = "0 1,14,17,20 * * *"
 restartPolicyType = "NEVER"

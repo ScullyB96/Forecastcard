@@ -97,3 +97,19 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_sport ON runs (sport, run_at DESC);
+
+-- Dedup ledger for the Slack daily-picks digest (see app/slack_notify.py).
+-- A sport's own cron can call the /internal/notify trigger several times
+-- a day (MLB fires 4x, NBA/NHL 2x) as it refreshes the SAME slate_key
+-- intraday -- without this, a "daily" digest would spam the channel once
+-- per firing. app/db.mark_notified INSERTs with ON CONFLICT DO NOTHING
+-- and reports back whether THIS call was the one that actually inserted
+-- the row, so only the first firing to touch a given (sport, slate_key)
+-- ever posts to Slack; every later same-day firing for that same slate
+-- is a silent no-op, no per-sport cron-time gating needed.
+CREATE TABLE IF NOT EXISTS slack_notifications (
+    sport                   TEXT NOT NULL,
+    slate_key               TEXT NOT NULL,
+    notified_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (sport, slate_key)
+);
