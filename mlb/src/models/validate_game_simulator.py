@@ -55,7 +55,14 @@ from src.models.spray import build_pull_rate_by_season, build_pull_rate_snapshot
 from src.models.spray import attach_pull_tercile_column
 from src.models.true_talent import widen_rate
 from src.models.ttop import build_ttop_factors_by_season
-from src.models.weather import attach_weather_bucket, bucket_weather, build_weather_factors_by_season
+from src.models.weather import (
+    attach_weather_bucket,
+    bucket_weather,
+    build_venue_weather_norms,
+    build_weather_factors_by_season,
+    park_relative_weather_factors,
+)
+from src.models.weather_forecast import build_historical_game_buckets
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
 N_TRIALS_PER_GAME = 200  # RAISED 50->200 (task #140, 2026-07-26): sec 11.16 flagged this
@@ -268,9 +275,14 @@ def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int],
     pa_with_weather = attach_weather_bucket(pa, all_schedules)
     pa_with_weather = attach_pull_tercile_column(pa_with_weather, pull_rate_pa)
     weather_factors_by_season = build_weather_factors_by_season(pa_with_weather)
-    game_weather = all_schedules[["game_pk", "weather_condition", "weather_temp", "weather_wind"]].drop_duplicates(
+    # venue_name + per-venue climatological norms (finding M10, see weather.py's
+    # build_venue_weather_norms) -- applied weather is park-relative below
+    game_weather = all_schedules[["game_pk", "venue_name", "weather_condition", "weather_temp", "weather_wind"]].drop_duplicates(
         "game_pk"
     ).set_index("game_pk")
+    venue_weather_norms = build_venue_weather_norms(
+        build_historical_game_buckets(all_schedules), weather_factors_by_season
+    )
 
     print("building catcher framing factors...", flush=True)
     catcher_factors_by_season = build_catcher_framing_factors_by_season(sorted(pa["season"].unique()))
@@ -335,6 +347,7 @@ def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int],
         batter_platoon=batter_platoon, pitcher_platoon=pitcher_platoon,
         batter_hand=batter_hand, pitcher_hand=pitcher_hand, blowout_profile=blowout_profile,
         pull_rate_snapshot=pull_rate_snapshot, weather_factors_by_season=weather_factors_by_season,
+        venue_weather_norms=venue_weather_norms,
         game_weather=game_weather, catcher_factors_by_season=catcher_factors_by_season,
         umpire_factors_by_season=umpire_factors_by_season, umpire_log=umpire_log,
         xbacon_snap=xbacon_snap, barrel_snap=barrel_snap, pulled_air_snap=pulled_air_snap,
@@ -402,6 +415,7 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
     blowout_profile = shared["blowout_profile"]
     pull_rate_snapshot = shared["pull_rate_snapshot"]
     weather_factors_by_season = shared["weather_factors_by_season"]
+    venue_weather_norms = shared["venue_weather_norms"]
     game_weather = shared["game_weather"]
     catcher_factors_by_season = shared["catcher_factors_by_season"]
     umpire_factors_by_season = shared["umpire_factors_by_season"]
@@ -548,6 +562,11 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
             wx = game_weather.loc[game_pk]
             bucket = bucket_weather(wx["weather_condition"], wx["weather_temp"], wx["weather_wind"])
             weather_factors_this_game = weather_factors_by_season.get(season, {}).get(bucket)
+            # PARK-RELATIVE weather (finding M10): divide by this venue's own
+            # climatological expected factor -- the park factor already holds
+            # the venue's average climate; weather contributes the deviation.
+            venue_norm = venue_weather_norms.get(season, {}).get(wx.get("venue_name"))
+            weather_factors_this_game = park_relative_weather_factors(weather_factors_this_game, venue_norm)
 
         # real starting catchers this game (this is a backtest of an actual
         # played game, so the real catcher is known -- not a projection).

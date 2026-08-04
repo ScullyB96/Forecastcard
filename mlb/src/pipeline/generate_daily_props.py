@@ -126,7 +126,7 @@ def refresh_game_weather(ctx: dict) -> None:
         [pd.read_parquet(p) for p in sorted(DATA_RAW.glob("schedule_*.parquet"))], ignore_index=True
     )
     ctx["game_weather"] = all_schedules[
-        ["game_pk", "weather_condition", "weather_temp", "weather_wind"]
+        ["game_pk", "venue_name", "weather_condition", "weather_temp", "weather_wind"]
     ].drop_duplicates("game_pk").set_index("game_pk")
 
 

@@ -222,3 +222,70 @@ def build_weather_factors_by_season(pa_with_bucket: pd.DataFrame) -> dict[int, d
             factors.setdefault(bucket, {})[group] = group_factors
         out[season] = factors
     return out
+
+
+def build_venue_weather_norms(game_buckets, weather_factors_by_season: dict) -> dict:
+    """norms[season][venue_name][group][outcome] = this venue's EXPECTED
+    weather factor under its own climatological bucket distribution
+    (2026-08-03 audit, finding M10). The park factor (park_factors.py) is
+    measured from real home/road outcome rates, so each park's AVERAGE
+    climate is already inside it -- applying the absolute weather factor on
+    top double-counts that average (measured: per-venue mean applied HR
+    weather factor spanned 0.979 at Petco/SF to 1.020 at TB, a systematic
+    ~+/-2% HR-scale bias at climate-extreme venues). Dividing each game's
+    bucket factor by this norm (see park_relative_weather_factors) makes
+    weather contribute only the DEVIATION from the park's own typical
+    conditions, leaving the average where it belongs.
+
+    game_buckets: build_historical_game_buckets's output (venue_name,
+    month, bucket; pooled across seasons -- a park's climate mix is stable,
+    see that function's docstring for why pooling isn't leakage). The norm
+    is the game-frequency-weighted mean of the season's own walk-forward
+    bucket factors, accumulated per (group, outcome) so buckets missing a
+    sparse cell just renormalize instead of biasing the mean."""
+    venue_dist = {
+        v: g["bucket"].value_counts(normalize=True).to_dict()
+        for v, g in game_buckets.groupby("venue_name")
+    }
+    norms = {}
+    for season, factors in weather_factors_by_season.items():
+        norms[season] = {}
+        if not factors:
+            continue  # cold-start season -- no factors, callers apply none either
+        for venue, dist in venue_dist.items():
+            acc = {}  # group -> outcome -> [prob-weighted factor sum, prob mass seen]
+            for bucket, p in dist.items():
+                bucket_factors = factors.get(bucket)
+                if not bucket_factors:
+                    continue
+                for group, ofs in bucket_factors.items():
+                    g = acc.setdefault(group, {})
+                    for o, f in ofs.items():
+                        s = g.setdefault(o, [0.0, 0.0])
+                        s[0] += p * f
+                        s[1] += p
+            norms[season][venue] = {
+                group: {o: s[0] / s[1] for o, s in ofs.items() if s[1] > 1e-9}
+                for group, ofs in acc.items()
+            }
+    return norms
+
+
+def park_relative_weather_factors(bucket_factors: dict | None, venue_norm: dict | None) -> dict | None:
+    """One game's applied weather factors, re-expressed RELATIVE to the
+    venue's climatological norm (finding M10, see build_venue_weather_norms).
+    None/missing-norm inputs pass through unchanged (absolute behavior --
+    graceful for unknown venues and cold-start seasons)."""
+    if bucket_factors is None or not venue_norm:
+        return bucket_factors
+    out = {}
+    for group, ofs in bucket_factors.items():
+        norm = venue_norm.get(group)
+        if not norm:
+            out[group] = ofs
+            continue
+        out[group] = {
+            o: (f / norm[o]) if norm.get(o, 0.0) > 1e-9 else f
+            for o, f in ofs.items()
+        }
+    return out

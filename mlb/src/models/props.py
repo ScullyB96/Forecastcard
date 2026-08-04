@@ -92,7 +92,13 @@ from src.models.ttop import build_ttop_factors_by_season
 from src.models.umpire_factor import build_umpire_factors_by_season, resolve_live_umpire_factor
 from src.models.defense_factor import resolve_defense_factor, team_game_defense_snapshot
 from src.models.baserunning import build_season_sb_stats, build_pregame_sb_rates, resolve_sb_rates
-from src.models.weather import attach_weather_bucket, bucket_weather, build_weather_factors_by_season
+from src.models.weather import (
+    attach_weather_bucket,
+    bucket_weather,
+    build_venue_weather_norms,
+    build_weather_factors_by_season,
+    park_relative_weather_factors,
+)
 from src.models.weather_forecast import build_historical_game_buckets, resolve_weather_distribution, sample_weather_bucket
 from src.models.true_talent import build_debut_rate
 from src.models.validate_game_simulator import build_profile, player_game_snapshot, predominant_hand, SHOCK_SIGMA
@@ -225,6 +231,8 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
     pull_rate_snapshot = build_pull_rate_snapshot(pa, pull_rate_pa)
     pa_with_weather = attach_weather_bucket(pa, all_schedules)
     pa_with_weather = attach_pull_tercile_column(pa_with_weather, pull_rate_pa)
+    weather_factors_by_season = build_weather_factors_by_season(pa_with_weather)
+    historical_game_buckets = build_historical_game_buckets(all_schedules)
     pitcher_snap = player_game_snapshot(pitcher_wide, "pitcher")
     batter_snap = player_game_snapshot(batter_wide, "batter")
     xbacon_snap = player_game_xbacon_snapshot(pa)
@@ -271,13 +279,19 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
             index=["team", "season"], columns="outcome", values="park_factor"
         ),
         hfa_factors_by_season=build_hfa_factors(pa),
-        weather_factors_by_season=build_weather_factors_by_season(pa_with_weather),
+        weather_factors_by_season=weather_factors_by_season,
+        # per-venue climatological expected factors (finding M10) -- the
+        # divisor that makes applied weather PARK-RELATIVE, so a park's
+        # average climate stays only in its park factor
+        venue_weather_norms=build_venue_weather_norms(historical_game_buckets, weather_factors_by_season),
         catcher_factors_by_season=build_catcher_framing_factors_by_season(sorted(pa["season"].unique())),
         catcher_log=build_catcher_appearance_log(pa),
         umpire_factors_by_season=build_umpire_factors_by_season(sorted(pa["season"].unique())),
-        game_weather=all_schedules[["game_pk", "weather_condition", "weather_temp", "weather_wind"]]
+        # venue_name included (finding M10): the weather-norm division needs
+        # to know WHICH park each historical/live game_pk is in
+        game_weather=all_schedules[["game_pk", "venue_name", "weather_condition", "weather_temp", "weather_wind"]]
         .drop_duplicates("game_pk").set_index("game_pk"),
-        historical_game_buckets=build_historical_game_buckets(all_schedules),
+        historical_game_buckets=historical_game_buckets,
         bullpen_snap=build_bullpen_snapshot(pa, park_factors_long),
         expected_innings=build_expected_starter_innings(pa).set_index(["pitcher", "game_pk"])["expected_innings"],
         # live-path companion (2026-08-03 audit, finding C4): the per-start
@@ -525,13 +539,24 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
     # every other stochastic element in this project.
     weather_factors = None
     weather_dist = None
+    game_venue = venue_name
     if game_pk in ctx["game_weather"].index:
         wx = ctx["game_weather"].loc[game_pk]
+        if pd.notna(wx.get("venue_name")):
+            game_venue = wx["venue_name"]
         bucket = bucket_weather(wx["weather_condition"], wx["weather_temp"], wx["weather_wind"])
         if bucket is not None:
             weather_factors = ctx["weather_factors_by_season"].get(season, {}).get(bucket)
         elif venue_name is not None:
             weather_dist = resolve_weather_distribution(ctx["historical_game_buckets"], venue_name, game_date)
+    # PARK-RELATIVE weather (2026-08-03 audit, finding M10): the park factor
+    # already embeds this venue's AVERAGE climate (it's measured from real
+    # home/road outcome rates), so the applied weather factor is divided by
+    # the venue's climatological expected factor -- weather contributes only
+    # the deviation from this park's own typical conditions. Unknown venue /
+    # cold-start season passes through unchanged (absolute, old behavior).
+    venue_weather_norm = ctx["venue_weather_norms"].get(season, {}).get(game_venue)
+    weather_factors = park_relative_weather_factors(weather_factors, venue_weather_norm)
 
     def fallback_profile(team):
         # the old flat pooled aggregate rate -- only used if a team has no
@@ -688,7 +713,10 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         trial_weather_factors = weather_factors
         if trial_weather_factors is None and weather_dist:
             sampled_bucket = sample_weather_bucket(weather_dist, rng)
-            trial_weather_factors = ctx["weather_factors_by_season"].get(season, {}).get(sampled_bucket)
+            trial_weather_factors = park_relative_weather_factors(
+                ctx["weather_factors_by_season"].get(season, {}).get(sampled_bucket),
+                venue_weather_norm,  # same M10 park-relative division as the fixed-weather path
+            )
         events = []
         h, a = sim.simulate_game(
             home_lineup, away_lineup, home_pitcher, away_pitcher, innings=18,
