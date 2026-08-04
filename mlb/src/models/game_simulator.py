@@ -716,7 +716,16 @@ class GameSimulator:
                     and runs + runs_this_pa > walkoff_margin + 1):
                 runs_this_pa = walkoff_margin + 1 - runs
             if events is not None:
-                events.append({"batter_idx": lineup_idx, "outcome": outcome, "runs": runs_this_pa})
+                # "pid": the pitcher who ACTUALLY threw this PA (2026-08-03
+                # audit, finding M15) -- the local `pitcher` variable is
+                # reassigned at the exact hook PA above, so this per-PA stamp
+                # is exact even mid-half-inning, unlike any whole-inning
+                # cutoff rule a caller could reconstruct after the fact
+                # (which credits the starter for post-hook reliever PAs in
+                # the hook inning). None when the caller's profiles carry no
+                # "pid" key (e.g. validate_game_simulator's profiles).
+                events.append({"batter_idx": lineup_idx, "outcome": outcome, "runs": runs_this_pa,
+                               "pid": pitcher.get("pid")})
             if hook_state is not None and not hook_state["hooked"]:
                 hook_state["pa_count"] += 1
                 hook_state["cum_runs_allowed"] += runs_this_pa

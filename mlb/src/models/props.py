@@ -482,10 +482,18 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         return build_profile(row, prow, ctx["pitcher_hand"].get(pid, "R"),
                               pregame_gb_rate_pitcher=gb_p, pregame_fb_rate_pitcher=fb_p)
 
+    def _stamp_pid(prof, pid):
+        # Per-PA pitcher attribution (2026-08-03 audit, finding M15): every
+        # pitcher profile the simulator can ever use in this path carries its
+        # own real id, so simulate_half_inning can stamp WHO threw each PA at
+        # the moment it happens. Copies rather than mutates -- the generic
+        # debut profile is a shared ctx object served to multiple pids.
+        return None if prof is None else {**prof, "pid": pid}
+
     home_lineup = [batter_profile(pid) for pid in home_ids]
     away_lineup = [batter_profile(pid) for pid in away_ids]
-    home_pitcher = pitcher_profile(home_pitcher_id)
-    away_pitcher = pitcher_profile(away_pitcher_id)
+    home_pitcher = _stamp_pid(pitcher_profile(home_pitcher_id), home_pitcher_id)
+    away_pitcher = _stamp_pid(pitcher_profile(away_pitcher_id), away_pitcher_id)
 
     # real per-runner stolen-base attempt/success rates this game (see
     # baserunning.py) -- the BATTING team's own skill, resolved directly from
@@ -533,7 +541,7 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             return None
         neutral = {o: 1.0 for o in OUTCOMES}
         return {"rates": {o: row[f"pregame_rate_{o}"] for o in OUTCOMES}, "hand": "R",
-                "same_mult": neutral, "opp_mult": neutral}
+                "same_mult": neutral, "opp_mult": neutral, "pid": "BULLPEN_FALLBACK"}
 
     # Task: trade-deadline hardening -- optional {pitcher_id: {"new_team":,
     # "effective_date":}} (see bullpen.build_traded_pitcher_overrides), set
@@ -554,7 +562,7 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         for pid, w in raw.items():
             prof = roster_pitcher_profile(pid)
             if prof is not None:
-                profiles[pid] = prof
+                profiles[pid] = _stamp_pid(prof, pid)
                 weights[pid] = w
         return profiles, weights
 
@@ -669,11 +677,11 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
         # recent usage + rest-day availability), resampled fresh every trial
         # since which reliever actually pitches is itself part of the
         # uncertainty a Monte Carlo simulation should propagate.
-        home_bullpen, home_id_plan = sample_bullpen_plan(
+        home_bullpen, _ = sample_bullpen_plan(
             rng, home_pitcher, home_exp_ip, home_roster_weights,
             lambda pid: home_roster_profiles[pid], home_fallback, closer_id=home_closer_id,
         )
-        away_bullpen, away_id_plan = sample_bullpen_plan(
+        away_bullpen, _ = sample_bullpen_plan(
             rng, away_pitcher, away_exp_ip, away_roster_weights,
             lambda pid: away_roster_profiles[pid], away_fallback, closer_id=away_closer_id,
         )
@@ -682,7 +690,6 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             sampled_bucket = sample_weather_bucket(weather_dist, rng)
             trial_weather_factors = ctx["weather_factors_by_season"].get(season, {}).get(sampled_bucket)
         events = []
-        hook_result = {}
         h, a = sim.simulate_game(
             home_lineup, away_lineup, home_pitcher, away_pitcher, innings=18,
             park_factors=park_factors, weather_factors=trial_weather_factors,
@@ -692,51 +699,34 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             home_sb_rates=home_sb_rates, away_sb_rates=away_sb_rates,
             hfa_factors=hfa_factors, postseason=postseason,
             home_hook_context=home_hook_context, away_hook_context=away_hook_context,
-            hook_result=hook_result,
         )
         final_scores.append((h, a))
-        # home_hook_context/away_hook_context is always on now (props path),
-        # so the starter's REAL exit inning is hook_result's value, not the
-        # pregame-assumed cutoff -- None means the starter was never hooked
-        # (went the distance) this trial, so treat the cutoff as infinite.
-        home_effective_cutoff = hook_result.get("home_hook_inning")
-        home_effective_cutoff = home_effective_cutoff if home_effective_cutoff is not None else float("inf")
-        away_effective_cutoff = hook_result.get("away_hook_inning")
-        away_effective_cutoff = away_effective_cutoff if away_effective_cutoff is not None else float("inf")
         for e in events:
             e["trial"] = trial
-            # pitching team = the OTHER side's team label; a blowout PA is
-            # attributed to a generic "TEAM_POSITION_PLAYER" pseudo-id rather
-            # than whichever starter/bullpen id_plan would otherwise say for
-            # that inning, since blowout_pitcher_profile overrides both.
-            pitching_team = home_team if e["side"] == "away" else away_team
-            side_is_away = e["side"] == "away"  # away batting => HOME team pitching
+            # Per-PA pitcher attribution (2026-08-03 audit, finding M15):
+            # the simulator stamps WHO actually threw each PA on the event
+            # itself ("pid", read from the profile at PA time -- every
+            # profile in this path carries one via _stamp_pid above), which
+            # replaces the old reconstruct-from-id_plan inning mapping. The
+            # old rule was whole-inning granular, so every post-hook
+            # reliever PA in the hook inning itself was silently credited
+            # to the starter (~2-4 extra PAs per hooked start), inflating
+            # starter K/outs props. A blowout PA is attributed to a generic
+            # "TEAM_POSITION_PLAYER" pseudo-id for the pitching team (the
+            # OTHER side's label), since blowout_pitcher_profile carries no
+            # real identity.
+            pid = e.pop("pid")
             if e["blowout"]:
+                pitching_team = home_team if e["side"] == "away" else away_team
                 e["pitcher_id"] = f"{pitching_team}_POSITION_PLAYER"
-            elif e["inning"] <= (home_effective_cutoff if side_is_away else away_effective_cutoff):
-                e["pitcher_id"] = home_pitcher_id if side_is_away else away_pitcher_id
+            elif pid is not None:
+                e["pitcher_id"] = pid
             else:
-                id_plan = home_id_plan if side_is_away else away_id_plan
-                pregame_cutoff = max(round(home_exp_ip if side_is_away else away_exp_ip), 1)
-                effective_cutoff = home_effective_cutoff if side_is_away else away_effective_cutoff
-                # id_plan was built around pregame_cutoff (see sample_bullpen_plan),
-                # but the starter actually exited at effective_cutoff (hook-shifted,
-                # possibly earlier or later) -- re-derive which PLANNED inning this
-                # real inning corresponds to via the identical shift
-                # _shift_bullpen_after_hook already applied to home_bullpen/
-                # away_bullpen itself, so attribution matches which reliever the
-                # simulation actually had pitching, not the stale pregame plan.
-                shifted_inning = pregame_cutoff + (e["inning"] - effective_cutoff)
-                # id_plan only has entries for innings 1..N_TRIALS's sample_bullpen_plan
-                # innings=9 default, but simulate_game runs up to 18 -- extra-inning
-                # PAs mirror GameSimulator._pitcher_for_inning's own fallback (the most
-                # recently known pitcher, not a generic placeholder), so props
-                # attribution matches who the simulation actually had pitching.
-                if shifted_inning in id_plan:
-                    e["pitcher_id"] = id_plan[shifted_inning]
-                else:
-                    prior_innings = [i for i in id_plan if i < shifted_inning]
-                    e["pitcher_id"] = id_plan[max(prior_innings)] if prior_innings else "BULLPEN_FALLBACK"
+                raise ValueError(
+                    f"simulator event with no pitcher pid stamp (side={e['side']}, "
+                    f"inning={e['inning']}, game_pk={game_pk}) -- a pitcher profile "
+                    "was built without _stamp_pid"
+                )
             e["batter_id"] = (away_ids if e["side"] == "away" else home_ids)[e["batter_idx"]]
         all_events.extend(events)
 

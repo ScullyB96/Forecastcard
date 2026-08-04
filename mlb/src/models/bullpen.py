@@ -582,7 +582,13 @@ def sample_bullpen_plan(rng: np.random.Generator, starter_profile: dict, expecte
             profile_plan[inning] = fallback_profile
             id_plan[inning] = "BULLPEN_FALLBACK"
         else:
-            profile_plan[inning] = starter_profile
+            # degenerate case (no roster AND no pooled fallback): reuse the
+            # starter's RATES but override any per-PA attribution stamp (see
+            # props.py's _stamp_pid / finding M15) -- these innings were never
+            # really his, and crediting them to his real pid would inflate
+            # his simulated K/outs props exactly like the illegal-re-entry
+            # bug finding M17 removed.
+            profile_plan[inning] = {**starter_profile, "pid": "BULLPEN_FALLBACK"}
             id_plan[inning] = "BULLPEN_FALLBACK"
     for inning in range(1, cutoff + 1):
         profile_plan[inning] = starter_profile
