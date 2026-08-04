@@ -380,23 +380,53 @@ def _reassign_runners(pre_runners: dict[int, int], outcome: str, post_bases_bitm
     return new_runners
 
 
+LATE_INNING_ANCHOR = 8  # innings >= this stay role-anchored through a hook shift (setup 8th, closer 9th)
+
+
 def _shift_bullpen_after_hook(original_bullpen: dict[int, dict] | None, cutoff: int, hook_inning: int) -> dict[int, dict] | None:
     """Task #144/#145: one-time rebuild of a pregame {inning: profile} bullpen
     plan (see bullpen.sample_bullpen_plan) after a state-conditioned starter
-    hook fires at `hook_inning` instead of the plan's assumed `cutoff` --
-    reuses the EXACT same reliever sequence/order the plan already encoded
-    (innings cutoff+1..N), just shifted to start at hook_inning+1..N instead.
-    If the hook happened earlier than assumed, relievers arrive earlier (using
-    up the same arms just sooner); if later, they arrive later -- reliever
-    IDENTITY and ORDER are completely untouched, only timing shifts. Called
-    ONCE per game per side, immediately after the hook fires -- see
-    simulate_game."""
+    hook fires at `hook_inning` instead of the plan's assumed `cutoff`.
+
+    MIDDLE innings (< LATE_INNING_ANCHOR) shift by (hook_inning - cutoff):
+    an early hook pulls the same middle arms in sooner, a late hook pushes
+    them later -- identity and order untouched, only timing.
+
+    LATE innings (>= LATE_INNING_ANCHOR) stay ANCHORED at their planned
+    inning (2026-08-03 audit, finding M16): the plan's inning-9 arm is the
+    closer, sampled specifically for that role (see sample_bullpen_plan's
+    CLOSER_INNING9_RATE logic, calibrated against the real "closer takes
+    the 9th" rate), and inning 8 is likewise a late-leverage arm. Real
+    managers absorb a starter's early exit with MIDDLE relief and still
+    hand the 8th/9th to the same late arms -- the old uniform shift instead
+    moved the closer to e.g. the 7th on an early hook (where the
+    _pitcher_for_inning fallback then stretched him 3 innings) or to a
+    nonexistent inning 11 on a late one (a mop-up arm taking the real 9th),
+    silently destroying the closer calibration whenever the stochastic hook
+    missed the cutoff exactly. A middle arm whose shifted inning would
+    collide with the anchored late innings is dropped -- the starter (or
+    the stretch of the arm before it) ate its innings. Gap innings an early
+    hook opens up before the anchor are covered by _pitcher_for_inning's
+    existing most-recent-arm fallback. Called ONCE per game per side,
+    immediately after the hook fires -- see simulate_game."""
     if original_bullpen is None:
         return None
-    return {
+    shifted = {
         hook_inning + (orig_inning - cutoff): profile
-        for orig_inning, profile in original_bullpen.items() if orig_inning > cutoff
+        for orig_inning, profile in original_bullpen.items()
+        if cutoff < orig_inning < LATE_INNING_ANCHOR
+        and hook_inning + (orig_inning - cutoff) < LATE_INNING_ANCHOR
     }
+    # anchored late entries are kept even when hook_inning >= LATE_INNING_ANCHOR
+    # (they're only ever consulted for innings AFTER the hook, and dropping
+    # them would make _pitcher_for_inning's empty-dict fallback hand extra
+    # innings back to the STARTER -- an illegal re-entry)
+    shifted.update({
+        orig_inning: profile
+        for orig_inning, profile in original_bullpen.items()
+        if orig_inning >= max(LATE_INNING_ANCHOR, cutoff + 1)
+    })
+    return shifted
 
 
 class GameSimulator:
