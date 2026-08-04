@@ -144,6 +144,35 @@ def mark_notified(sport: str, slate_key: str) -> bool:
         return cur.rowcount == 1
 
 
+def get_discord_message_id(sport: str, slate_key: str) -> str | None:
+    """The Discord message id of the last digest posted for this slate
+    (see schema.sql's discord_message_id column), or None if nothing was
+    ever posted (e.g. Discord wasn't configured yet, or the row predates
+    this column) -- used to delete-then-repost a corrected digest."""
+    with _cursor() as cur:
+        cur.execute(
+            "SELECT discord_message_id FROM slack_notifications WHERE sport = %s AND slate_key = %s",
+            (sport, slate_key),
+        )
+        row = cur.fetchone()
+        return row["discord_message_id"] if row else None
+
+
+def set_discord_message_id(sport: str, slate_key: str, message_id: str) -> None:
+    """Records the id of the Discord message just posted for this slate,
+    upserting the (sport, slate_key) row if mark_notified hasn't already
+    created it (a force-repost can outlive the row's original insert)."""
+    with _cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO slack_notifications (sport, slate_key, discord_message_id)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (sport, slate_key) DO UPDATE SET discord_message_id = EXCLUDED.discord_message_id
+            """,
+            (sport, slate_key, message_id),
+        )
+
+
 def latest_runs() -> list[dict]:
     """One row per sport: its most recent run, for a simple health/"last
     updated" view. LEFT JOIN-free by construction -- just the max run_at

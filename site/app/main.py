@@ -220,7 +220,7 @@ def login_submit(request: Request, password: str = Form(...), next: str = Form("
 
 
 @app.post("/internal/notify/{sport}")
-def notify(sport: str, request: Request, slate_key: str | None = None):
+def notify(sport: str, request: Request, slate_key: str | None = None, force: bool = False):
     """Machine-to-machine trigger: a sport's own daily pipeline calls this
     as its last step (see each railway.toml's startCommand) to post that
     day's picks digest to whichever chat platform(s) are configured.
@@ -237,7 +237,17 @@ def notify(sport: str, request: Request, slate_key: str | None = None):
     day as it refreshes the SAME slate intraday (MLB 4x, NBA/NHL 2x), and
     only the FIRST firing to touch a given (sport, slate_key) actually
     posts anywhere; every later same-day firing for that slate is a
-    silent no-op on both platforms at once."""
+    silent no-op on both platforms at once.
+
+    force=true (2026-08-04, a real correction that came up in practice):
+    bypasses the dedup skip and re-sends even for an already-notified
+    slate -- for fixing a digest that was already posted (wrong format,
+    typo, etc.). On Discord specifically, if a prior post's message id was
+    captured (see discord_notify.post_to_discord's `wait=true`), the OLD
+    message is deleted before the corrected one is sent, so a correction
+    doesn't leave both the wrong and the right message sitting in the
+    channel. Slack has no equivalent (a plain Incoming Webhook can't
+    delete a past message) -- a force-repost there just adds a new one."""
     token = os.environ.get("NOTIFY_TOKEN")
     if not token or not hmac.compare_digest(request.headers.get("x-notify-token", ""), token):
         raise HTTPException(status_code=401, detail="invalid or missing notify token")
@@ -252,7 +262,8 @@ def notify(sport: str, request: Request, slate_key: str | None = None):
     resolved_slate = slate_key or db.latest_slate_key(sport)
     if resolved_slate is None:
         return {"status": "skipped", "reason": "no slate available yet"}
-    if not db.mark_notified(sport, resolved_slate):
+    already_notified = not db.mark_notified(sport, resolved_slate)
+    if already_notified and not force:
         return {"status": "skipped", "reason": "already notified for this slate", "slate_key": resolved_slate}
 
     games = db.games_for_slate(sport, resolved_slate)
@@ -263,13 +274,20 @@ def notify(sport: str, request: Request, slate_key: str | None = None):
     public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     site_url = f"https://{public_domain}" if public_domain else str(request.base_url)
 
-    result = {"slate_key": resolved_slate, "games_included": min(len(games), slack_notify.MAX_GAMES_SHOWN)}
+    result = {"slate_key": resolved_slate}
     if slack_webhook:
         payload = slack_notify.build_slack_message(sport, resolved_slate, games, site_url)
         result["slack"] = slack_notify.post_to_slack(slack_webhook, payload)
     if discord_webhook:
+        if force:
+            prior_id = db.get_discord_message_id(sport, resolved_slate)
+            if prior_id:
+                discord_notify.delete_discord_message(discord_webhook, prior_id)
         payload = discord_notify.build_discord_payload(sport, resolved_slate, games, site_url)
-        result["discord"] = discord_notify.post_to_discord(discord_webhook, payload)
+        post_result = discord_notify.post_to_discord(discord_webhook, payload)
+        result["discord"] = post_result
+        if post_result.get("message_id"):
+            db.set_discord_message_id(sport, resolved_slate, post_result["message_id"])
     return result
 
 

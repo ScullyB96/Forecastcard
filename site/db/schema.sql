@@ -113,3 +113,13 @@ CREATE TABLE IF NOT EXISTS slack_notifications (
     notified_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (sport, slate_key)
 );
+
+-- Discord message id of the last digest posted for (sport, slate_key), so
+-- a correction (?force=true on /internal/notify -- see main.py) can
+-- delete the WRONG prior post before sending the corrected one, instead
+-- of asking a human to delete it by hand in the Discord client (the only
+-- option for a message posted before this column existed, since a plain
+-- webhook POST returns no id at all unless requested with ?wait=true --
+-- see app/discord_notify.py). Slack has no equivalent: a plain Incoming
+-- Webhook has no delete capability regardless of what's stored.
+ALTER TABLE slack_notifications ADD COLUMN IF NOT EXISTS discord_message_id TEXT;
