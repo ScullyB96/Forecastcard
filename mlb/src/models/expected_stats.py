@@ -194,7 +194,7 @@ def _preseason_xbacon_priors(pa: pd.DataFrame, target_season: int) -> tuple[pd.D
     priors_df["preseason_xbacon"] = (
         priors_df["reliability"] * raw_xbacon + (1 - priors_df["reliability"]) * league_xbacon
     )
-    priors_df["prior_weight_bip"] = np.minimum(priors_df["raw_prior_bip"], XBACON_PRIOR_BIP)
+    priors_df["prior_weight_bip"] = float(XBACON_PRIOR_BIP)  # constant, not min(raw, K) -- finding M2, see true_talent.py
     return priors_df[empty_cols], league_xbacon
 
 
@@ -311,7 +311,7 @@ def _preseason_barrel_priors(pa: pd.DataFrame, target_season: int) -> tuple[pd.D
     priors_df["preseason_barrel_rate"] = (
         priors_df["reliability"] * raw_rate + (1 - priors_df["reliability"]) * league_rate
     )
-    priors_df["prior_weight_bip"] = np.minimum(priors_df["raw_prior_bip"], BARREL_PRIOR_BIP)
+    priors_df["prior_weight_bip"] = float(BARREL_PRIOR_BIP)  # constant, not min(raw, K) -- finding M2, see true_talent.py
     return priors_df[empty_cols], league_rate
 
 
@@ -475,7 +475,7 @@ def _preseason_pulled_air_priors(pa: pd.DataFrame, target_season: int) -> tuple[
     priors_df["preseason_pulled_air_rate"] = (
         priors_df["reliability"] * raw_rate + (1 - priors_df["reliability"]) * league_rate
     )
-    priors_df["prior_weight_bip"] = np.minimum(priors_df["raw_prior_bip"], PULLED_AIR_PRIOR_BIP)
+    priors_df["prior_weight_bip"] = float(PULLED_AIR_PRIOR_BIP)  # constant, not min(raw, K) -- finding M2, see true_talent.py
     return priors_df[empty_cols], league_rate
 
 
@@ -866,7 +866,7 @@ def build_groundball_rate_by_season(pa: pd.DataFrame) -> pd.DataFrame:
                 priors_df["preseason_rate"] = (
                     priors_df["reliability"] * raw_rate + (1 - priors_df["reliability"]) * league_rate
                 )
-                priors_df["prior_weight_bb"] = np.minimum(priors_df["raw_prior_bb"], K)
+                priors_df["prior_weight_bb"] = float(K)  # constant, not min(raw, K) -- finding M2, see true_talent.py
                 priors_df = priors_df[["batter", "preseason_rate", "prior_weight_bb"]]
             else:
                 priors_df = pd.DataFrame(columns=["batter", "preseason_rate", "prior_weight_bb"])
@@ -936,7 +936,7 @@ def build_pregame_bacon_gb(pa: pd.DataFrame) -> pd.DataFrame:
                 reliability = priors_df["raw_prior_gb"] / (priors_df["raw_prior_gb"] + K)
                 raw_rate = priors_df["prior_gb_hits"] / priors_df["prior_gb"]
                 priors_df["preseason_bacon_gb"] = reliability * raw_rate + (1 - reliability) * league_rate
-                priors_df["prior_weight_gb"] = np.minimum(priors_df["raw_prior_gb"], K)
+                priors_df["prior_weight_gb"] = float(K)  # constant, not min(raw, K) -- finding M2, see true_talent.py
                 priors_df = priors_df[["batter", "preseason_bacon_gb", "prior_weight_gb"]]
             else:
                 priors_df = pd.DataFrame(columns=["batter", "preseason_bacon_gb", "prior_weight_gb"])
@@ -1080,7 +1080,7 @@ def build_pitcher_gb_fb_rate_by_season(pa: pd.DataFrame) -> pd.DataFrame:
                 priors_df["preseason_fb_rate"] = (
                     reliability * (priors_df["prior_fb"] / priors_df["prior_bip"]) + (1 - reliability) * league_fb
                 )
-                priors_df["prior_weight_bip"] = np.minimum(priors_df["raw_prior_bip"], K)
+                priors_df["prior_weight_bip"] = float(K)  # constant, not min(raw, K) -- finding M2, see true_talent.py
                 priors_df = priors_df[["pitcher", "preseason_gb_rate", "preseason_fb_rate", "prior_weight_bip"]]
             else:
                 priors_df = pd.DataFrame(columns=["pitcher", "preseason_gb_rate", "preseason_fb_rate", "prior_weight_bip"])

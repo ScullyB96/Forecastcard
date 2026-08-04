@@ -360,10 +360,17 @@ def build_preseason_priors(pa: pd.DataFrame, player_col: str, outcome: str, targ
     priors_df["preseason_rate"] = (
         priors_df["reliability"] * age_adjusted_rate + (1 - priors_df["reliability"]) * league_rate
     )
-    # pseudo-PA this prior is "worth" going into the in-season blend: capped at K (same raw-PA
-    # units as season_pa_before in build_pregame_rates, for dimensional consistency) so a long
-    # track record doesn't make the whole model too slow to react to real in-season signal
-    priors_df["prior_weight_pa"] = np.minimum(priors_df["raw_prior_pa"], K)
+    # pseudo-PA this prior is "worth" going into the in-season blend: a constant K
+    # (same raw-PA units as season_pa_before in build_pregame_rates). Constant, not
+    # min(raw_prior_pa, K) (2026-08-03 audit, finding M2): the old min() gave a player
+    # with 1-59 raw prior PA a WEAKER prior anchor than a player with ZERO history
+    # (whose missing row fillna's to K downstream) -- more information should never
+    # produce a less sticky prior, and 67 real 2025 batters sat in that inverted band.
+    # Bayesianly, a with-history player's preseason_rate is already a (league worth
+    # K) + (own raw PA) blend, so its worth is >= K, and K is the floor that also
+    # preserves the original cap's intent (a long track record still doesn't slow
+    # in-season reactivity -- veterans' weight is unchanged at K by this fix).
+    priors_df["prior_weight_pa"] = float(K)
     return priors_df[empty_cols], league_rate
 
 
