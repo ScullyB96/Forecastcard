@@ -40,7 +40,6 @@ from src.models.expected_stats import (
 )
 from src.models.umpire_factor import build_umpire_factors_by_season, load_umpire_game_log, resolve_umpire_factor
 from src.models.defense_factor import resolve_defense_factor, team_game_defense_snapshot
-from src.models.baserunning import build_season_sb_stats, build_pregame_sb_rates, resolve_sb_rates
 from src.models.game_simulator import (
     OUTCOMES,
     GameSimulator,
@@ -337,8 +336,6 @@ def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int],
     }
 
     print("building stolen-base rates...", flush=True)
-    season_sb_stats = build_season_sb_stats(pa)
-    sb_rates_by_season = {season: build_pregame_sb_rates(season_sb_stats, season) for season in test_seasons}
 
     return dict(
         pa=pa, park_factors_long=park_factors_long, park_factors_wide=park_factors_wide,
@@ -355,7 +352,7 @@ def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int],
         sprint_speed_by_season=sprint_speed_by_season, bat_speed_raw=bat_speed_raw,
         bat_speed_by_season=bat_speed_by_season, batter_snap=batter_snap, pitcher_snap=pitcher_snap,
         transitions=transitions, schedules=schedules, lineups=lineups,
-        defense_snap_by_season=defense_snap_by_season, sb_rates_by_season=sb_rates_by_season,
+        defense_snap_by_season=defense_snap_by_season,
         pitch_walk_composed_by_season=pitch_walk_composed_by_season,
     )
 
@@ -435,7 +432,6 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
     schedules = shared["schedules"]
     lineups = shared["lineups"]
     defense_snap_by_season = shared["defense_snap_by_season"]
-    sb_rates_by_season = shared["sb_rates_by_season"]
     rng = np.random.default_rng(seed)
 
     # sample real, complete games from the test seasons
@@ -619,12 +615,12 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
         home_catcher_factor = {**home_catcher_factor, **home_defense_factor}
         away_catcher_factor = {**away_catcher_factor, **away_defense_factor}
 
-        # real per-runner stolen-base attempt/success rates this game (see
-        # baserunning.py) -- unlike catcher/defense/park, this is the BATTING
-        # team's own skill, keyed by lineup index (game_simulator.py tracks
-        # runner identity by lineup slot, not player_id).
-        home_sb_rates = resolve_sb_rates(sb_rates_by_season[season], home_ids)
-        away_sb_rates = resolve_sb_rates(sb_rates_by_season[season], away_ids)
+        # The explicit pre-PA stolen-base layer is RETIRED (2026-08-03 audit,
+        # finding M5) -- steal movement is already embedded in the resampled
+        # transitions (post_state = next PA's start state), so the explicit
+        # layer double-counted volume (~2x real). CRN-paired A/B verdict in
+        # props.py's own retirement comment; the backtest and the props path
+        # stay on the identical mechanism by construction.
 
         sim = GameSimulator(transitions, league_rates[season], rng, state_factors=state_factors[season],
                             ttop_factors=ttop_factors[season], shock_sigma=shock_sigma)
@@ -638,7 +634,6 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
                 home_bullpen=home_bullpen, away_bullpen=away_bullpen,
                 blowout_pitcher_profile=blowout_profile,
                 home_catcher_factor=home_catcher_factor, away_catcher_factor=away_catcher_factor,
-                home_sb_rates=home_sb_rates, away_sb_rates=away_sb_rates,
                 hfa_factors=hfa_factors_by_season.get(season),
                 **crn_kwargs,
             )

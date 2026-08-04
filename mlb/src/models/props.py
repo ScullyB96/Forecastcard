@@ -91,7 +91,6 @@ from src.models.spray import attach_pull_tercile_column
 from src.models.ttop import build_ttop_factors_by_season
 from src.models.umpire_factor import build_umpire_factors_by_season, resolve_live_umpire_factor
 from src.models.defense_factor import resolve_defense_factor, team_game_defense_snapshot
-from src.models.baserunning import build_season_sb_stats, build_pregame_sb_rates, resolve_sb_rates
 from src.models.weather import (
     attach_weather_bucket,
     bucket_weather,
@@ -248,8 +247,6 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
     bat_speed_raw = load_bat_speed_by_season(sorted(pa["season"].unique()))
     bat_speed_by_season = {season: build_pregame_bat_speed(bat_speed_raw, season) for season in pa["season"].unique()}
     # season-level (not per-game), same convention as sprint_speed_by_season above.
-    season_sb_stats = build_season_sb_stats(pa)
-    sb_rates_by_season = {season: build_pregame_sb_rates(season_sb_stats, season) for season in pa["season"].unique()}
     game_dates = pa[["game_pk", "game_date"]].drop_duplicates()
     # Task #149: precomputed once per (player_col, season) here -- cheap relative to
     # everything else in this function, and every game needing this fallback in a given
@@ -323,7 +320,6 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
         gbfb_pitcher_snap_dates=gbfb_pitcher_snap.merge(game_dates, on="game_pk"),
         sprint_speed_by_season=sprint_speed_by_season,
         bat_speed_by_season=bat_speed_by_season,
-        sb_rates_by_season=sb_rates_by_season,
         # defense_snap already has its own team/game_date columns (keyed by
         # (game_pk, team), not by an individual player) -- no separate
         # "_dates" merge needed, unlike the player-keyed snapshots above; it's
@@ -512,12 +508,18 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
     home_pitcher = _stamp_pid(pitcher_profile(home_pitcher_id), home_pitcher_id)
     away_pitcher = _stamp_pid(pitcher_profile(away_pitcher_id), away_pitcher_id)
 
-    # real per-runner stolen-base attempt/success rates this game (see
-    # baserunning.py) -- the BATTING team's own skill, resolved directly from
-    # the lineup (real or projected) already built above, keyed by lineup index.
-    sb_rates_this_season = ctx["sb_rates_by_season"].get(season, pd.DataFrame(columns=["player", "attempt_rate", "success_rate"]))
-    home_sb_rates = resolve_sb_rates(sb_rates_this_season, home_ids)
-    away_sb_rates = resolve_sb_rates(sb_rates_this_season, away_ids)
+    # The explicit pre-PA stolen-base layer (task #74) is RETIRED (2026-08-03
+    # audit, finding M5): build_pa_table defines post_state as the NEXT PA's
+    # start state, so every mid-PA steal/CS/pickoff/WP is already embedded in
+    # the resampled transitions -- the explicit layer added the same movement
+    # AGAIN (~2x real steal volume, doubled CS outs; embedded movement
+    # measured at 11-14% per runner-on-1st cell + explicit 6.3%x80% on top).
+    # Decision by pre-registered CRN-paired A/B (n=697, K=300, 2023-24):
+    # retiring costs no material point-metric loss (SU gap -1.15pp at K=300
+    # but +1.15pp at K=100 -- sign flips inside noise; Brier gap +0.0009,
+    # both under the 1.5pp / 0.002 bars), so volume correctness wins.
+    # baserunning.py and the SB-stats fetch stay intact for a future
+    # conditional-transition redesign (de-embed, then re-add identity).
     missing = [pid for pid, prof in zip(home_ids + away_ids, home_lineup + away_lineup) if prof is None]
     if home_pitcher is None:
         missing.append(home_pitcher_id)
@@ -673,7 +675,6 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             "catcher_defense_umpire_factor": home_catcher_factor,
             "closer_id": home_closer_id,
             "expected_starter_innings": home_exp_ip,
-            "sb_rates": home_sb_rates,
         },
         "away": {
             "lineup_summary": _lineup_summary(away_lineup),
@@ -682,7 +683,6 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             "catcher_defense_umpire_factor": away_catcher_factor,
             "closer_id": away_closer_id,
             "expected_starter_innings": away_exp_ip,
-            "sb_rates": away_sb_rates,
         },
     }
 
@@ -728,7 +728,6 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             home_bullpen=home_bullpen, away_bullpen=away_bullpen,
             blowout_pitcher_profile=ctx["blowout_profile"], events=events,
             home_catcher_factor=home_catcher_factor, away_catcher_factor=away_catcher_factor,
-            home_sb_rates=home_sb_rates, away_sb_rates=away_sb_rates,
             hfa_factors=hfa_factors, postseason=postseason,
             home_hook_context=home_hook_context, away_hook_context=away_hook_context,
         )
