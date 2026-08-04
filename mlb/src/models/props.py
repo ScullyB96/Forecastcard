@@ -871,6 +871,14 @@ def _pitcher_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
             "mean_k": g["k"].mean(), "mean_bb": g["bb"].mean(), "mean_hits_allowed": g["hits"].mean(),
             "mean_runs_allowed": g["runs_allowed"].mean(), "mean_batters_faced": g["batters_faced"].mean(),
             "p_6plus_k": (g["k"] >= 6).mean(),
+            # 2026-08-03 audit, finding M22: per_trial only has rows for
+            # trials where this pitcher actually appeared, so every mean
+            # above is E[stat | appeared] -- ~1.0 for the two starters, but
+            # far below 1 for any sampled reliever. This column makes that
+            # conditioning explicit (P(appears) across all n_trials) so a
+            # reliever's "1.6 K" can be read for what it is instead of
+            # masquerading as an unconditional projection.
+            "appearance_rate": len(g) / n_trials,
         })
 
     return per_trial.groupby("pitcher_id").apply(summarize, include_groups=False)

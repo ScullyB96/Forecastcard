@@ -123,7 +123,16 @@ def _prop_rows(df: pd.DataFrame, id_col: str, market_map: dict, role: str,
         raw_id = getattr(row, id_col)
         player_id = str(raw_id)
         player_name = name_lookup.get(int(raw_id), player_id) if str(raw_id).isdigit() else player_id
-        extra_common = {"role": role, "pa_per_game": getattr(row, "pa_per_game", None)}
+        # appearance_rate (2026-08-03 audit, finding M22): pitcher-prop means
+        # are conditional on the pitcher appearing in a trial -- surface
+        # P(appears) alongside them so a sampled reliever's projection isn't
+        # read as unconditional. None for batter rows (a lineup batter always
+        # appears) and for pre-M22 parquets.
+        appearance_rate = getattr(row, "appearance_rate", None)
+        extra_common = {
+            "role": role, "pa_per_game": getattr(row, "pa_per_game", None),
+            "appearance_rate": None if appearance_rate is None or pd.isna(appearance_rate) else float(appearance_rate),
+        }
         for col, (market, kind) in market_map.items():
             value = getattr(row, col, None)
             if value is None or pd.isna(value):
