@@ -324,3 +324,40 @@ dedicated cross-factor overlap hunt with measured (not argued) overlaps — is t
 generalization of what that review did by hand, and it found two more instances of the same
 bug class (M4, M5) plus the two validated-vs-deployed divergences (C1, C4) that no
 metric-level check could see.
+
+---
+
+## Resolution log (updated as fixes land — see git history for full verification evidence)
+
+Committed, each individually verified before the next (2026-08-03/04):
+
+- **Phase A (data layer)**: C2 schedule re-fetch of non-terminal past dates; C3 Statcast
+  completeness guard; M8 ATH/OAK canonicalization; M12 RotoWire suffix stripping; M20 export
+  phantom-row DELETE sweeps; minors (SB/umpire backfill status filters, PA-table
+  post_state-before-drops, foul-bunt-with-2-strikes, trade-lookback anchor). C1 platoon
+  prior-season keying (+ MIN_CELL_EVENTS=50 floor + deviation clips — two collateral
+  regressions caught and fixed during verification).
+- **Phase B (mechanical)**: C4 live expected-innings 3-tier lookup; M13 walkoff run
+  truncation; M14 impossible base-out/outcome cells zeroed + outs-decrease fallback filter;
+  M15 per-PA pitcher stamping (replaces whole-inning attribution); M16 closer-anchored
+  bullpen re-timing (LATE_INNING_ANCHOR=8); M17 starter excluded from own relief pool;
+  M18 lineup dedup with widening fallback tiers; M11 defense composite league-average (0)
+  imputation; M21 light-run refresh of relief/appearance/closer logs + expected_innings_live;
+  M22 appearance_rate column on pitcher props.
+- **Phase C (statistical)**: M1 raw-unit reliability for xBACON/barrel/pulled-air with
+  re-derived constants (200/75/800 — pulled-air held-out MSE −62%); M2 monotone prior weight
+  (constant K floor, all 7 sites); M9 zero-history venue → neutral 1.0; M10 park-relative
+  weather (per-venue mean applied HR factor spread 0.0144 → 0.0035 std); M4 within-pitcher
+  starter-only TTOP + reliever apply_ttop=False (TT2 HR 1.075→0.997, TT3 walk 0.942→1.007,
+  matching this audit's decomposition).
+- **M7 (opponent quality): evaluated, NOT built.** Additive Marcel-style schedule correction
+  (opponent window rates shrunk with production constants), held-out against realized 2025
+  rates (≥200 PA): batter side K +2.7% MSE improvement but walk/HR flat-to-worse; pitcher
+  side 0 of 3 improved (K −1.3%). Pre-registered bar (≥2 of 3 categories >1% on a side)
+  fails on both sides. Root cause of smallness: the per-PA odds-ratio matchup combine already
+  conditions on the actual opponent, so schedule bias enters only through the Marcel input,
+  where shrinkage dilutes it. Task #60's missing artifact is now replaced by this real one
+  (scratchpad evaluate_m7.py, output in the M7 commit message).
+
+Open: M5 (SB layer decision — CRN A/B in flight), M3 (effective_n redesign, joint with
+Phase D dispersion re-validation), M6/M19 + constant re-tunes + full re-baseline (Phase D).
