@@ -113,6 +113,37 @@ def _context_cache_path(target_date: str):
     return DATA_PROCESSED / f"pregame_context_cache_{target_date}.pkl"
 
 
+# Bumped whenever build_pregame_context's returned dict gains/loses/renames a
+# key (2026-08-05, real incident: adding sb_rates_by_season for the fantasy
+# tab landed with no way for a same-day LIGHT run to notice its already-
+# cached pickle -- written by the FULL run hours earlier, before that key
+# existed -- didn't have it, which would have KeyError'd deep inside
+# generate_game_props at the next light firing instead of self-healing the
+# way a genuinely MISSING cache file already does below. Every full run
+# stamps the pickle with this version; a light run whose cached version
+# doesn't match falls back to a full rebuild instead of trusting a
+# structurally stale ctx dict.
+CONTEXT_CACHE_VERSION = 2
+
+
+def _load_cached_context(cache_path) -> "tuple[dict, object] | None":
+    """None (never a raised exception) on any incompatibility -- missing
+    file, unreadable pickle, or a stale cache_version -- so every caller can
+    treat "None" as the single self-heal signal (see mode="light" branch
+    below), matching the "no cache found" fallback's own convention."""
+    if not cache_path.exists():
+        return None
+    with open(cache_path, "rb") as f:
+        cached = pickle.load(f)
+    if cached.get("cache_version") != CONTEXT_CACHE_VERSION:
+        print(f"  cached context at {cache_path.name} is from an older code version "
+              f"(cache_version={cached.get('cache_version')!r}, current={CONTEXT_CACHE_VERSION}) -- "
+              f"treating as stale, not structurally compatible with today's build_pregame_context.",
+              flush=True)
+        return None
+    return cached["ctx"], cached["pitcher_hand"]
+
+
 def refresh_game_weather(ctx: dict) -> None:
     """Rebuilds ctx['game_weather'] in place from whatever's currently on disk
     (real posted conditions fill in progressively closer to first pitch --
@@ -243,13 +274,12 @@ if __name__ == "__main__":
     cache_path = _context_cache_path(target_date)
     ctx = pitcher_hand = None
     if mode == "light":
-        if cache_path.exists():
-            print(f"light mode: loading cached pregame context from {cache_path.name}...", flush=True)
-            with open(cache_path, "rb") as f:
-                cached = pickle.load(f)
-            ctx, pitcher_hand = cached["ctx"], cached["pitcher_hand"]
+        print(f"light mode: loading cached pregame context from {cache_path.name}...", flush=True)
+        loaded = _load_cached_context(cache_path)
+        if loaded is not None:
+            ctx, pitcher_hand = loaded
         else:
-            print(f"light mode requested but no cache found at {cache_path.name} -- "
+            print(f"light mode requested but no usable cache at {cache_path.name} -- "
                   f"falling back to a full rebuild this once (self-healing, never worse than before).", flush=True)
             mode = "full"
 
@@ -266,7 +296,7 @@ if __name__ == "__main__":
         ctx = build_pregame_context(pa)
         pitcher_hand = predominant_hand(pa, "pitcher")
         with open(cache_path, "wb") as f:
-            pickle.dump({"ctx": ctx, "pitcher_hand": pitcher_hand}, f)
+            pickle.dump({"ctx": ctx, "pitcher_hand": pitcher_hand, "cache_version": CONTEXT_CACHE_VERSION}, f)
         cache_mb = cache_path.stat().st_size / (1024 * 1024)
         print(f"cached pregame context to {cache_path.name} ({cache_mb:.0f} MB) for later same-day light runs",
               flush=True)
