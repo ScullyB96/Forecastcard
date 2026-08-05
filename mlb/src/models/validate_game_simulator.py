@@ -48,10 +48,15 @@ from src.models.game_simulator import (
     build_wide_platoon_multipliers,
     build_wide_pregame_rates,
 )
-from src.models.park_factors import build_outcome_park_factors, build_hfa_factors
+from src.models.park_factors import build_outcome_park_factors, build_hfa_factors, build_pulled_barrel_park_factor_by_stand
 from src.models.pitch_talent import build_composed_rates, pitch_walk_multiplier
 from src.models.spray import build_pull_rate_by_season, build_pull_rate_snapshot, resolve_batter_pull_tercile
 from src.models.spray import attach_pull_tercile_column
+from src.models.spray import build_pulled_quality_contact_rate, build_pulled_quality_contact_snapshot, pulled_power_weight
+from src.models.park_geometry import (
+    load_park_dimensions, calibrate_scale_factor, build_batter_trajectory_history, batter_geometry_hr_factor,
+    build_ratio_outcome_table, batter_geometry_xbh_factor,
+)
 from src.models.true_talent import widen_rate
 from src.models.ttop import build_ttop_factors_by_season
 from src.models.weather import (
@@ -176,7 +181,11 @@ def build_profile(rate_row: pd.Series, platoon_row: pd.Series | None, hand: str,
                    league_rates_this_season: dict[str, float] | None = None,
                    widen_w: float = 1.0,
                    pregame_pitch_walk_composed: float | None = None,
-                   player_col: str | None = None) -> dict:
+                   player_col: str | None = None,
+                   pulled_power_weight: float | None = None,
+                   geometry_hr_factor: float | None = None,
+                   geometry_double_factor: float | None = None,
+                   geometry_triple_factor: float | None = None) -> dict:
     rates = {o: rate_row[f"pregame_rate_{o}"] for o in OUTCOMES}
     # effective_n backing each raw Marcel rate (task #127, posterior-sampled
     # rates) -- stored alongside the (possibly contact-quality-adjusted)
@@ -233,21 +242,79 @@ def build_profile(rate_row: pd.Series, platoon_row: pd.Series | None, hand: str,
     # up the weather factor for the PITCHER side of a matchup, which never
     # actually needs it (only the batter's own tercile modulates the wind
     # effect on their batted balls).
+    # pulled_power_weight (2026-08-04, experimental/opt-in): a BATTER-only
+    # blend weight in [0, 1] for how much of this batter's own contact
+    # profile matches the pulled-quality-contact subset park_factors.
+    # build_pulled_barrel_park_factor_by_stand is defined on (see spray.
+    # pulled_power_weight) -- None (every existing caller) is a no-op;
+    # game_simulator.py only consumes this when PARK_PULLED_HR_BLEND_ENABLED
+    # is also True and a park_pulled_hr_factor dict is actually passed in.
+    # geometry_hr_factor (2026-08-04, experimental/opt-in): a per-batter,
+    # per-park HR multiplier from replaying this batter's own real prior-
+    # season batted-ball trajectories against the target park's real fence
+    # geometry (see park_geometry.batter_geometry_hr_factor) -- an
+    # independent mechanism from pulled_power_weight above, not a
+    # replacement for it. None (every existing caller) is a no-op.
     return {"rates": rates, "hand": hand, "same_mult": same_mult, "opp_mult": opp_mult,
-            "pull_tercile": pull_tercile, "effective_n": effective_n}
+            "pull_tercile": pull_tercile, "effective_n": effective_n,
+            "pulled_power_weight": pulled_power_weight,
+            "geometry_hr_factor": geometry_hr_factor,
+            "geometry_double_factor": geometry_double_factor,
+            "geometry_triple_factor": geometry_triple_factor}
 
 
 def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int],
-                         build_pitch_walk_composed: bool = False) -> dict:
+                         build_pitch_walk_composed: bool = False,
+                         build_pulled_hr_blend: bool = False,
+                         build_geometry_hr_blend: bool = False,
+                         build_geometry_xbh_blend: bool = False) -> dict:
     """Every walk-forward/history-dependent table this validator needs, built
     ONCE from the full PA table. Kept separate from run_validation (below) so
     a caller sweeping a single per-profile parameter (e.g. task #134's widen_w)
     never has to pay the cost of rebuilding history-dependent tables that
     parameter doesn't affect -- only the per-game profile-build + simulate
-    step in run_validation needs to repeat per sweep point."""
+    step in run_validation needs to repeat per sweep point.
+
+    build_pulled_hr_blend (2026-08-04, EXPERIMENTAL/opt-in, default False,
+    matching build_pitch_walk_composed's own convention): when True, also
+    builds the handedness-and-contact-profile-conditioned park factor blend
+    (see park_factors.build_pulled_barrel_park_factor_by_stand and spray.
+    pulled_power_weight) -- pending a held-out calibration check and
+    full-stack CRN backtest before ever being defaulted on. False (default)
+    costs nothing extra and leaves run_validation's own park_pulled_hr_blend_
+    enabled flag a guaranteed no-op (the tables it would read are absent)."""
     print("building park factors...", flush=True)
     park_factors_long = build_outcome_park_factors(pa)
     park_factors_wide = park_factors_long.pivot(index=["team", "season"], columns="outcome", values="park_factor")
+
+    park_pulled_hr_wide, pulled_quality_rate_snapshot, pulled_quality_league_rate = None, None, None
+    if build_pulled_hr_blend:
+        print("building pulled-quality-contact park factors (EXPERIMENTAL)...", flush=True)
+        park_pulled_hr_long = build_pulled_barrel_park_factor_by_stand(pa)
+        park_pulled_hr_wide = park_pulled_hr_long.pivot(
+            index=["team", "season"], columns="stand", values="park_factor"
+        )
+        print("building batter pulled-quality-contact rate estimates (EXPERIMENTAL)...", flush=True)
+        pulled_quality_rate_pa = build_pulled_quality_contact_rate(pa)
+        pulled_quality_rate_snapshot = build_pulled_quality_contact_snapshot(pa, pulled_quality_rate_pa)
+        # single pooled-history reference rate for pulled_power_weight's own
+        # relative-to-league normalization -- NOT itself a per-season walk-
+        # forward estimate (this is a fixed blend-weight ANCHOR, not a rate
+        # fed into the simulation; see pulled_power_weight's own docstring
+        # for why a simple pooled mean is an acceptable simplification here).
+        pulled_quality_league_rate = pulled_quality_rate_pa["pregame_pulled_quality_rate"].mean()
+
+    geometry_dims, geometry_history, geometry_scale = None, None, None
+    if build_geometry_hr_blend or build_geometry_xbh_blend:
+        print("building park geometry factor tables (EXPERIMENTAL)...", flush=True)
+        geometry_dims = load_park_dimensions()
+        geometry_scale = calibrate_scale_factor(pa, geometry_dims)["scale"]
+        geometry_history = build_batter_trajectory_history(pa, geometry_scale)
+
+    geometry_ratio_table = None
+    if build_geometry_xbh_blend:
+        print("building doubles/triples geometry ratio-outcome table (EXPERIMENTAL)...", flush=True)
+        geometry_ratio_table = build_ratio_outcome_table(pa, geometry_dims, geometry_scale)
     print("building home-field-advantage factors...", flush=True)
     hfa_factors_by_season = build_hfa_factors(pa)
     # park-neutralize batter/pitcher rates BEFORE game_simulator.py's own
@@ -345,6 +412,11 @@ def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int],
 
     return dict(
         pa=pa, park_factors_long=park_factors_long, park_factors_wide=park_factors_wide,
+        park_pulled_hr_wide=park_pulled_hr_wide,
+        pulled_quality_rate_snapshot=pulled_quality_rate_snapshot,
+        pulled_quality_league_rate=pulled_quality_league_rate,
+        geometry_dims=geometry_dims, geometry_history=geometry_history, geometry_scale=geometry_scale,
+        geometry_ratio_table=geometry_ratio_table,
         hfa_factors_by_season=hfa_factors_by_season, league_rates=league_rates,
         state_factors=state_factors, ttop_factors=ttop_factors,
         batter_platoon=batter_platoon, pitcher_platoon=pitcher_platoon,
@@ -363,13 +435,36 @@ def build_shared_tables(pa: pd.DataFrame, test_seasons: set[int],
     )
 
 
+def fit_control_variate_beta(sim_arr: np.ndarray, cv_arr: np.ndarray) -> float:
+    """Shared control-variate coefficient fit (2026-08-04, see
+    validate_control_variate.py for the full measurement/derivation).
+    sim_arr/cv_arr: (n_games, n_trials) raw per-trial arrays, one row per
+    game. Demeans sim WITHIN each game before pooling -- cv's own true mean
+    is exactly 0 in every game individually (a martingale-difference
+    property, see TransitionTable.conditional_mean_runs), but sim's true
+    mean varies meaningfully game to game, so demeaning isolates the
+    within-game relationship a control variate actually exploits rather
+    than letting between-game variation in sim's mean spuriously inflate
+    the fitted correlation. Any beta preserves unbiasedness (E[cv]=0
+    unconditionally) -- only the variance-reduction magnitude depends on
+    getting this reasonably close to optimal, so self-fitting on the same
+    sample being adjusted is safe."""
+    sim_dev = sim_arr - sim_arr.mean(axis=1, keepdims=True)
+    return float(np.cov(sim_dev.ravel(), cv_arr.ravel())[0, 1] / np.var(cv_arr.ravel()))
+
+
 def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials: int,
                     widen_w: float = 1.0, seed: int = 42, output_path=None,
                     write_ledger: bool = True, notes: str = "validate_game_simulator.py oracle backtest",
                     verbose: bool = True, shock_sigma: float = 0.0, crn_pairing: bool = False,
                     trial_capture: dict | None = None,
                     disable_bat_speed: bool = False, disable_pulled_air: bool = False,
-                    use_pitch_walk_blend: bool = False) -> pd.DataFrame:
+                    use_pitch_walk_blend: bool = False,
+                    park_pulled_hr_blend_enabled: bool = False,
+                    geometry_hr_enabled: bool = False,
+                    geometry_xbh_enabled: bool = False,
+                    cv_capture: dict | None = None,
+                    control_variate: bool = False) -> pd.DataFrame:
     """Run the real-games oracle backtest against `shared` (from
     build_shared_tables). widen_w=1.0, shock_sigma=0.0, crn_pairing=False
     (all defaults) + seed=42 reproduces this file's own historical default
@@ -403,10 +498,55 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
     composed=True) -- if that wasn't done, pitch_walk_composed_by_season is
     empty and this flag is silently a no-op (every player falls through the
     "not in dict" branch below). False (the default) is byte-for-byte
-    unaffected either way."""
+    unaffected either way.
+
+    park_pulled_hr_blend_enabled (2026-08-04, EXPERIMENTAL/opt-in): the
+    handedness-and-contact-profile-conditioned park factor blend (see
+    park_factors.build_pulled_barrel_park_factor_by_stand and spray.
+    pulled_power_weight). Requires `shared` built via build_shared_tables(
+    ..., build_pulled_hr_blend=True) -- if that wasn't done, park_pulled_
+    hr_wide is None and this flag is silently a no-op (game_simulator.py's
+    own park_pulled_hr_factor=None path). False (the default) is byte-for-
+    byte unaffected either way -- not yet validated at the full-stack
+    level, do not default this on.
+
+    cv_capture: optional (2026-08-04, Monte Carlo variance-reduction
+    control variate) dict, populated in-place -- same convention as
+    trial_capture -- with cv_capture[game_pk] = (cv_home_arr, cv_away_arr,
+    cv_home_full_arr, cv_away_full_arr), the per-trial control-variate
+    accumulators GameSimulator.simulate_game wrote via cv_state (narrow and
+    "full" versions -- see its own docstring and TransitionTable.
+    conditional_mean_runs). None (every existing caller) is a byte-for-byte
+    no-op -- sim.simulate_game isn't even passed a cv_state dict, so no
+    extra computation happens on the hot path at all. See
+    validate_control_variate.py, which is the one caller that sets this.
+
+    control_variate: opt-in (2026-08-04) -- when True, self-fits the
+    "full" control-variate coefficient (see fit_control_variate_beta,
+    TransitionTable.conditional_mean_runs) from THIS run's own per-trial
+    samples and adds `sim_home_mean_cv`/`sim_away_mean_cv` columns to the
+    returned DataFrame -- a lower-variance drop-in replacement for
+    `sim_home_mean`/`sim_away_mean` at the SAME trial count, real measured
+    ~2.4-2.6x variance reduction on total-runs/margin (validate_control_
+    variate.py, n=599 games x 200 trials, 2026-08-04). Internally forces
+    cv/trial capture regardless of whether the caller separately passed
+    cv_capture/trial_capture (reusing them if given). Unbiased by
+    construction regardless of fit quality (E[cv]=0 exactly for every
+    game), so self-fitting beta on the same sample being adjusted doesn't
+    introduce bias, only affects how much variance is removed. False (the
+    default) is a byte-for-byte no-op -- no extra columns, no extra
+    computation. Does NOT touch su_primary/brier (those depend on
+    per-trial win/loss, not the trial mean) or the metrics_ledger schema --
+    purely an additional, optional pair of columns a caller can use."""
     pa = shared["pa"]
     pitch_walk_composed_by_season = shared.get("pitch_walk_composed_by_season", {})
     park_factors_wide = shared["park_factors_wide"]
+    park_pulled_hr_wide = shared.get("park_pulled_hr_wide")
+    pulled_quality_rate_snapshot = shared.get("pulled_quality_rate_snapshot")
+    pulled_quality_league_rate = shared.get("pulled_quality_league_rate")
+    geometry_dims = shared.get("geometry_dims")
+    geometry_history = shared.get("geometry_history")
+    geometry_ratio_table = shared.get("geometry_ratio_table")
     hfa_factors_by_season = shared["hfa_factors_by_season"]
     league_rates = shared["league_rates"]
     state_factors = shared["state_factors"]
@@ -454,6 +594,18 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
     if verbose:
         print(f"validating on {len(candidates)} real games, {n_trials} simulated trials each "
               f"(widen_w={widen_w})...", flush=True)
+    # control_variate (2026-08-04): forces capture regardless of whether the
+    # caller separately passed cv_capture/trial_capture -- reuses them if
+    # given, otherwise builds its own local dicts. Only the "full" cv variant
+    # (cv_capture[g][2]/[3]) is used for the adjustment; see
+    # fit_control_variate_beta and validate_control_variate.py for why the
+    # "narrow" variant (cv_capture[g][0]/[1]) isn't worth using here.
+    owns_cv_capture = control_variate and cv_capture is None
+    owns_trial_capture = control_variate and trial_capture is None
+    if owns_cv_capture:
+        cv_capture = {}
+    if owns_trial_capture:
+        trial_capture = {}
     results = []
     for season, game_pk, actual_home, actual_away in candidates:
         lu = lineups[season]
@@ -474,6 +626,17 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
         bacsnap = bacon_gb_snap[bacon_gb_snap["game_pk"] == game_pk].set_index("batter")
         gbsnap = gb_rate_snap[gb_rate_snap["game_pk"] == game_pk].set_index("batter")
         gbfbsnap = gbfb_pitcher_snap[gbfb_pitcher_snap["game_pk"] == game_pk].set_index("pitcher")
+        # EXPERIMENTAL (2026-08-04): only a real DataFrame when build_shared_
+        # tables was called with build_pulled_hr_blend=True -- otherwise
+        # pulled_quality_rate_snapshot is None and pqsnap stays an always-
+        # empty frame, so every pid lookup below falls through to None
+        # (batter_profile's own default), a guaranteed no-op.
+        if pulled_quality_rate_snapshot is not None:
+            pqsnap = pulled_quality_rate_snapshot[
+                pulled_quality_rate_snapshot["game_pk"] == game_pk
+            ].set_index("batter")
+        else:
+            pqsnap = pd.DataFrame(columns=["pregame_pulled_quality_rate"])
         if season not in sprint_speed_by_season:
             sprint_speed_by_season[season] = build_pregame_sprint_speed(season)
         speed_snap = sprint_speed_by_season[season]
@@ -481,6 +644,11 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
             bat_speed_by_season[season] = build_pregame_bat_speed(bat_speed_raw, season)
         bat_speed_snap = bat_speed_by_season[season]
         game_date = schedules[season].loc[schedules[season]["game_pk"] == game_pk, "date"].iloc[0]
+        # hoisted up from its original spot below (2026-08-04) so batter_profile
+        # can resolve this game's geometry_hr_factor -- the park is a property
+        # of home_team regardless of which side is currently batting, same
+        # convention park_factors_this_game already uses.
+        home_team = schedules[season].loc[schedules[season]["game_pk"] == game_pk, "home_team"].iloc[0]
 
         def batter_profile(pid):
             row = bsnap.loc[pid]
@@ -502,10 +670,25 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
             pitch_walk_composed = None
             if use_pitch_walk_blend and season in pitch_walk_composed_by_season:
                 pitch_walk_composed = pitch_walk_composed_by_season[season]["batter"].get(pid, {}).get("walk")
+            pulled_power_w = None
+            if park_pulled_hr_blend_enabled and pulled_quality_league_rate is not None:
+                pq_rate = pqsnap.loc[pid, "pregame_pulled_quality_rate"] if pid in pqsnap.index else None
+                pulled_power_w = pulled_power_weight(pq_rate, pulled_quality_league_rate)
+            geom_factor = None
+            if geometry_hr_enabled and geometry_history is not None:
+                geom_factor = batter_geometry_hr_factor(geometry_history, pid, season, home_team, geometry_dims)
+            geom_2b, geom_3b = None, None
+            if geometry_xbh_enabled and geometry_history is not None and geometry_ratio_table is not None:
+                geom_2b = batter_geometry_xbh_factor(
+                    geometry_history, pid, season, home_team, geometry_dims, geometry_ratio_table, "double")
+                geom_3b = batter_geometry_xbh_factor(
+                    geometry_history, pid, season, home_team, geometry_dims, geometry_ratio_table, "triple")
             return build_profile(row, prow, hand, pull_tercile=tercile, pregame_xbacon=xbacon,
                                   pregame_barrel_rate=barrel, pregame_bacon_gb=bacon_gb,
                                   pregame_sprint_speed=sprint_speed, pregame_gb_rate=gb_rate,
                                   pregame_bat_speed=bat_speed, pregame_pulled_air_rate=pulled_air,
+                                  pulled_power_weight=pulled_power_w, geometry_hr_factor=geom_factor,
+                                  geometry_double_factor=geom_2b, geometry_triple_factor=geom_3b,
                                   league_rates_this_season=league_rates[season], widen_w=widen_w,
                                   pregame_pitch_walk_composed=pitch_walk_composed, player_col="batter")
 
@@ -560,7 +743,6 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
             for inn, pid in away_pitcher_by_inning.items() if pid in psnap.index
         }
 
-        home_team = schedules[season].loc[schedules[season]["game_pk"] == game_pk, "home_team"].iloc[0]
         away_team = schedules[season].loc[schedules[season]["game_pk"] == game_pk, "away_team"].iloc[0]
         park_key = (home_team, season)
         if park_key in park_factors_wide.index:
@@ -568,6 +750,19 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
             park_factors_this_game = {o: park_row.get(o, 1.0) if pd.notna(park_row.get(o, 1.0)) else 1.0 for o in OUTCOMES}
         else:
             park_factors_this_game = None  # no prior-season data yet (e.g. 2023) -- no adjustment, not a guess
+
+        # EXPERIMENTAL (2026-08-04): only non-None when both
+        # park_pulled_hr_blend_enabled and build_shared_tables' own
+        # build_pulled_hr_blend=True were set -- otherwise park_pulled_hr_
+        # wide is None and this stays None, a guaranteed no-op passed to
+        # sim.simulate_game below (see game_simulator.py's own None-check).
+        park_pulled_hr_factor_this_game = None
+        if park_pulled_hr_blend_enabled and park_pulled_hr_wide is not None and park_key in park_pulled_hr_wide.index:
+            pph_row = park_pulled_hr_wide.loc[park_key]
+            park_pulled_hr_factor_this_game = {
+                stand: pph_row.get(stand, 1.0) if pd.notna(pph_row.get(stand, 1.0)) else 1.0
+                for stand in ("L", "R")
+            }
 
         # weather: this game's actual recorded conditions, bucketed the same
         # way the walk-forward factor table was built (see weather.py).
@@ -631,22 +826,35 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
         sim = GameSimulator(transitions, league_rates[season], rng, state_factors=state_factors[season],
                             ttop_factors=ttop_factors[season], shock_sigma=shock_sigma)
         sim_home, sim_away = [], []
+        cv_home, cv_away, cv_home_full, cv_away_full = ([], [], [], []) if cv_capture is not None \
+            else (None, None, None, None)
         for trial in range(n_trials):
             crn_kwargs = {"crn_game_pk": game_pk, "crn_trial": trial} if crn_pairing else {}
+            cv_state = {} if cv_capture is not None else None
             h, a = sim.simulate_game(
                 home_lineup, away_lineup, home_pitcher, away_pitcher, innings=18,
                 park_factors=park_factors_this_game,
+                park_pulled_hr_factor=park_pulled_hr_factor_this_game,
                 weather_factors=weather_factors_this_game,
                 home_bullpen=home_bullpen, away_bullpen=away_bullpen,
                 blowout_pitcher_profile=blowout_profile,
                 home_catcher_factor=home_catcher_factor, away_catcher_factor=away_catcher_factor,
                 hfa_factors=hfa_factors_by_season.get(season),
+                cv_state=cv_state,
                 **crn_kwargs,
             )
             sim_home.append(h)
             sim_away.append(a)
+            if cv_capture is not None:
+                cv_home.append(cv_state["home"])
+                cv_away.append(cv_state["away"])
+                cv_home_full.append(cv_state["home_full"])
+                cv_away_full.append(cv_state["away_full"])
 
         sim_home_arr, sim_away_arr = np.array(sim_home), np.array(sim_away)
+        if cv_capture is not None:
+            cv_capture[game_pk] = (np.array(cv_home), np.array(cv_away),
+                                    np.array(cv_home_full), np.array(cv_away_full))
         if trial_capture is not None:
             # raw per-trial arrays (task #137's K-scaling check) -- since CRN trial
             # draws are a pure function of trial index, a caller can compute
@@ -665,6 +873,28 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
                   f"(std {np.std(sim_away):.1f}/{np.std(sim_home):.1f})", flush=True)
 
     r = pd.DataFrame(results)
+
+    if control_variate:
+        # Self-fit the "full" control-variate beta from THIS run's own
+        # per-trial samples and add lower-variance sim_home_mean_cv/
+        # sim_away_mean_cv columns (2026-08-04, real measured ~2.4-2.6x
+        # variance reduction on total-runs/margin -- validate_control_
+        # variate.py). Unbiased regardless of beta quality (E[cv]=0
+        # exactly), so self-fitting on the same sample is safe.
+        cv_game_pks = sorted(trial_capture.keys())
+        sim_home_2d = np.array([trial_capture[g][0] for g in cv_game_pks])
+        sim_away_2d = np.array([trial_capture[g][1] for g in cv_game_pks])
+        cv_home_full_2d = np.array([cv_capture[g][2] for g in cv_game_pks])
+        cv_away_full_2d = np.array([cv_capture[g][3] for g in cv_game_pks])
+        beta_home = fit_control_variate_beta(sim_home_2d, cv_home_full_2d)
+        beta_away = fit_control_variate_beta(sim_away_2d, cv_away_full_2d)
+        cv_cols = pd.DataFrame({
+            "game_pk": cv_game_pks,
+            "sim_home_mean_cv": sim_home_2d.mean(axis=1) - beta_home * cv_home_full_2d.mean(axis=1),
+            "sim_away_mean_cv": sim_away_2d.mean(axis=1) - beta_away * cv_away_full_2d.mean(axis=1),
+        })
+        r = r.merge(cv_cols, on="game_pk", how="left")
+
     if output_path is not None:
         r.to_parquet(output_path, index=False)
     print(f"\n=== validated on {len(r)} real games (widen_w={widen_w}) ===")
@@ -677,6 +907,12 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
     r["actual_margin"] = r["actual_home"] - r["actual_away"]
     r["sim_margin_mean"] = r["sim_home_mean"] - r["sim_away_mean"]
     print(f"margin MAE: {(r['sim_margin_mean']-r['actual_margin']).abs().mean():.3f}")
+    if control_variate:
+        total_mae_cv = ((r["sim_home_mean_cv"] + r["sim_away_mean_cv"]) - r["actual_total"]).abs().mean()
+        margin_mae_cv = ((r["sim_home_mean_cv"] - r["sim_away_mean_cv"]) - r["actual_margin"]).abs().mean()
+        print(f"[control-variate, opt-in] total MAE (cv-adjusted): {total_mae_cv:.3f}   "
+              f"margin MAE (cv-adjusted): {margin_mae_cv:.3f}   "
+              f"(beta_home={beta_home:.3f}, beta_away={beta_away:.3f})")
     r["actual_home_win"] = (r["actual_home"] > r["actual_away"]).astype(int)
     # PRIMARY SU metric (2026-07-22, critique claim 6): pick the side with
     # trial-level home-win SHARE > 0.5 (sim_home_win_prob, already computed

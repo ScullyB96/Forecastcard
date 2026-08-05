@@ -136,6 +136,10 @@ class TransitionTable:
         self._by_state_outcome_speed: dict[tuple[int, str, str], np.ndarray] = {}
         self._by_outs_outcome: dict[tuple[int, str], np.ndarray] = {}
         self._by_outcome_only: dict[str, np.ndarray] = {}
+        # (pre_state, outcome, runner_speed_bucket) -> mean runs_scored, lazily
+        # populated by conditional_mean_runs() (2026-08-04, control-variate
+        # prep) -- this table is immutable after __init__, so memoizing is safe.
+        self._mean_cache: dict[tuple, float] = {}
 
         cols = ["post_state", "terminal", "runs_scored"]
         has_speed_bucket = "runner_speed_bucket" in pa_table.columns
@@ -188,6 +192,26 @@ class TransitionTable:
         (see game_simulator.py's crn_game_pk/crn_trial params). `rng` is
         still required (crn_key is strictly additive) but goes unused in
         that case."""
+        arr = self._resolve_array(pre_state, outcome, runner_speed_bucket)
+        if crn_key is not None:
+            from src.models.crn import crn_index
+            idx = crn_index(len(arr), *crn_key)
+        else:
+            idx = rng.integers(0, len(arr))
+        row = arr[idx]
+        post_state = None if row[0] == -1 else int(row[0])
+        return post_state, int(row[1])
+
+    def _resolve_array(self, pre_state: int, outcome: str,
+                        runner_speed_bucket: str | None) -> np.ndarray:
+        """The same 4-tier fallback chain sample() has always used (speed
+        bucket -> granular state -> outs-only -> outcome-only, with M14's
+        outs-preserving filter on the last-resort tier), factored out
+        (2026-08-04, control-variate prep) so conditional_mean_runs() below
+        can NEVER resolve to a different population than sample() actually
+        draws from -- both call this exact method, so the two are
+        guaranteed to agree by construction. No behavior change from the
+        pre-refactor inline version."""
         arr = None
         if runner_speed_bucket is not None:
             arr = self._by_state_outcome_speed.get((pre_state, outcome, runner_speed_bucket))
@@ -215,14 +239,27 @@ class TransitionTable:
                     arr = filtered
         if arr is None or len(arr) == 0:
             raise ValueError(f"no historical data for outcome={outcome!r} (pre_state={pre_state})")
-        if crn_key is not None:
-            from src.models.crn import crn_index
-            idx = crn_index(len(arr), *crn_key)
-        else:
-            idx = rng.integers(0, len(arr))
-        row = arr[idx]
-        post_state = None if row[0] == -1 else int(row[0])
-        return post_state, int(row[1])
+        return arr
+
+    def conditional_mean_runs(self, pre_state: int, outcome: str,
+                               runner_speed_bucket: str | None = None) -> float:
+        """The exact conditional mean of runs_scored that sample() would
+        draw from for this (pre_state, outcome[, bucket]) -- the analytic
+        control variate the Monte Carlo variance-reduction work needs (see
+        validate_control_variate.py): (runs_scored - conditional_mean_runs(...))
+        has expectation exactly zero for every PA, by construction, since it
+        shares _resolve_array with sample() (guaranteed same population, no
+        risk of the two silently drifting apart). Memoized -- this table is
+        immutable after __init__, so the same key always resolves to the
+        same array/mean, and this is called on the hot simulation path when
+        control-variate tracking is enabled."""
+        key = (pre_state, outcome, runner_speed_bucket)
+        cached = self._mean_cache.get(key)
+        if cached is None:
+            arr = self._resolve_array(pre_state, outcome, runner_speed_bucket)
+            cached = float(arr[:, 1].mean())
+            self._mean_cache[key] = cached
+        return cached
 
     def coverage_report(self, pa_table: pd.DataFrame) -> pd.DataFrame:
         """What fraction of (pre_state, outcome) combos in the data have

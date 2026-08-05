@@ -160,11 +160,29 @@ def build_wide_platoon_multipliers(pa: pd.DataFrame, player_col: str) -> pd.Data
 
 
 def build_league_rates_by_season(pa: pd.DataFrame) -> dict[int, dict[str, float]]:
-    """Walk-forward-safe (prior-seasons-only) league rate per outcome, per season."""
+    """Walk-forward-safe (prior-seasons-only) league rate per outcome, per
+    season -- EXCEPT the true cold-start season (the earliest one in the
+    cache, e.g. 2023), which has no prior data to be walk-forward from at
+    all (2026-08-04 audit, task #131): same unavoidable, narrow exception
+    true_talent.build_preseason_priors already documents for the identical
+    quantity (a real league-average rate can't be set to some placeholder
+    "neutral" value the way a multiplicative factor table safely defaults
+    to 1.0 -- there's no such thing as a neutral batting average). This
+    function's own docstring previously claimed unqualified walk-forward
+    safety with no such caveat -- a real gap the audit found: it's the
+    exact "sibling function" class of leak already fixed in park_factors.py,
+    weather.py, catcher_framing.py, umpire_factor.py, and ttop.py (all of
+    which DO have a true neutral 1.0/empty-dict fallback available, unlike
+    this one), just missed here because this function computes a raw rate
+    anchor, not a multiplier. league_rates[season] is the `lg` term feeding
+    combine_matchup_distribution's log5 combine for EVERY simulated PA
+    (props.py's live path included) -- this narrow exception is therefore
+    real and live, not just a backtest-only concern, so it's called out
+    here explicitly rather than left to be rediscovered again."""
     out = {}
     for season in sorted(pa["season"].unique()):
         prior = pa[pa["season"] < season]
-        ref = prior if len(prior) else pa[pa["season"] == season]
+        ref = prior if len(prior) else pa[pa["season"] == season]  # true cold start only, see above
         out[season] = {o: (ref["outcome"] == o).mean() for o in OUTCOMES}
     return out
 
@@ -537,6 +555,7 @@ class GameSimulator:
     def simulate_half_inning(self, lineup: list[dict], start_idx: int,
                               pitcher: dict, walkoff_margin: int | None = None,
                               park_factors: dict[str, float] | None = None,
+                              park_pulled_hr_factor: dict[str, float] | None = None,
                               weather_factors: dict[str, dict[str, float]] | None = None,
                               thruorder_counts: dict[int, int] | None = None,
                               events: list[dict] | None = None,
@@ -549,13 +568,25 @@ class GameSimulator:
                               inning: int | None = None,
                               hook_state: dict | None = None,
                               pitching_score_entering: int = 0,
-                              batting_score_entering: int = 0) -> tuple[int, int]:
+                              batting_score_entering: int = 0,
+                              cv_accum: list[float] | None = None,
+                              cv_full_accum: list[float] | None = None) -> tuple[int, int]:
         """lineup: 9 batter profiles in order, each {"rates": {...}, "hand": "L"/"R",
         "same_mult": {...}, "opp_mult": {...}, "pull_tercile": str|None} (see
         build_wide_platoon_multipliers and spray.py).
         pitcher: the same profile shape for the (single, whole-game) pitcher.
         park_factors: {outcome: factor} for the stadium this game is played at
         (see park_factors.py) -- the same for both teams batting there.
+        park_pulled_hr_factor: optional (2026-08-04, EXPERIMENTAL/opt-in)
+        {"L": factor, "R": factor} -- this park's pulled-quality-contact-
+        specific HR-conversion factor by batter stand (see park_factors.
+        build_pulled_barrel_park_factor_by_stand), blended against the plain
+        park_factors["home_run"] using THIS batter's own pulled_power_weight
+        (see spray.pulled_power_weight) at the per-PA call site below. None
+        (every existing caller) is a byte-for-byte no-op -- the plain
+        park_factors["home_run"] is used unchanged, same as before this
+        existed. Not yet validated at the full-stack level -- see park_
+        factors.build_pulled_barrel_park_factor_by_stand's own docstring.
         weather_factors: {"{stand}_{pull_tercile}": {outcome: factor}, ...}
         for this game's weather bucket (see weather.py) -- keyed by the
         batter's ACTUAL side (resolved below the same way platoon's
@@ -667,7 +698,33 @@ class GameSimulator:
         flips True (see simulate_game). Deliberately accepted for this stage
         rather than threading extra CRN/appearance-index plumbing through this
         method for a second-order interaction that task #144 step 4 (SHOCK_SIGMA
-        refit) already expects to revisit."""
+        refit) already expects to revisit.
+
+        cv_accum: optional (2026-08-04, Monte Carlo variance-reduction control
+        variate) caller-owned single-element mutable list, e.g. [0.0] --
+        incremented in place after every transition-table draw with
+        (runs_this_pa - conditional_mean_runs(state, outcome)), a quantity
+        with expectation exactly zero for every PA (see
+        TransitionTable.conditional_mean_runs and simulate_game). Same
+        opt-in, caller-owned-mutable-container convention as `events`. None
+        (every existing caller) is a byte-for-byte no-op -- no extra
+        computation happens at all, not even the lookup.
+
+        cv_full_accum: optional (2026-08-04), same shape/convention as
+        cv_accum but a STRONGER control variate -- centers on
+        E[runs_this_pa] = sum_o dist[o] * conditional_mean_runs(state, o),
+        i.e. the full per-PA expectation marginalized over the ENTIRE known
+        outcome-probability vector BEFORE any outcome is drawn, not just
+        the transition-table resample conditioned on the outcome that
+        happened to occur. Still exactly mean-zero (it's the definition of
+        a conditional expectation given the pre-PA information -- state and
+        dist are both fully determined before either random draw happens),
+        but captures BOTH stochastic layers per PA (which outcome-category
+        occurs, and which historical row the transition table resamples)
+        instead of only the second -- see validate_control_variate.py for
+        the empirical comparison of the two versions' actual variance-
+        reduction payoff. None (every existing caller) is a byte-for-byte
+        no-op."""
         state, outs, idx, runs = (20, 0, start_idx, 0) if auto_runner else (0, 0, start_idx, 0)
         runners: dict[int, int] = {}  # base (1/2/3) -> lineup_idx, only maintained when sb_rates is given
         if auto_runner and sb_rates is not None:
@@ -756,12 +813,68 @@ class GameSimulator:
             batter_mult = batter["same_mult"] if is_same_hand else batter["opp_mult"]
             pitcher_mult = pitcher["same_mult"] if is_same_hand else pitcher["opp_mult"]
             sf = self.state_factors[state] if self.state_factors is not None else None
+            # batter_stand: hoisted out of the weather-only block below
+            # (2026-08-04) since the park-pulled-hr blend also needs it and
+            # both must resolve a switch-hitter's ACTUAL side the same way.
+            batter_stand = ("L" if pitcher["hand"] == "R" else "R") if batter["hand"] == "S" else batter["hand"]
             if weather_factors is not None:
-                batter_stand = ("L" if pitcher["hand"] == "R" else "R") if batter["hand"] == "S" else batter["hand"]
                 pull_tercile = batter.get("pull_tercile") or "mid_pull"
                 wf = weather_factors.get(f"{batter_stand}_{pull_tercile}")
             else:
                 wf = None
+            # park_pulled_hr_factor blend (2026-08-04, EXPERIMENTAL/opt-in --
+            # see this method's own docstring and spray.pulled_power_weight):
+            # override just the "home_run" key of park_factors with a
+            # batter-specific blend of the plain pooled factor and this
+            # park's pulled-quality-contact-specific factor for his stand,
+            # weighted by how much of THIS batter's own contact profile
+            # looks like that subset. None (park_pulled_hr_factor not passed,
+            # every existing caller) leaves park_factors byte-for-byte
+            # untouched -- pf stays whatever the caller originally passed.
+            pf = park_factors
+            if park_pulled_hr_factor is not None and park_factors is not None and "home_run" in park_factors:
+                ppf = park_pulled_hr_factor.get(batter_stand)
+                if ppf is not None:
+                    w = batter.get("pulled_power_weight")
+                    w = 0.5 if w is None else w
+                    pf = dict(park_factors)
+                    pf["home_run"] = park_factors["home_run"] ** (1 - w) * ppf ** w
+            # geometry_hr_factor (2026-08-04, EXPERIMENTAL/opt-in -- see
+            # park_geometry.batter_geometry_hr_factor): a genuinely per-
+            # batter, per-park ratio computed by replaying THIS batter's own
+            # real prior-season batted-ball trajectories against this park's
+            # real fence geometry vs. a league-average fence -- a different,
+            # independent mechanism from the pulled-hr blend above (which
+            # blends a population-level park stat by a generic weight; this
+            # one is directly computed per batter). Multiplies straight onto
+            # whatever pf["home_run"] already is -- None (every existing
+            # caller, and every profile without this key) is a no-op.
+            geo_factor = batter.get("geometry_hr_factor")
+            if geo_factor is not None and pf is not None and "home_run" in pf:
+                if pf is park_factors:
+                    pf = dict(park_factors)
+                pf["home_run"] = pf["home_run"] * geo_factor
+            # geometry_double_factor / geometry_triple_factor (2026-08-04,
+            # EXPERIMENTAL/opt-in -- see park_geometry.batter_geometry_xbh_
+            # factor): same per-batter, per-park replay idea as geo_factor
+            # above, extended from HR's binary clear/no-clear check to a
+            # real empirical P(double)/P(triple)-by-distance-ratio lookup
+            # (HR's binary check doesn't generalize -- most balls in the
+            # relevant distance range are still fielded for outs, not
+            # automatically a hit; see that function's own module-level
+            # note). Independent of geo_factor -- multiplies onto "double"/
+            # "triple" instead of "home_run". None (every existing caller)
+            # is a no-op.
+            geo_2b = batter.get("geometry_double_factor")
+            if geo_2b is not None and pf is not None and "double" in pf:
+                if pf is park_factors:
+                    pf = dict(park_factors)
+                pf["double"] = pf["double"] * geo_2b
+            geo_3b = batter.get("geometry_triple_factor")
+            if geo_3b is not None and pf is not None and "triple" in pf:
+                if pf is park_factors:
+                    pf = dict(park_factors)
+                pf["triple"] = pf["triple"] * geo_3b
             # apply_ttop (2026-08-03 audit, finding M4): the TTOP table is now
             # fit within-pitcher on STARTER PAs only -- a reliever's profile
             # rates already come from overwhelmingly-first-pass PAs, so
@@ -779,11 +892,22 @@ class GameSimulator:
             dist = combine_matchup_distribution(
                 batter["rates"], pitcher["rates"], self.league_rates, state_factors=sf,
                 batter_platoon_mult=batter_mult, pitcher_platoon_mult=pitcher_mult,
-                park_factors=park_factors, weather_factors=wf, ttop_factors=ttop,
+                park_factors=pf, weather_factors=wf, ttop_factors=ttop,
                 catcher_factors=catcher_factors, hfa_factors=hfa_factors,
                 pitcher_shock_factors=pitcher_shock_factors,
             )
             outcomes, probs = zip(*dist.items())
+            if cv_full_accum is not None:
+                # Stronger control variate (2026-08-04, second version --
+                # see cv_full_accum's own docstring): the FULL per-PA
+                # expectation marginalized over dist -- i.e. BEFORE the
+                # outcome-category draw happens, not conditioned on its
+                # realization -- so this captures both stochastic layers
+                # (which outcome occurs, AND the transition-table resample
+                # given that outcome), not just the second one.
+                exp_runs_this_pa = sum(
+                    p * self.transitions.conditional_mean_runs(state, o) for o, p in dist.items()
+                )
             if crn_keys is not None:
                 outcome = crn_choice(outcomes, probs, *crn_keys, at_bat_counter, DECISION_OUTCOME)
                 transition_key = (*crn_keys, at_bat_counter, DECISION_TRANSITION)
@@ -791,6 +915,18 @@ class GameSimulator:
             else:
                 outcome = self.rng.choice(outcomes, p=probs)
                 post_state, runs_this_pa = self.transitions.sample(state, outcome, self.rng)
+            if cv_accum is not None:
+                # Monte Carlo variance-reduction control variate (2026-08-04):
+                # (runs_this_pa - conditional_mean_runs(state, outcome)) has
+                # expectation exactly zero for THIS PA, by construction (see
+                # TransitionTable.conditional_mean_runs) -- summed across the
+                # whole game this is a mean-zero martingale regardless of the
+                # random game length/path, so it's a valid control variate for
+                # total-runs/margin estimators (see validate_control_variate.py).
+                # None (every existing caller) is a byte-for-byte no-op.
+                cv_accum[0] += runs_this_pa - self.transitions.conditional_mean_runs(state, outcome)
+            if cv_full_accum is not None:
+                cv_full_accum[0] += runs_this_pa - exp_runs_this_pa
             if thruorder_counts is not None:
                 thruorder_counts[lineup_idx] = thruorder_counts.get(lineup_idx, 0) + 1
             # Walk-off run truncation (2026-08-03 audit, finding M13): under
@@ -861,6 +997,7 @@ class GameSimulator:
     def simulate_game(self, home_lineup: list[dict], away_lineup: list[dict],
                        home_pitcher: dict, away_pitcher: dict,
                        innings: int = 9, park_factors: dict[str, float] | None = None,
+                       park_pulled_hr_factor: dict[str, float] | None = None,
                        weather_factors: dict[str, dict[str, float]] | None = None,
                        home_bullpen: dict[int, dict] | None = None,
                        away_bullpen: dict[int, dict] | None = None,
@@ -877,7 +1014,8 @@ class GameSimulator:
                        home_tier_context: dict | None = None,
                        away_tier_context: dict | None = None,
                        postseason: bool = False,
-                       hook_result: dict | None = None) -> tuple[int, int]:
+                       hook_result: dict | None = None,
+                       cv_state: dict | None = None) -> tuple[int, int]:
         """home_lineup/away_lineup/home_pitcher/away_pitcher: player profiles,
         see simulate_half_inning. park_factors: the home team's stadium
         factors, applied to both teams' batting (a property of the park).
@@ -1013,7 +1151,23 @@ class GameSimulator:
         is not touched by this function and will silently misattribute
         innings to the wrong reliever after a hook unless the caller applies
         the identical shift itself using these values. Omitted (the default,
-        None) is byte-for-byte identical to before this parameter existed."""
+        None) is byte-for-byte identical to before this parameter existed.
+
+        cv_state: optional (2026-08-04, Monte Carlo variance-reduction
+        control variate) dict, populated in-place (same convention as
+        `events`/`hook_result`) with {"home": float, "away": float,
+        "home_full": float, "away_full": float} -- "home"/"away" are each
+        side's accumulated (runs_this_pa - conditional_mean_runs(state,
+        outcome)) summed across every PA that side batted this trial (see
+        simulate_half_inning's own `cv_accum` docstring); "home_full"/
+        "away_full" are the stronger version (see `cv_full_accum`'s own
+        docstring) marginalized over the full known per-PA distribution
+        rather than conditioned on the realized outcome. All four are
+        mean-zero martingales regardless of game length, valid control
+        variates for that side's own simulated run total across many
+        trials (see validate_control_variate.py, which measures both
+        versions' actual payoff). Omitted (the default, None) is a
+        byte-for-byte no-op -- no accumulator lists are even built."""
         crn_enabled = crn_game_pk is not None and crn_trial is not None
         home_score = away_score = 0
         home_idx = away_idx = 0
@@ -1086,6 +1240,16 @@ class GameSimulator:
         home_hook_state = _build_hook_state(home_hook_context, home_bullpen, home_pitcher, 0, home_tier_context, home_tier_state)
         away_hook_state = _build_hook_state(away_hook_context, away_bullpen, away_pitcher, 1, away_tier_context, away_tier_state)
 
+        # Monte Carlo variance-reduction control variate (2026-08-04): only
+        # allocated when a caller opts in via cv_state -- every existing
+        # caller (cv_state=None) skips this entirely. Both the narrow
+        # (cv_accum) and stronger (cv_full_accum) versions are tracked
+        # together -- see validate_control_variate.py for the comparison.
+        home_cv_accum = [0.0] if cv_state is not None else None
+        away_cv_accum = [0.0] if cv_state is not None else None
+        home_cv_full_accum = [0.0] if cv_state is not None else None
+        away_cv_full_accum = [0.0] if cv_state is not None else None
+
         for inning in range(1, innings + 1):
             # Postseason: position-player/mop-up substitution essentially never
             # happens in October -- rosters/incentives are different (no team
@@ -1124,11 +1288,13 @@ class GameSimulator:
             away_crn_keys = (crn_game_pk, crn_trial, half_inning_ordinal(inning, is_bottom=False)) if crn_enabled else None
             away_runs, away_idx = self.simulate_half_inning(
                 away_lineup, away_idx, home_pitcher_this_inning, park_factors=park_factors,
+                park_pulled_hr_factor=park_pulled_hr_factor,
                 weather_factors=weather_factors, thruorder_counts=away_thruorder_counts, events=events,
                 catcher_factors=home_catcher_factor, sb_rates=away_sb_rates, auto_runner=inning >= 10 and not postseason,  # real MLB rule: no auto-runner in the postseason
                 crn_keys=away_crn_keys, pitcher_shock_factors=home_pitcher_shock,
                 inning=inning, hook_state=home_hook_state,
                 pitching_score_entering=home_score, batting_score_entering=away_score,
+                cv_accum=away_cv_accum, cv_full_accum=away_cv_full_accum,
             )
             if home_hook_state is not None and home_hook_state["hooked"] \
                     and last_home_pitcher_id != id(home_hook_state["next_reliever"]):
@@ -1174,12 +1340,14 @@ class GameSimulator:
             home_crn_keys = (crn_game_pk, crn_trial, half_inning_ordinal(inning, is_bottom=True)) if crn_enabled else None
             home_runs, home_idx = self.simulate_half_inning(
                 home_lineup, home_idx, away_pitcher_this_inning, walkoff_margin=walkoff_margin,
-                park_factors=park_factors, weather_factors=weather_factors,
+                park_factors=park_factors, park_pulled_hr_factor=park_pulled_hr_factor,
+                weather_factors=weather_factors,
                 thruorder_counts=home_thruorder_counts, events=events,
                 catcher_factors=away_catcher_factor, sb_rates=home_sb_rates, auto_runner=inning >= 10 and not postseason,  # real MLB rule: no auto-runner in the postseason
                 hfa_factors=hfa_factors, crn_keys=home_crn_keys, pitcher_shock_factors=away_pitcher_shock,
                 inning=inning, hook_state=away_hook_state,
                 pitching_score_entering=away_score, batting_score_entering=home_score,
+                cv_accum=home_cv_accum, cv_full_accum=home_cv_full_accum,
             )
             if away_hook_state is not None and away_hook_state["hooked"] \
                     and last_away_pitcher_id != id(away_hook_state["next_reliever"]):
@@ -1204,6 +1372,11 @@ class GameSimulator:
             # is not, and silently mismatches without this.
             hook_result["home_hook_inning"] = home_hook_state["hook_inning"] if home_hook_state is not None else None
             hook_result["away_hook_inning"] = away_hook_state["hook_inning"] if away_hook_state is not None else None
+        if cv_state is not None:
+            cv_state["home"] = home_cv_accum[0]
+            cv_state["away"] = away_cv_accum[0]
+            cv_state["home_full"] = home_cv_full_accum[0]
+            cv_state["away_full"] = away_cv_full_accum[0]
         return home_score, away_score
 
 
