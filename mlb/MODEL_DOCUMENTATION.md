@@ -4860,6 +4860,96 @@ way.
 
 ---
 
+## 11.47 Pitcher/catcher stolen-base suppression (2026-08-05) —
+investigated, real signal, shelved: no viable wiring path found
+
+Prompted by a direct question during Fantasy-tab work: this project's
+only stolen-base modeling (`baserunning.py`'s batter-side attempt/success
+rates) was retired from the simulator's actual outcome sampling by §11.42's
+M5 finding (double-counted movement already embedded in
+`base_out_transitions.py`'s pooled resample) — leaving zero pitcher- or
+catcher-side signal anywhere in the stack, closing out the old Phase 3
+backlog item ("stolen-base battery-side suppression folded into existing
+runner SB rates as a multiplier") with a real answer instead of leaving it
+untried.
+
+**Data: real, and richer than expected.** MLB's Stats API
+(`stats?stats=season&group=catching`/`group=pitching`) gives properly
+attributed per-catcher and per-pitcher season SB/CS/CS%, confirmed live.
+Baseball Savant's `catcher-throwing` leaderboard (pop time, exchange time,
+arm strength, opportunity-adjusted `caught_stealing_above_average`) and
+`pitcher-running-game` leaderboard (`runs_prevented_on_running_attr`,
+adjusted for runner speed/opportunity) are both fetchable via the same
+CSV-leaderboard pattern already used for sprint speed/OAA — no new
+ingestion infrastructure needed.
+
+**Catcher signal: real, confirmed two independent ways.** Our own
+per-catcher CS% (game-attributed via the PA table's existing catcher/
+fielder_2 column) correlates 0.978 with MLB's official numbers, validating
+the attribution method. Same-season correlation with Savant's pop time:
+-0.38 (correct sign — faster pop time, more caught stealing). Year-over-
+year stability of catcher CS%: 0.23 (2023→2024), 0.29 (2024→2025) — modest
+but real, on the same order as several factors already live in this model.
+
+**Pitcher signal: real per Savant's cross-sectional spread, but
+unverifiable with anything available.** Qualified starters range from
+-2.3 to +2.4 `runs_prevented_on_running_attr` in a single season — a real,
+meaningful spread. But two independent own-data proxies (raw box-score
+CS%-allowed by pitcher; a starter-restricted variant requiring the starter
+to record ≥55% of that side's outs, to cut bullpen-mixing noise) both
+showed ~zero year-over-year stability (0.256→-0.040; 0.095→-0.164) —
+consistent with the raw stat conflating pitcher and catcher jointly.
+Savant's own opportunity-adjusted metric would be the right one to use
+instead, but its public CSV endpoint's year-filter parameters don't work
+(every season requested returned identical `start_year: 2026` data,
+across multiple parameter-naming attempts) — likely a genuinely new 2026
+metric without historical-split support yet, not a dead end on the signal
+itself. Adopting an unvalidatable external number would break this
+project's own standing rule that every factor gets confirmed stable
+before being trusted (sprint speed, bat speed, OAA all were) — shelved on
+that basis alone, not on any evidence the skill is fake.
+
+**Proposed safer wiring mechanism, tested, came back weak.** The obvious
+way to condition `TransitionTable` on battery quality — bucketing by
+(pre_state, outcome, battery-tercile) — repeats the exact shape of the
+already-reverted `runner_speed_bucket` attempt (§11.2's BUILT-THEN-
+REVERTED table: a real, clean 16.7pp/11.6pp component-level effect that
+still regressed full-stack Brier after the tightened re-check, because
+conditioning the resample on an extra dimension fragments already-sparse
+cells). Designed a narrower alternative instead: reweight the "runner
+advanced an extra base" vs. "didn't" split WITHIN the existing pooled
+(pre_state, outcome) cell via an odds-ratio nudge from the catcher's own
+walk-forward CS rate — the same combine pattern already used for
+platoon/park/weather — restricted to strikeout PAs (batted-ball-free, so
+any base-state change is voluntary baserunning) to sidestep the lack of
+reliable per-event steal tagging in Statcast (`fetch.py`'s own documented
+finding: steals show up as free text in `des`, not a structured `events`
+value, and don't reliably tie to a specific pitch).
+
+Leakage-free test of that mechanism: prior-season official catcher CS% →
+this season's "runner advanced" rate in SB-eligible strikeout PAs, our own
+PA table, n=60 catcher-seasons (2024/2025 targets, 2023/2024 predictors).
+**r = -0.112 — correct sign, not statistically significant** (SE≈0.13 at
+this n; tercile split: worst-CS% catchers 6.33% advance rate vs. mid
+5.70% vs. best 5.82% — directionally right but not monotonic). The
+dilution is structural, not a sample-size problem: "did the runner end up
+further along" conflates attempt-suppression (fewer tries against a good
+arm) with conditional success rate (more outs among the tries that do
+happen) — two real catcher-skill effects that partially cancel in a
+target that can't distinguish "no attempt" from "attempt, caught."
+
+**Verdict: shelved, not built.** Same category as arsenal-tercile
+matchups (§11), wind-direction-from-geometry, and pitcher-side contact
+suppression — a real, sabermetrically legitimate signal that doesn't
+survive the jump from "real in isolation" to "cleanly wireable into this
+specific architecture" without either the transition-table fragmentation
+trap or the attempt/no-attempt data gap. What would actually unstick
+this: genuine per-event stolen-base-attempt tagging, which is the real
+blocker (confirmed unavailable from our own cached Statcast data), not
+effort or data availability in general.
+
+---
+
 ## 12. Suggested next steps for a future session
 
 **Status as of 2026-08-04**: the Phase 0-4 roadmap that used to occupy this section (written
@@ -4936,6 +5026,12 @@ scheduled — pick up opportunistically):
   explicitly declined — each failed its own pre-registered bar or was judged to face the same
   expected-magnitude ceiling as an already-tested sibling mechanism. Listed here only so a
   future session doesn't re-litigate them without first reading why they were declined.
+- **Pitcher/catcher stolen-base suppression** (§11.47): closes the old Phase 3 backlog item
+  of the same name. Catcher signal is real (confirmed two independent ways) but the safer
+  wiring mechanism designed to avoid repeating the `runner_speed_bucket` fragmentation trap
+  tested weak and non-significant (r=-0.112, n=60); pitcher signal is real per Savant's
+  cross-sectional spread but currently unverifiable with any method available to us. Don't
+  re-open without genuine per-event stolen-base-attempt tagging, the actual blocker.
 
 **Standing discipline, unchanged from the retired roadmap and still binding**: run
 candidate signals through the cheap funnel first (run-value screen → sliced CRN check →
