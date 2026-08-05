@@ -888,10 +888,26 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
         cv_away_full_2d = np.array([cv_capture[g][3] for g in cv_game_pks])
         beta_home = fit_control_variate_beta(sim_home_2d, cv_home_full_2d)
         beta_away = fit_control_variate_beta(sim_away_2d, cv_away_full_2d)
+        # Win-probability control variate (2026-08-04): the SU/Brier
+        # keep/revert decisions this project actually makes are bootstrap
+        # CIs on the trial-level win indicator, NOT on MAE -- the
+        # score-based adjustment above doesn't touch that estimator at
+        # all. Same trick, different target: (win_trial - E[win_trial])
+        # isn't itself a martingale difference, but the correction still
+        # preserves the mean for ANY target (E[cv]=0 unconditionally, so
+        # subtracting beta*cv from ANY per-trial statistic -- continuous or
+        # a 0/1 indicator -- leaves its expectation unchanged), only
+        # reducing variance if win and the margin control variate
+        # correlate. See validate_control_variate.py for the measured
+        # reduction factor before this is trusted for real decisions.
+        win_2d = (sim_home_2d > sim_away_2d).astype(float)
+        cv_margin_full_2d = cv_home_full_2d - cv_away_full_2d
+        beta_win = fit_control_variate_beta(win_2d, cv_margin_full_2d)
         cv_cols = pd.DataFrame({
             "game_pk": cv_game_pks,
             "sim_home_mean_cv": sim_home_2d.mean(axis=1) - beta_home * cv_home_full_2d.mean(axis=1),
             "sim_away_mean_cv": sim_away_2d.mean(axis=1) - beta_away * cv_away_full_2d.mean(axis=1),
+            "sim_home_win_prob_cv": win_2d.mean(axis=1) - beta_win * cv_margin_full_2d.mean(axis=1),
         })
         r = r.merge(cv_cols, on="game_pk", how="left")
 
@@ -944,6 +960,11 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
     r["log_loss"] = -(r["actual_home_win"] * np.log(p_clipped) + (1 - r["actual_home_win"]) * np.log(1 - p_clipped))
     print(f"Brier score (P(home win) vs actual, lower=better): {r['brier'].mean():.4f}")
     print(f"log loss (P(home win) vs actual, lower=better): {r['log_loss'].mean():.4f}")
+    if control_variate:
+        su_primary_cv = ((r["sim_home_win_prob_cv"] > 0.5).astype(int) == r["actual_home_win"]).mean()
+        brier_cv = ((r["sim_home_win_prob_cv"] - r["actual_home_win"]) ** 2).mean()
+        print(f"[control-variate, opt-in] SU (cv-adjusted): {su_primary_cv:.3f}   "
+              f"Brier (cv-adjusted): {brier_cv:.4f}   (beta_win={beta_win:.3f})")
     # NOTE on RNG pairing: `rng` (created once, above the per-game loop) is
     # reused sequentially across every game AND every trial in this run. Two
     # runs of this script that differ in only ONE tested factor will diverge

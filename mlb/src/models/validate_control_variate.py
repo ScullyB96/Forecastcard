@@ -96,6 +96,27 @@ def main():
     print("-- full version (marginalized over the whole known per-PA distribution) --")
     results_full = _measure("full", cv_home_full, cv_away_full)
 
+    # Win-probability (SU/Brier) control variate (2026-08-04): the score-based
+    # measurement above tightens MAE-type metrics, but the actual keep/revert
+    # decisions for the backlog (bat speed, pulled-air, park-geometry) were
+    # made on bootstrapped SU/Brier deltas, not MAE -- a DIFFERENT estimator.
+    # Same trick (any control variate with E[cv]=0 preserves the mean of ANY
+    # per-trial statistic it's regressed against, discrete or continuous),
+    # applied to the trial-level win indicator instead of the score itself.
+    win = (sim_home > sim_away).astype(float)
+    cv_margin_narrow = cv_home - cv_away
+    cv_margin_full = cv_home_full - cv_away_full
+    print("-- win-indicator (SU) version, narrow margin control variate --")
+    win_res_narrow = _fit_beta_and_reduction(win, cv_margin_narrow)
+    print(f"  [narrow] su-like: beta={win_res_narrow['beta']:+.4f}  cv_mean={win_res_narrow['cv_mean']:+.5f} "
+          f"(sanity, want ~0)  var {win_res_narrow['var_before']:.5f}->{win_res_narrow['var_after']:.5f}  "
+          f"reduction={win_res_narrow['reduction_factor']:.3f}x")
+    print("-- win-indicator (SU) version, full margin control variate --")
+    win_res_full = _fit_beta_and_reduction(win, cv_margin_full)
+    print(f"  [full] su-like: beta={win_res_full['beta']:+.4f}  cv_mean={win_res_full['cv_mean']:+.5f} "
+          f"(sanity, want ~0)  var {win_res_full['var_before']:.5f}->{win_res_full['var_after']:.5f}  "
+          f"reduction={win_res_full['reduction_factor']:.3f}x")
+
     reduction_narrow = results_narrow["total"]["reduction_factor"]
     reduction_full = results_full["total"]["reduction_factor"]
     best_tag, best_reduction = ("full", reduction_full) if reduction_full >= reduction_narrow \
@@ -118,6 +139,9 @@ def main():
             "cv_mean_home_full": results_full["home"]["cv_mean"],
             "cv_mean_away_narrow": results_narrow["away"]["cv_mean"],
             "cv_mean_away_full": results_full["away"]["cv_mean"],
+            "reduction_win_narrow": win_res_narrow["reduction_factor"],
+            "reduction_win_full": win_res_full["reduction_factor"],
+            "cv_mean_win_narrow": win_res_narrow["cv_mean"], "cv_mean_win_full": win_res_full["cv_mean"],
             "acceptance_bar": ACCEPTANCE_BAR, "passes_bar": passes, "best_version": best_tag,
         },
         n_trials=N_TRIALS,
@@ -132,7 +156,12 @@ def main():
             f"reduction: narrow={reduction_narrow:.2f}x, full={reduction_full:.2f}x. Margin reduction: "
             f"narrow={results_narrow['margin']['reduction_factor']:.2f}x, full={results_full['margin']['reduction_factor']:.2f}x. "
             f"Unbiasedness sanity check (E[cv] should be ~0 in every game) -- narrow home={results_narrow['home']['cv_mean']:+.5f}, "
-            f"full home={results_full['home']['cv_mean']:+.5f}. Pre-registered bar >= {ACCEPTANCE_BAR}x on total runs: {verdict}"
+            f"full home={results_full['home']['cv_mean']:+.5f}. Pre-registered bar >= {ACCEPTANCE_BAR}x on total runs: {verdict}. "
+            f"SEPARATELY, win-indicator (SU/Brier-relevant) variance reduction, regressing the trial-level win "
+            f"indicator against the margin control variate: narrow={win_res_narrow['reduction_factor']:.3f}x, "
+            f"full={win_res_full['reduction_factor']:.3f}x -- this is the actual decision-relevant metric for "
+            f"re-testing the backlog (bat speed, pulled-air, park-geometry, platoon x TTO), NOT the total-runs "
+            f"figure above."
         ),
     )
     print("\nLogged to metrics_ledger.parquet:", row["notes"][:80], "...")

@@ -4788,15 +4788,35 @@ go-no-go script. The "narrow" version is kept wired (as `cv_accum`, always
 tracked alongside the "full" one when `cv_state` is requested) purely as a
 documented comparison point, not because it's independently useful.
 
-**What this unblocks, not yet done**: this session built and validated the
-TOOL; re-testing the actual backlog of "CI includes zero" signals (bat
-speed, pulled-air rate, the 3 park-geometry factors from §11.44, the
-platoon×TTO interaction from §11.39) against this tightened noise floor is
-explicitly a follow-up, not part of this work. At a ~2.4-2.6x variance
-reduction, the achievable trial-count-equivalent speedup is roughly the
-same factor (to match a given precision, ~40% as many trials suffice) —
-real, but each backlog item still needs its own honest re-run and CI read,
-not an assumption that it will now resolve to significant.
+**Extending to SU/Brier — real, but not strong enough to change the
+backlog's fate.** The MAE-based measurement above doesn't directly help the
+actual keep/revert decisions for bat speed, pulled-air rate, and the
+park-geometry factors, since those were all decided on bootstrapped SU/
+Brier deltas, not MAE — a different estimator. The same trick still
+applies (any control variate with E[cv]=0 preserves the mean of ANY
+per-trial statistic it's regressed against, discrete or continuous, so
+regressing the trial-level win indicator against the margin control
+variate is equally valid), but the achieved reduction is weaker: **1.73x
+on the win indicator** (n=599, 200 trials, same run) vs. 2.4-2.6x on the
+continuous score metrics — expected, since a 0/1 threshold statistic
+correlates less cleanly with a continuous predictor than a continuous
+target does. Wired the same way: `validate_game_simulator.py`'s
+`control_variate` flag also fits `beta_win` and adds a
+`sim_home_win_prob_cv` column.
+
+**Checked the math before spending the compute to re-test the backlog, and
+it isn't worth running.** A 1.73x variance reduction is only a ~1.31x
+standard-error reduction. Applied to the actual backlog: bat speed and
+pulled-air rate's existing CI (~±1.2pp at n=7237) narrows to ~±0.91pp —
+their point estimates (+0.12pp, +0.21pp) stay comfortably inside it,
+nowhere near flipping significant. The park-geometry factors have even
+smaller point estimates (+0.1-0.2pp) at a smaller sample (n=1489), so the
+same conclusion holds more strongly there. **Decision: do not re-run the
+backlog against this tool — the honest math already answers the
+question.** The MAE-based ~2.4-2.6x reduction remains a real, useful tool
+for future work on continuous score/margin metrics (dispersion
+diagnostics, totals calibration); the win-indicator version is real but
+not the breakthrough that would have unblocked this specific backlog.
 
 ---
 
@@ -4817,16 +4837,15 @@ bugs the roadmap above had no way to anticipate, and a park-geometry investigati
 converged with the audit table's own conclusion from a completely different angle. **The
 genuinely open items, as of this write-up, are these:**
 
-**1. Re-test the "CI includes zero" backlog against the new control-variate noise
-floor (§11.45).** The variance-reduction tool is built, validated (real ~2.4-2.6x
-reduction on total runs/margin), and wired in as an opt-in `control_variate` flag —
-but re-running bat speed, pulled-air rate, the 3 park-geometry factors (§11.44), and
-the platoon×TTO interaction (§11.39) against this tightened floor was explicitly
-scoped OUT of that work and is the natural next step now that it exists. Not
-guaranteed to flip any of them to significant — the honest next action is to re-run
-and read the result, not assume the outcome.
+**CLOSED, not open**: re-testing the "CI includes zero" backlog (bat speed, pulled-air
+rate, the park-geometry factors, platoon×TTO) against the control-variate noise floor
+(§11.45) — checked the math instead of spending the compute: the win-indicator
+version's real ~1.73x variance reduction only narrows the relevant CIs by ~1.31x,
+nowhere near enough to move any of these point estimates (+0.1-0.21pp) out of a
+CI that includes zero. Do not re-open this without a materially stronger variance-
+reduction mechanism than what's built.
 
-**2. Task #141 (low priority) — K-scale the 2026 holdout's own point-metric gap.** An
+**1. Task #141 (low priority) — K-scale the 2026 holdout's own point-metric gap.** An
 identical K-scaling check to the one that saved the latent shock factor (§11.14) was started
 on the 2026 holdout itself but never finished; the holdout's own point-metric gap vs. the
 in-sample figure has not been independently K-scaled. Low priority because §11.42's holdout
@@ -4834,7 +4853,7 @@ re-run already landed slightly ABOVE the in-sample number, which is itself infor
 (argues against, not for, an unresolved gap) — this would mostly firm up confidence in a
 result that already looks clean, not resolve an open question.
 
-**3. Task #151 (calendar-gated, October) — postseason-inclusive PA table + playoff-specific
+**2. Task #151 (calendar-gated, October) — postseason-inclusive PA table + playoff-specific
 bullpen policy offsets.** `postseason=True` is already wired end-to-end through
 `generate_daily_props.py` (task #150); this is the remaining data-layer piece (a PA table
 that includes postseason games, and bullpen usage policy offsets specific to playoff
@@ -4842,12 +4861,12 @@ conditions — shorter rotations, more aggressive hooks) needed before that flag
 beyond pass through cleanly. Genuinely calendar-gated: can't be tested against real data
 until the 2026 postseason actually happens.
 
-**4. Task #156 (calendar-gated, October) — RUN the pre-registered bat speed/pulled-air
+**3. Task #156 (calendar-gated, October) — RUN the pre-registered bat speed/pulled-air
 resolution.** The protocol is fully built and pre-registered (§11.29) specifically so it can
 run once, without iteration, against a full season of data not yet available. Also
 calendar-gated, not a design or build task — just execution once October data exists.
 
-**5. Smaller, non-blocking open threads, each already fully diagnosed** (none currently
+**4. Smaller, non-blocking open threads, each already fully diagnosed** (none currently
 scheduled — pick up opportunistically):
 - **Platoon × times-through-the-order interaction, strikeout-specific** (§11.39): a real,
   pre-existing effect (same-hand strikeout over-predicted +1.15pp at TTO=1, under-predicted
