@@ -6,6 +6,9 @@
     {% if sec.omitted %}
     <p class="fantasy-omitted-note">Not yet included: {{ sec.omitted|join(", ") }}</p>
     {% endif %}
+    {% if sec.estimated %}
+    <p class="fantasy-omitted-note">Estimated, not directly simulated: {{ sec.estimated|join(", ") }}</p>
+    {% endif %}
     <div class="leaderboard-table-wrap">
       <table class="leaderboard-table">
         <thead>
@@ -15,7 +18,8 @@
             <th data-sort-key="2" data-sort-type="text" class="sortable">Game</th>
             <th data-sort-key="3" data-sort-type="num" class="sortable num sort-desc" data-sort-dir="desc">Pts</th>
             {% for col in sec.columns %}
-            <th data-sort-key="{{ loop.index + 3 }}" data-sort-type="num" class="sortable num">{{ col }}</th>
+            <th data-sort-key="{{ loop.index + 3 }}" data-sort-type="num" class="sortable num"
+                {%- if col in sec.estimated %} title="Estimated, not directly simulated"{% endif %}>{{ col }}{{ "*" if col in sec.estimated }}</th>
             {% endfor %}
           </tr>
         </thead>

@@ -82,16 +82,6 @@ MARKET_ABBREV = {
     "Hits Allowed": "H", "Hit By Pitch Allowed": "HBP", "Runs Allowed": "R", "Batters Faced": "BF",
 }
 
-# Column order for the slate-wide leaderboard, keyed by abbreviation
-# instead of full market name (several full names collapse to the same
-# abbreviation, e.g. "Batter Strikeouts" and "Strikeouts" both -> "K" --
-# that's fine, a batters table and a pitchers table never share one row,
-# so there's no real collision, just a shared rank for whichever full
-# name gets there first).
-_ABBREV_RANK: dict[str, int] = {}
-for _i, _m in enumerate(MARKET_ORDER):
-    _ABBREV_RANK.setdefault(MARKET_ABBREV.get(_m, _m), _i)
-
 # extra.role is only set by MLB's export today (NFL/NBA/NHL props have no
 # role key) -- ROLE_LABELS.get(None) below falls back to a generic "Players"
 # section so those sports still render sensibly, just without a batter/
@@ -170,12 +160,26 @@ def _leaderboard(rows: list[dict], game_lookup: dict[str, str]) -> dict:
     probability or a mean -- never mixed within one column."""
     by_role: dict[str | None, dict[int, dict]] = {}
     prob_by_role: dict[str | None, dict[str, bool]] = {}
+    # Rank each abbreviation WITHIN its own role (2026-08-05 fix): a single
+    # rank table shared across every role let an earlier-listed BATTER
+    # market (e.g. "Hits" -> H) permanently claim that abbreviation's
+    # column position, so a same-abbreviation PITCHER market (e.g. "Hits
+    # Allowed" -> H) silently inherited the batter's rank instead of its
+    # own -- confirmed real on the live Fantasy-tab audit: pitcher columns
+    # rendered H, BB, HBP, K, IP, R, BF instead of the intended IP, K, BB,
+    # H, HBP, R, BF. _MARKET_RANK itself (keyed by full market NAME, which
+    # is always globally unique) has no such collision -- only the
+    # abbreviation collapse did.
+    abbrev_rank_by_role: dict[str | None, dict[str, int]] = {}
     for p in rows:
         role = (p.get("extra") or {}).get("role")
         abbrev = MARKET_ABBREV.get(p["market"], p["market"])
         is_prob = p.get("proj_mean") is None
         value = p.get("over_prob") if is_prob else p.get("proj_mean")
         prob_by_role.setdefault(role, {})[abbrev] = is_prob
+        rank = _MARKET_RANK.get(p["market"], len(MARKET_ORDER))
+        role_ranks = abbrev_rank_by_role.setdefault(role, {})
+        role_ranks[abbrev] = min(role_ranks.get(abbrev, rank), rank)
         players = by_role.setdefault(role, {})
         entry = players.setdefault(p["player_id"], {
             "player_id": p["player_id"], "player_name": p["player_name"],
@@ -187,7 +191,8 @@ def _leaderboard(rows: list[dict], game_lookup: dict[str, str]) -> dict:
     sections = []
     for role in sorted(by_role, key=lambda r: (r is None, r != "batter")):
         prob_flags = prob_by_role[role]
-        columns = sorted(prob_flags, key=lambda m: (_ABBREV_RANK.get(m, len(MARKET_ORDER)), m))
+        abbrev_rank = abbrev_rank_by_role[role]
+        columns = sorted(prob_flags, key=lambda m: (abbrev_rank.get(m, len(MARKET_ORDER)), m))
         players = sorted(by_role[role].values(), key=lambda e: sum(v or 0 for v in e["stats"].values()), reverse=True)
         sections.append({
             "role": role, "label": ROLE_LABELS.get(role, "Players"),
@@ -233,6 +238,7 @@ def _fantasy_leaderboard(rows: list[dict], game_lookup: dict[str, str]) -> dict:
             "role": role, "label": ROLE_LABELS.get(role, "Players"),
             "columns": columns, "players": players,
             "omitted": fantasy.OMITTED_BY_ROLE[role],
+            "estimated": fantasy.ESTIMATED_BY_ROLE[role],
         })
     return {"sections": sections}
 

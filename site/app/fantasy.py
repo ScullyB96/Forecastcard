@@ -54,8 +54,21 @@ PITCHER_POINTS = {"IP": 3.0, "K": 3.0, "BB": -1.3, "H": -1.3, "HBP": -1.3, "R": 
 BATTER_OMITTED = ["Runs Scored"]
 PITCHER_OMITTED = ["Wins", "Losses", "Saves"]
 
+# Columns that are a real number but NOT a directly-simulated per-trial stat
+# like every other column here -- flagged separately from OMITTED (2026-08-05
+# audit) so the page doesn't imply SB carries the same footing as TB/RBI/BB/
+# HBP. props._attach_expected_sb approximates game-level SB opportunities as
+# non-HR times on base, but the attempt_rate/success_rate it's multiplied by
+# were fit against a STRICTER "open base ahead" opportunity definition
+# (baserunning.build_sb_opportunities) -- a real, if modest given the
+# shrinkage, unit mismatch worth surfacing rather than presenting SB as if it
+# were exactly as trustworthy as the simulated columns next to it.
+BATTER_ESTIMATED = ["SB"]
+PITCHER_ESTIMATED: list[str] = []
+
 POINTS_BY_ROLE = {"batter": BATTER_POINTS, "pitcher": PITCHER_POINTS}
 OMITTED_BY_ROLE = {"batter": BATTER_OMITTED, "pitcher": PITCHER_OMITTED}
+ESTIMATED_BY_ROLE = {"batter": BATTER_ESTIMATED, "pitcher": PITCHER_ESTIMATED}
 
 
 def fantasy_points(role: str | None, stats: dict) -> float | None:
