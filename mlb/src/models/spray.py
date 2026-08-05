@@ -50,6 +50,7 @@ import numpy as np
 import pandas as pd
 
 from src.models.bullpen import nearest_prior_pitcher_snapshot
+from src.models.park_factors import PULLED_CONTACT_QUALITY_CODES, PULLED_CONTACT_SPRAY_THRESHOLD_DEG
 from src.models.true_talent import MARCEL_WEIGHTS
 
 PULL_ANGLE_THRESHOLD_DEG = 15  # standard sabermetric "pulled" cutoff
@@ -215,3 +216,162 @@ def build_pull_rate_snapshot(pa: pd.DataFrame, pull_rate_pa: pd.DataFrame) -> pd
     with_rate = attach_pull_rate(pa, pull_rate_pa)
     first = with_rate.sort_values("at_bat_number").groupby(["game_pk", "batter"], as_index=False).nth(0)
     return first[["game_pk", "batter", "season", "game_date", "pregame_pull_rate"]].dropna(subset=["pregame_pull_rate"])
+
+
+# EIGHTH addition (2026-08-04): a batter's own walk-forward rate of producing
+# PULLED, QUALITY-CONTACT batted balls specifically -- not "pulled" alone
+# (pregame_pull_rate above) or "barrel" alone (expected_stats.build_pregame_
+# barrel_rate), but the JOINT event, using the exact same definition as
+# park_factors.build_pulled_barrel_park_factor_by_stand's own target subset
+# (PULLED_CONTACT_SPRAY_THRESHOLD_DEG + PULLED_CONTACT_QUALITY_CODES, imported
+# from there rather than re-derived, so the batter-level rate and the park
+# factor it's meant to be blended against are measuring literally the same
+# thing). This is the natural blend weight for that park factor: a batter
+# whose own contact profile rarely looks like this subset shouldn't get much
+# of a park's PULLED-QUALITY-CONTACT-specific number, regardless of his stand.
+#
+# STILL PROVISIONAL (2026-08-04, same status as the park factor itself): not
+# wired into build_profile/game_simulator.py yet, pending the held-out
+# calibration + full-stack CRN backtest scoped alongside this whole mechanism.
+PULLED_QUALITY_STABILIZATION_BATTED_BALLS = 100  # reuses PULL_STABILIZATION_
+# BATTED_BALLS' own K=100 as a starting default (same reasoning: this project's
+# usual reliability-curve-fit approach needs real split-half data this new,
+# rarer joint event doesn't have yet) -- NOT independently validated.
+
+
+def _is_pulled_quality_contact(pa: pd.DataFrame) -> pd.Series:
+    """Boolean Series, True where a batted ball is BOTH quality contact
+    (Statcast launch_speed_angle in PULLED_CONTACT_QUALITY_CODES) AND pulled
+    toward this batter's own natural power side (raw spray angle past
+    PULLED_CONTACT_SPRAY_THRESHOLD_DEG, sign per stand) -- mirrors park_
+    factors._pulled_quality_contact's own filter logic exactly, applied here
+    to a batted-ball-only frame that already has hc_x/hc_y."""
+    raw_angle = np.degrees(np.arctan2(pa["hc_x"] - 125.42, 198.27 - pa["hc_y"]))
+    pulled = np.where(
+        pa["stand"] == "L",
+        raw_angle > PULLED_CONTACT_SPRAY_THRESHOLD_DEG,
+        raw_angle < -PULLED_CONTACT_SPRAY_THRESHOLD_DEG,
+    )
+    quality = pa["launch_speed_angle"].astype("float64").isin(PULLED_CONTACT_QUALITY_CODES)
+    return quality.to_numpy() & pulled
+
+
+def build_pulled_quality_contact_rate(pa: pd.DataFrame) -> pd.DataFrame:
+    """Walk-forward-safe (no leakage) estimated pulled-quality-contact rate
+    for every BATTED BALL, as of just before it -- same Marcel two-level
+    (preseason prior + in-season blend) structure as build_pull_rate_by_season,
+    swapping in _is_pulled_quality_contact as the event instead of plain
+    "pulled." Denominator is batted balls (a property of contact), matching
+    build_pull_rate_by_season's own convention, not build_pregame_barrel_
+    rate's balls-in-play-via-launch_speed_angle.notna() convention -- both are
+    "did this PA produce a real hc_x/hc_y," just named differently per file;
+    kept consistent with THIS file's own existing convention."""
+    bb = pa.dropna(subset=["hc_x", "hc_y"]).copy()
+    bb["is_event"] = _is_pulled_quality_contact(bb).astype(int)
+    bb = bb.sort_values(["batter", "season", "game_date", "game_pk", "at_bat_number"])
+
+    K = PULLED_QUALITY_STABILIZATION_BATTED_BALLS
+    out_frames = []
+    for season, sdf in bb.groupby("season"):
+        prior = bb[bb["season"] < season]
+        if prior.empty:
+            league_rate = bb.loc[bb["season"] == season, "is_event"].mean()
+            priors_df = pd.DataFrame(columns=["batter", "preseason_rate", "prior_weight_bb"])
+        else:
+            league_rate = prior["is_event"].mean()
+            season_agg = prior.groupby(["batter", "season"]).agg(
+                bb=("is_event", "size"), events=("is_event", "sum")
+            ).reset_index()
+            priors = []
+            for batter, g in season_agg.groupby("batter"):
+                g = g.set_index("season")
+                num, den, raw_bb = 0.0, 0.0, 0.0
+                for i, w in enumerate(MARCEL_WEIGHTS):
+                    s = season - 1 - i
+                    if s in g.index:
+                        num += w * g.loc[s, "events"]
+                        den += w * g.loc[s, "bb"]
+                        raw_bb += g.loc[s, "bb"]
+                if den == 0:
+                    continue
+                priors.append({"batter": batter, "prior_bb": den, "prior_events": num, "raw_prior_bb": raw_bb})
+            priors_df = pd.DataFrame(priors, columns=["batter", "prior_bb", "prior_events", "raw_prior_bb"])
+            if not priors_df.empty:
+                priors_df["reliability"] = priors_df["raw_prior_bb"] / (priors_df["raw_prior_bb"] + K)
+                raw_rate = priors_df["prior_events"] / priors_df["prior_bb"]
+                priors_df["preseason_rate"] = (
+                    priors_df["reliability"] * raw_rate + (1 - priors_df["reliability"]) * league_rate
+                )
+                priors_df["prior_weight_bb"] = np.minimum(priors_df["raw_prior_bb"], K)
+                priors_df = priors_df[["batter", "preseason_rate", "prior_weight_bb"]]
+            else:
+                priors_df = pd.DataFrame(columns=["batter", "preseason_rate", "prior_weight_bb"])
+
+        sdf = sdf.merge(priors_df, on="batter", how="left")
+        sdf["preseason_rate"] = sdf["preseason_rate"].fillna(league_rate)
+        sdf["prior_weight_bb"] = sdf["prior_weight_bb"].fillna(K)
+
+        grp = sdf.groupby("batter")
+        sdf["season_events_before"] = grp["is_event"].cumsum() - sdf["is_event"]
+        sdf["season_bb_before"] = grp.cumcount()
+
+        num = sdf["prior_weight_bb"] * sdf["preseason_rate"] + sdf["season_events_before"]
+        den = sdf["prior_weight_bb"] + sdf["season_bb_before"]
+        sdf["pregame_pulled_quality_rate"] = num / den
+        out_frames.append(sdf)
+
+    result = pd.concat(out_frames, ignore_index=True)
+    return result[["game_pk", "at_bat_number", "batter", "season", "game_date", "pregame_pulled_quality_rate"]]
+
+
+def pulled_power_weight(pregame_pulled_quality_rate: float, league_rate: float) -> float:
+    """Blend weight `w` in [0, 1] for how much of a batter's own contact
+    profile matches the pulled-quality-contact subset build_pulled_barrel_
+    park_factor_by_stand is defined on -- the blend weight for
+    effective_park_hr_factor = pooled^(1-w) * pulled_barrel_specific^w
+    (2026-08-04 scoping). Simple, transparent, linear-in-relative-rate
+    design: a batter at exactly league-average gets w=0.5 (an even blend,
+    reflecting genuine uncertainty about how much his profile resembles the
+    target subset); 2x league average or more saturates at w=1.0 (fully the
+    park's pulled-specific number); at or below 0 gets w=0.0 (fully the
+    plain pooled park factor). NOT the only reasonable design -- a real
+    tercile-cutoff approach (matching pull_tercile's own convention) was
+    considered but rejected for now: this metric is too new to have a real
+    fitted population distribution the way PULL_TERCILE_CUTOFFS does (that
+    dict's own docstring: "derived once from the full population's...
+    distribution") -- revisit once this mechanism has real validation data
+    to fit cutoffs against, same as PULL_TERCILE_CUTOFFS itself once did."""
+    if league_rate <= 0 or pd.isna(pregame_pulled_quality_rate):
+        return 0.5
+    ratio = pregame_pulled_quality_rate / league_rate
+    return float(np.clip(ratio / 2.0, 0.0, 1.0))
+
+
+def attach_pulled_quality_rate(pa: pd.DataFrame, rate_pa: pd.DataFrame) -> pd.DataFrame:
+    """Same carry-forward-to-every-PA logic as attach_pull_rate (a batter's
+    underlying pulled-quality-contact tendency doesn't reset between PAs, so
+    the most recently KNOWN value carries forward onto non-batted-ball PAs
+    too), for pregame_pulled_quality_rate instead of pregame_pull_rate."""
+    pa = pa.sort_values(["batter", "game_date", "game_pk", "at_bat_number"]).copy()
+    pa["_pa_seq"] = pa.groupby("batter").cumcount()
+    rate_with_seq = pa[["batter", "game_pk", "at_bat_number", "_pa_seq"]].merge(
+        rate_pa[["batter", "game_pk", "at_bat_number", "pregame_pulled_quality_rate"]],
+        on=["batter", "game_pk", "at_bat_number"], how="inner",
+    )
+    merged = pd.merge_asof(
+        pa.sort_values("_pa_seq"),
+        rate_with_seq[["batter", "_pa_seq", "pregame_pulled_quality_rate"]].sort_values("_pa_seq"),
+        on="_pa_seq", by="batter", direction="backward",
+    )
+    return merged.drop(columns=["_pa_seq"])
+
+
+def build_pulled_quality_contact_snapshot(pa: pd.DataFrame, rate_pa: pd.DataFrame) -> pd.DataFrame:
+    """One row per (game_pk, batter): pregame_pulled_quality_rate as of the
+    start of that game -- mirrors build_pull_rate_snapshot's own pattern
+    (carry-forward via attach_pulled_quality_rate first, then take each
+    game's first PA, so a batter whose first PA that game wasn't itself a
+    batted ball still gets the correct as-of estimate)."""
+    with_rate = attach_pulled_quality_rate(pa, rate_pa)
+    first = with_rate.sort_values("at_bat_number").groupby(["game_pk", "batter"], as_index=False).nth(0)
+    return first[["game_pk", "batter", "pregame_pulled_quality_rate"]].dropna(subset=["pregame_pulled_quality_rate"])

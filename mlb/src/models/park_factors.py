@@ -15,6 +15,7 @@ environment. A 3-year rolling window is used (industry convention, per
 project research notes) since single-season park factors are noisy.
 """
 
+import numpy as np
 import pandas as pd
 
 from src.models.true_talent import STABILIZATION_PA
@@ -174,6 +175,34 @@ def team_home_road_outcome_rates(pa: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 
+def team_home_road_outcome_rates_by_stand(pa: pd.DataFrame) -> pd.DataFrame:
+    """Same as team_home_road_outcome_rates, but split further by the
+    batter's own `stand` (L/R) -- the input to a handedness-specific park
+    factor (2026-08-04 scoping: a park's short porch can be far more
+    HR-friendly for one hand than the other, and the plain, hand-pooled
+    park_factor above cannot express that; only a batter-facing park like
+    Yankee Stadium's real physical asymmetry motivates this at all -- see
+    build_outcome_park_factors_by_stand's own docstring for the real sample-
+    size tradeoff this split introduces)."""
+    reg = pa.copy()
+    is_home_batting = reg["inning_topbot"] == "Bot"
+    reg["team"] = reg["home_team"].where(is_home_batting, reg["away_team"])
+    reg["at_home"] = is_home_batting
+
+    rows = []
+    for outcome in OUTCOMES:
+        reg["is_outcome"] = (reg["outcome"] == outcome).astype(int)
+        g = reg.groupby(["season", "team", "at_home", "stand"]).agg(
+            pa_count=("is_outcome", "size"), events=("is_outcome", "sum")
+        ).reset_index()
+        home = g[g["at_home"]].rename(columns={"pa_count": "home_pa", "events": "home_events"})
+        road = g[~g["at_home"]].rename(columns={"pa_count": "road_pa", "events": "road_events"})
+        merged = home.merge(road, on=["season", "team", "stand"], how="inner")
+        merged["outcome"] = outcome
+        rows.append(merged[["season", "team", "stand", "outcome", "home_pa", "home_events", "road_pa", "road_events"]])
+    return pd.concat(rows, ignore_index=True)
+
+
 PARK_FACTOR_PRIOR_PA = 5000  # pseudo-PA of Bayesian shrinkage toward the league
                               # rate, see below. Raised from 200 (2026-07-21) --
                               # found via a systematic "check every factor
@@ -286,6 +315,363 @@ def build_outcome_park_factors(pa: pd.DataFrame) -> pd.DataFrame:
     group_mean = raw_factor.where(~no_history).groupby([rates["season"], rates["outcome"]]).transform("mean")
     rates["park_factor"] = (raw_factor / group_mean).where(~no_history, 1.0)
     return rates[["season", "team", "outcome", "park_factor"]]
+
+
+PARK_FACTOR_STAND_PRIOR_PA = 5000  # 2026-08-04 scoping: same magnitude as the
+# pooled PARK_FACTOR_PRIOR_PA, kept equal for now rather than guessed larger --
+# splitting by stand roughly halves the PA feeding each cell (confirmed on real
+# 2024 data: ~1,268 avg home PA/team-season for lefties, ~1,702 for righties,
+# vs. ~2,970 pooled), so this same prior weight produces MORE shrinkage toward
+# neutral per cell than the pooled version does, which is the conservative
+# direction to err in for a first pass -- raise only if validation shows the
+# split factors are still too noisy even after this.
+
+
+def build_outcome_park_factors_by_stand(pa: pd.DataFrame) -> pd.DataFrame:
+    """Same walk-forward, same-venue-rolling, Bayesian-shrinkage, mean-1.0-
+    renormalization methodology as build_outcome_park_factors, extended with
+    an extra `stand` grouping dimension throughout -- see that function's own
+    docstring for why each of those three mechanisms (shrinkage against a
+    walk-forward league anchor, same-venue-only rolling, mean-1.0 renorm) is
+    there; nothing about the reasoning changes by adding `stand`, only the
+    grouping keys do.
+
+    The league-rate anchor and the mean-1.0 renormalization are both computed
+    PER STAND (i.e. lefties are shrunk toward and renormalized against the
+    LEFTY league-wide rate, righties against the RIGHTY league-wide rate) --
+    not pooled -- so a park's lefty and righty factors can each be read as
+    "how much better/worse than an average park is this, for a batter of
+    that hand," independently of any overall batted-ball-rate difference
+    between lefties and righties leaguewide.
+
+    2026-08-04 scoping note (real numbers, not estimated): splitting by stand
+    roughly halves the PA in every team-season-outcome cell versus the pooled
+    version (see PARK_FACTOR_STAND_PRIOR_PA's own comment) -- expect these
+    factors to be shrunk harder toward neutral than the pooled ones, and to
+    carry real, not-yet-validated uncertainty. Treat as an experimental
+    output pending the sanity-check + full-stack A/B this scoping call
+    onward, not as a drop-in replacement for the pooled park_factor."""
+    rates = team_home_road_outcome_rates_by_stand(pa)
+    venue_lookup = _team_venue_lookup(sorted(pa["season"].unique().tolist()))
+    rates = rates.merge(venue_lookup, on=["season", "team"], how="left")
+    rates = rates.sort_values(["team", "stand", "outcome", "season"])
+    grp = rates.groupby(["team", "stand", "outcome"], group_keys=False)
+    home_roll_pa = grp.apply(lambda g: _same_venue_rolling_sum(g, "home_pa"), include_groups=False)
+    home_roll_ev = grp.apply(lambda g: _same_venue_rolling_sum(g, "home_events"), include_groups=False)
+    road_roll_pa = grp.apply(lambda g: _same_venue_rolling_sum(g, "road_pa"), include_groups=False)
+    road_roll_ev = grp.apply(lambda g: _same_venue_rolling_sum(g, "road_events"), include_groups=False)
+
+    season_totals = rates.groupby(["outcome", "stand", "season"], as_index=False).agg(
+        se_ev=("home_events", "sum"), se_pa=("home_pa", "sum")
+    ).sort_values(["outcome", "stand", "season"])
+    season_totals["cum_ev"] = season_totals.groupby(["outcome", "stand"])["se_ev"].transform(
+        lambda s: s.shift(1).cumsum()
+    )
+    season_totals["cum_pa"] = season_totals.groupby(["outcome", "stand"])["se_pa"].transform(
+        lambda s: s.shift(1).cumsum()
+    )
+    season_totals["league_rate"] = season_totals["cum_ev"] / season_totals["cum_pa"]
+    league_rate_lookup = season_totals.set_index(["outcome", "stand", "season"])["league_rate"]
+    league_rate = pd.Series(
+        pd.MultiIndex.from_frame(rates[["outcome", "stand", "season"]]).map(league_rate_lookup),
+        index=rates.index,
+    )
+
+    rates["home_rate_rolling"] = (
+        home_roll_ev + PARK_FACTOR_STAND_PRIOR_PA * league_rate
+    ) / (home_roll_pa + PARK_FACTOR_STAND_PRIOR_PA)
+    rates["road_rate_rolling"] = (
+        road_roll_ev + PARK_FACTOR_STAND_PRIOR_PA * league_rate
+    ) / (road_roll_pa + PARK_FACTOR_STAND_PRIOR_PA)
+    raw_factor = rates["home_rate_rolling"] / rates["road_rate_rolling"]
+    no_history = (home_roll_pa.fillna(0) == 0) | (road_roll_pa.fillna(0) == 0)
+    group_mean = raw_factor.where(~no_history).groupby(
+        [rates["season"], rates["outcome"], rates["stand"]]
+    ).transform("mean")
+    rates["park_factor"] = (raw_factor / group_mean).where(~no_history, 1.0)
+    return rates[["season", "team", "stand", "outcome", "park_factor"]]
+
+
+def all_batters_at_park_by_stand(pa: pd.DataFrame) -> pd.DataFrame:
+    """One row per (season, team=home park, stand, outcome): outcome
+    events/PA from EVERY batter (both the home team's own hitters AND every
+    visiting team's hitters) in games hosted at that park, split by stand.
+
+    This is the real fix for team_home_road_outcome_rates_by_stand's failed
+    sanity check (2026-08-04): that function only ever counts the home
+    team's OWN batters (its `team` column is set to whoever is CURRENTLY
+    BATTING, so grouping by team+at_home structurally excludes the visiting
+    team's PA at that same park) -- so a handedness split of it is really
+    measuring "does this one team's specific lefty/righty hitters do better
+    at home," not "does this PARK favor lefties/righties as a class." With
+    only ~13-15 hitters of a given hand on one roster, that's dominated by
+    which specific sluggers happen to be on the team, not the park's actual
+    geometry -- confirmed directly: Yankee Stadium's real, extreme, well-
+    known short-porch lefty advantage came out BACKWARDS (righty factor >
+    lefty) under that method, and the raw year-over-year home/road ratio for
+    NYY lefties swung from 0.91 to 1.72 -- noise, not signal.
+
+    Grouping by home_team here instead (every PA in a game hosted at team
+    T's park, regardless of who's at bat) pools every OTHER team's batters
+    who've ever visited too -- turning a ~13-15-hitter sample into a real,
+    league-wide cross-section for that park, which is what a true park-
+    geometry effect needs to be measurable at all."""
+    reg = pa.copy()
+    rows = []
+    for outcome in OUTCOMES:
+        reg["is_outcome"] = (reg["outcome"] == outcome).astype(int)
+        g = reg.groupby(["season", "home_team", "stand"]).agg(
+            at_pa=("is_outcome", "size"), at_events=("is_outcome", "sum")
+        ).reset_index().rename(columns={"home_team": "team"})
+        g["outcome"] = outcome
+        rows.append(g)
+    return pd.concat(rows, ignore_index=True)
+
+
+def build_component_park_factors_by_stand(pa: pd.DataFrame) -> pd.DataFrame:
+    """Component-method handedness-split park factor: for each (team=park,
+    stand, outcome), compares the outcome rate of ALL batters of that hand
+    who played AT that park (home team's own hitters plus every visiting
+    team's, see all_batters_at_park_by_stand) against the same-hand league-
+    wide rate EVERYWHERE ELSE (every other park's games combined) -- not
+    against that one team's own road games, unlike build_outcome_park_
+    factors_by_stand's team-fixed-effect design. Pooling every visiting
+    team's batters gives each park-hand cell a real, diverse, league-wide
+    sample instead of one team's ~13-15-hitter roster, which is what that
+    simpler version's failed Yankee-Stadium/Fenway sanity check showed was
+    necessary, not just nice-to-have (2026-08-04).
+
+    Two asymmetric walk-forward treatments, intentional:
+    - AT-PARK side: 3-year SAME-VENUE rolling sum (_same_venue_rolling_sum,
+      identical convention to every other park-factor function in this
+      file) -- protects against a relocated team's old building bleeding
+      into its new one's factor, same real bug class already fixed
+      elsewhere here.
+    - ELSEWHERE side: plain trailing-3-season walk-forward sum, NOT same-
+      venue-restricted -- "elsewhere" has no single venue, it's the rest of
+      the whole league in the same trailing window, so a venue restriction
+      doesn't apply; using the same 3-season depth keeps both sides
+      comparing the same scoring-environment era (ball changes, rule
+      changes) rather than one side windowed and the other all-history.
+
+    Still walk-forward-safe throughout (a season's own data never leaks
+    into its own factor) and still uses the same Bayesian-shrinkage-then-
+    mean-1.0-renormalization pattern as every other factor in this file --
+    only the definition of "the comparison sample" changes."""
+    at_park = all_batters_at_park_by_stand(pa)
+    venue_lookup = _team_venue_lookup(sorted(pa["season"].unique().tolist()))
+    at_park = at_park.merge(venue_lookup, on=["season", "team"], how="left")
+    at_park = at_park.sort_values(["team", "stand", "outcome", "season"])
+
+    # League-wide per-season total (every park, every team) -- summing
+    # at_park's own at_pa/at_events across all 30 teams reconstructs the
+    # whole league's PA for that (season, stand, outcome), since every PA
+    # belongs to exactly one team's home games.
+    league_totals = at_park.groupby(["season", "stand", "outcome"], as_index=False).agg(
+        league_pa=("at_pa", "sum"), league_events=("at_events", "sum")
+    )
+    at_park = at_park.merge(league_totals, on=["season", "stand", "outcome"], how="left")
+    at_park["elsewhere_pa"] = at_park["league_pa"] - at_park["at_pa"]
+    at_park["elsewhere_events"] = at_park["league_events"] - at_park["at_events"]
+
+    grp = at_park.groupby(["team", "stand", "outcome"], group_keys=False)
+    at_roll_pa = grp.apply(lambda g: _same_venue_rolling_sum(g, "at_pa"), include_groups=False)
+    at_roll_ev = grp.apply(lambda g: _same_venue_rolling_sum(g, "at_events"), include_groups=False)
+    # plain trailing-3-season walk-forward sum (shift(1) before rolling(3)) --
+    # not same-venue-restricted, see docstring.
+    elsewhere_roll_pa = grp.apply(
+        lambda g: g["elsewhere_pa"].shift(1).rolling(ROLLING_YEARS, min_periods=1).sum(), include_groups=False
+    )
+    elsewhere_roll_ev = grp.apply(
+        lambda g: g["elsewhere_events"].shift(1).rolling(ROLLING_YEARS, min_periods=1).sum(), include_groups=False
+    )
+
+    season_totals = at_park.groupby(["outcome", "stand", "season"], as_index=False).agg(
+        se_ev=("at_events", "sum"), se_pa=("at_pa", "sum")
+    ).sort_values(["outcome", "stand", "season"])
+    season_totals["cum_ev"] = season_totals.groupby(["outcome", "stand"])["se_ev"].transform(
+        lambda s: s.shift(1).cumsum()
+    )
+    season_totals["cum_pa"] = season_totals.groupby(["outcome", "stand"])["se_pa"].transform(
+        lambda s: s.shift(1).cumsum()
+    )
+    season_totals["league_rate"] = season_totals["cum_ev"] / season_totals["cum_pa"]
+    league_rate_lookup = season_totals.set_index(["outcome", "stand", "season"])["league_rate"]
+    league_rate = pd.Series(
+        pd.MultiIndex.from_frame(at_park[["outcome", "stand", "season"]]).map(league_rate_lookup),
+        index=at_park.index,
+    )
+
+    at_park["at_rate_rolling"] = (at_roll_ev + PARK_FACTOR_STAND_PRIOR_PA * league_rate) / (
+        at_roll_pa + PARK_FACTOR_STAND_PRIOR_PA
+    )
+    at_park["elsewhere_rate_rolling"] = (elsewhere_roll_ev + PARK_FACTOR_STAND_PRIOR_PA * league_rate) / (
+        elsewhere_roll_pa + PARK_FACTOR_STAND_PRIOR_PA
+    )
+    raw_factor = at_park["at_rate_rolling"] / at_park["elsewhere_rate_rolling"]
+    no_history = (at_roll_pa.fillna(0) == 0) | (elsewhere_roll_pa.fillna(0) == 0)
+    group_mean = raw_factor.where(~no_history).groupby(
+        [at_park["season"], at_park["outcome"], at_park["stand"]]
+    ).transform("mean")
+    at_park["park_factor"] = (raw_factor / group_mean).where(~no_history, 1.0)
+    return at_park[["season", "team", "stand", "outcome", "park_factor"]]
+
+
+PULLED_CONTACT_SPRAY_THRESHOLD_DEG = 10  # matches the 2026-08-04 geometry-check
+# investigation -- past this many degrees from straight up the middle counts as
+# "pulled" toward the batter's own side. Sign convention (positive = right-field
+# side, negative = left-field side, 0 = dead center) validated directly against
+# real league-wide HR data: median spray angle for lefty HRs is +26 deg (pull to
+# RF), for righty HRs -24 deg (pull to LF) -- confirms real, well-known pull
+# tendencies, not an assumed sign.
+PULLED_CONTACT_QUALITY_CODES = (5, 6)  # Statcast launch_speed_angle codes for
+# "solid contact" and "barrel" -- the two highest-quality-contact buckets.
+# Barrel-only (6) was the exact subset the 2026-08-04 geometry check used to
+# confirm the real Yankee Stadium short-porch effect (NYY lefty pulled-barrel
+# HR rate 73.96% at home vs 62.61% elsewhere, #2 of 30 parks); including solid
+# contact (5) too roughly doubles usable sample per park-hand cell (NYY lefty:
+# 67-122 raw events/season barrel-only vs 112-194 combined) -- a deliberate
+# precision/power tradeoff, NOT yet validated against barrel-only at the
+# full-stack level.
+PULLED_BARREL_PRIOR_PA = 500  # 2026-08-04: provisional, NOT validated/tuned.
+# Raw per-season, per-park, per-hand sample here (roughly 100-200 events) is
+# an order of magnitude thinner than even PARK_FACTOR_STAND_PRIOR_PA's already-
+# thin cells (see that constant's own comment) -- reusing 5000 here would
+# shrink nearly every park to dead neutral, defeating the whole point. 500 is
+# a first-pass guess scaled to the real observed counts; needs a real
+# held-out calibration check before being trusted, same as every other prior
+# constant in this file.
+
+
+def _spray_angle_deg(pa: pd.DataFrame) -> pd.Series:
+    """Batter-facing spray angle in degrees via the standard Statcast hc_x/hc_y
+    hit-coordinate transform (origin ~home plate, y toward the outfield) --
+    validated 2026-08-04 against real league-wide HR data: median spray angle
+    for lefty HRs is +26 deg (pull to RF), for righty HRs -24 deg (pull to LF),
+    matching real, well-known pull tendencies. Confirms the sign convention
+    (positive = right-field side, negative = left-field side, 0 = straight to
+    center) is correct, not merely assumed."""
+    x = pa["hc_x"] - 125.42
+    y = 198.27 - pa["hc_y"]
+    return np.degrees(np.arctan2(x, y))
+
+
+def _pulled_quality_contact(pa: pd.DataFrame) -> pd.DataFrame:
+    """Rows of `pa` that are (a) solid-contact-or-better (Statcast launch_speed_
+    angle in PULLED_CONTACT_QUALITY_CODES) and (b) hit toward the batter's OWN
+    pull side (spray angle past PULLED_CONTACT_SPRAY_THRESHOLD_DEG, sign per
+    stand) -- the exact subset the 2026-08-04 geometry check used to confirm a
+    real short-porch HR-conversion effect at Yankee Stadium that the plain,
+    all-contact-types build_outcome_park_factors_by_stand/build_component_
+    park_factors_by_stand couldn't see (both average over EVERY batted-ball
+    type, diluting a real effect that's concentrated in this narrow slice)."""
+    reg = pa.copy()
+    reg["spray_angle"] = _spray_angle_deg(reg)
+    # launch_speed_angle is a nullable Int64 (NA for non-batted-ball PAs like
+    # strikeouts/walks) -- .isin() on it yields a nullable boolean Series
+    # (NA stays NA, doesn't collapse to False), which raises "boolean value
+    # of NA is ambiguous" when combined with a plain numpy bool array via
+    # `&`. fillna(False) first so both sides are plain bool.
+    quality = (reg["launch_speed_angle"].isin(PULLED_CONTACT_QUALITY_CODES) & reg["spray_angle"].notna()).fillna(False)
+    pulled = np.where(
+        reg["stand"] == "L",
+        reg["spray_angle"] > PULLED_CONTACT_SPRAY_THRESHOLD_DEG,
+        reg["spray_angle"] < -PULLED_CONTACT_SPRAY_THRESHOLD_DEG,
+    )
+    return reg[quality.to_numpy() & pulled].copy()
+
+
+def all_pulled_quality_contact_at_park_by_stand(pa: pd.DataFrame) -> pd.DataFrame:
+    """Same shape/role as all_batters_at_park_by_stand (every batter, home AND
+    visiting, split by stand) but restricted to the pulled-quality-contact
+    subset (_pulled_quality_contact) and to the home_run outcome specifically
+    -- the target quantity the 2026-08-04 geometry check measured directly
+    (HR-conversion rate among pulled quality contact), not a general
+    per-outcome rate table."""
+    subset = _pulled_quality_contact(pa)
+    subset["is_hr"] = (subset["outcome"] == "home_run").astype(int)
+    g = subset.groupby(["season", "home_team", "stand"]).agg(
+        at_pa=("is_hr", "size"), at_events=("is_hr", "sum")
+    ).reset_index().rename(columns={"home_team": "team"})
+    g["outcome"] = "home_run"
+    return g
+
+
+def build_pulled_barrel_park_factor_by_stand(pa: pd.DataFrame) -> pd.DataFrame:
+    """Component-method, walk-forward, Bayesian-shrunk, mean-1.0-renormalized
+    park factor for HR-conversion among PULLED QUALITY CONTACT specifically
+    (see all_pulled_quality_contact_at_park_by_stand) -- same skeleton as
+    build_component_park_factors_by_stand (at-park vs. league-wide-elsewhere,
+    same-venue 3yr rolling for at-park, plain trailing-3yr for elsewhere, same
+    shrinkage-then-renorm pattern), swapping in the much smaller PULLED_
+    BARREL_PRIOR_PA (see its own comment) since this subset's raw per-cell
+    sample is roughly an order of magnitude thinner than the plain HR-outcome
+    cells build_component_park_factors_by_stand works with.
+
+    2026-08-04: built in direct response to a real, geometry-validated finding
+    (NYY lefty pulled-quality-contact HR rate 73.96% at home vs 62.61%
+    elsewhere, #2 of 30 parks) that neither build_outcome_park_factors_by_
+    stand nor build_component_park_factors_by_stand could detect, because
+    both average over EVERY contact type -- this isolates the specific slice
+    where the real effect lives. STILL EXPERIMENTAL/PROVISIONAL: not yet
+    wired into game_simulator.py, pending (1) a held-out walk-forward
+    calibration check and (2) the full-stack CRN-paired backtest scoped
+    alongside this build -- do not consume this output for live predictions
+    yet."""
+    at_park = all_pulled_quality_contact_at_park_by_stand(pa)
+    venue_lookup = _team_venue_lookup(sorted(pa["season"].unique().tolist()))
+    at_park = at_park.merge(venue_lookup, on=["season", "team"], how="left")
+    at_park = at_park.sort_values(["team", "stand", "outcome", "season"])
+
+    league_totals = at_park.groupby(["season", "stand", "outcome"], as_index=False).agg(
+        league_pa=("at_pa", "sum"), league_events=("at_events", "sum")
+    )
+    at_park = at_park.merge(league_totals, on=["season", "stand", "outcome"], how="left")
+    at_park["elsewhere_pa"] = at_park["league_pa"] - at_park["at_pa"]
+    at_park["elsewhere_events"] = at_park["league_events"] - at_park["at_events"]
+
+    grp = at_park.groupby(["team", "stand", "outcome"], group_keys=False)
+    at_roll_pa = grp.apply(lambda g: _same_venue_rolling_sum(g, "at_pa"), include_groups=False)
+    at_roll_ev = grp.apply(lambda g: _same_venue_rolling_sum(g, "at_events"), include_groups=False)
+    # plain trailing-3-season walk-forward sum (shift(1) before rolling(3)) --
+    # not same-venue-restricted, matches build_component_park_factors_by_
+    # stand's own "elsewhere has no single venue" reasoning.
+    elsewhere_roll_pa = grp.apply(
+        lambda g: g["elsewhere_pa"].shift(1).rolling(ROLLING_YEARS, min_periods=1).sum(), include_groups=False
+    )
+    elsewhere_roll_ev = grp.apply(
+        lambda g: g["elsewhere_events"].shift(1).rolling(ROLLING_YEARS, min_periods=1).sum(), include_groups=False
+    )
+
+    season_totals = at_park.groupby(["outcome", "stand", "season"], as_index=False).agg(
+        se_ev=("at_events", "sum"), se_pa=("at_pa", "sum")
+    ).sort_values(["outcome", "stand", "season"])
+    season_totals["cum_ev"] = season_totals.groupby(["outcome", "stand"])["se_ev"].transform(
+        lambda s: s.shift(1).cumsum()
+    )
+    season_totals["cum_pa"] = season_totals.groupby(["outcome", "stand"])["se_pa"].transform(
+        lambda s: s.shift(1).cumsum()
+    )
+    season_totals["league_rate"] = season_totals["cum_ev"] / season_totals["cum_pa"]
+    league_rate_lookup = season_totals.set_index(["outcome", "stand", "season"])["league_rate"]
+    league_rate = pd.Series(
+        pd.MultiIndex.from_frame(at_park[["outcome", "stand", "season"]]).map(league_rate_lookup),
+        index=at_park.index,
+    )
+
+    at_park["at_rate_rolling"] = (at_roll_ev + PULLED_BARREL_PRIOR_PA * league_rate) / (
+        at_roll_pa + PULLED_BARREL_PRIOR_PA
+    )
+    at_park["elsewhere_rate_rolling"] = (elsewhere_roll_ev + PULLED_BARREL_PRIOR_PA * league_rate) / (
+        elsewhere_roll_pa + PULLED_BARREL_PRIOR_PA
+    )
+    raw_factor = at_park["at_rate_rolling"] / at_park["elsewhere_rate_rolling"]
+    no_history = (at_roll_pa.fillna(0) == 0) | (elsewhere_roll_pa.fillna(0) == 0)
+    group_mean = raw_factor.where(~no_history).groupby(
+        [at_park["season"], at_park["outcome"], at_park["stand"]]
+    ).transform("mean")
+    at_park["park_factor"] = (raw_factor / group_mean).where(~no_history, 1.0)
+    return at_park[["season", "team", "stand", "outcome", "park_factor"]]
 
 
 HFA_PRIOR_PA = 20000  # pooled across all 30 teams (not a single team's PA volume like
