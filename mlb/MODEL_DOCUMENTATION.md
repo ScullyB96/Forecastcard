@@ -28,18 +28,29 @@ weather. Monte Carlo (100s–1000s of trials) over full games produces the final
 distribution, win probability, and player props.
 
 **Current validated full-stack performance** (oracle backtest, `validate_game_simulator.py`,
-n=597-600 real 2024-2025 games, 200 trials/game — see §9 for exact protocol): **total score
-MAE 3.409, margin MAE 3.445, straight-up (SU) win/loss accuracy 60.5%** at the ORIGINAL
-n=597/200-trial protocol. **IMPORTANT CAVEAT (§11.7): a later re-validation at a tightened
-protocol (n=995 games/500 trials, bootstrap CI on Brier score) found this figure's own
-noise floor is wide enough that it should not be treated as a precise fact** — the same
-re-validation measured **total MAE 3.402, margin MAE 3.524, SU 59.0%, Brier 0.2343** for
-the identical current-production code, and found that bat speed and pulled-air rate (two
-of the three factors below) do NOT show a statistically significant full-stack effect
-under the more rigorous test, despite being kept on the strength of an SU improvement at
-the original protocol. See §11.7 before treating any SU/MAE figure in this document as
-more precise than "roughly this, ±1-2 points." See §11 for the full ledger of signals
-investigated this session, including several that did NOT clear the bar and were reverted.
+n=7237 real 2023-2025 games, 200 trials/game, canonical protocol per §11.33 — the reference
+figures as of the Phase D re-baseline, §11.42, 2026-08-04): **total score MAE 3.521, margin
+MAE 3.416, straight-up (SU) win/loss accuracy 59.53%, Brier 0.2378.** Independently confirmed
+on a genuine, never-fitted-against holdout (`validate_holdout_2026.py`, 2026 H1, n=1,667
+games): **SU 59.75%, Brier 0.2368** — the holdout figure lands slightly ABOVE the in-sample
+number, evidence against the accumulated selection bias a long series of 2023-2025-only
+keep/revert decisions could otherwise introduce (see §11.42, §0.3/Phase 0.3 discipline below).
+
+**How this document's own numbers evolved, briefly**: an original n=597/200-trial protocol
+reported SU 60.5%; a tightened bootstrap-CI re-validation (§11.7) found that figure's own
+noise floor was too wide to trust and rescaled the canonical backtest to n=7237 games
+(§11.8, §11.33), settling at SU ≈57-59% through mid-2026. A full external adversarial
+review (§11.39) plus a from-scratch internal audit (4 criticals, ~22 majors — §11.41) found
+and fixed dozens of real correctness bugs (a live platoon double-counting bug, several
+cold-start data leaks, a non-mean-preserving pitcher shock, stale prop-calibration
+coefficients, and more), then re-tuned every invalidated constant and re-baselined once
+(§11.42) to reach the 59.53%/59.75% figures above. **Before treating any SU/MAE figure in
+this document as more precise than "roughly this, ±1-2 points," read §11.7 (methodology),
+§11.39/§11.41/§11.42 (the audit + re-baseline), and the persisted `metrics_ledger.parquet`
+(§0.1) — the single source of truth these numbers are drawn from.** See §11 for the full
+ledger of signals investigated across this project's history, including many that did NOT
+clear the bar and were reverted, and several (§11.44) that were real, physically-grounded,
+and correctly-signed but full-stack-immaterial and deliberately left undeployed.
 
 ---
 
@@ -1075,8 +1086,23 @@ kept as documented-but-unused artifacts)
 | Jet-lag/circadian fatigue multiplier (`jetlag.py`, built from scratch) | Original (n=597): SU 60.5%→59.3% (-1.2pp). **Retested at n=995/500 trials (§11.7): SU delta REVERSED to +0.1pp (CI (-1.21pp,+1.41pp)), Brier delta exactly 0.0000 (CI (-0.0011,+0.0012))** — genuinely indistinguishable from zero, not negative | A genuinely NEW signal category (schedule-derived, team-level), independently statistically significant on our own data in isolation — but the original "-1.2pp full-stack regression" was pure noise, not a real effect. Still not deployed (no proven benefit either), but for an honestly different reason than first reported |
 
 ### 11.3 DESIGNED/FIT BUT NEVER DEPLOYED
-Empty as of 2026-07-22 — `pitch_walk_multiplier` was the only entry here and has
-since been deployed for real and reverted after a full-stack failure (see §11.2).
+Empty as of 2026-07-22 through 2026-08-01 — `pitch_walk_multiplier` was the only entry here
+and has since been deployed for real and reverted after a full-stack failure (see §11.2).
+Repopulated 2026-08-04 by the park-geometry investigation (§11.44): 3 new mechanisms, all
+real, correctly-signed, CRN-paired-tested full-stack, and left wired but opt-in-off:
+
+| Idea | Full-stack result (n=1489, CRN-paired) | Why not deployed |
+|---|---|---|
+| Pulled-quality-contact park-factor blend (task #188) | SU 57.35%→57.49% (+0.13pp), Brier 0.2392→0.2390 | Real-but-immaterial — not worth the added production complexity for a ~0.1pp gain |
+| Batter-level HR park-geometry factor (`park_geometry.py`, tasks #189-190) | SU 57.4%→57.6% (+0.2pp), Brier 0.2392→0.2391 | Same — real, physically-grounded (validated 97.8% real-HR-clearance rate, reproduces the Green Monster signature), but full-stack gain is negligible |
+| Doubles/triples park-geometry factor (task #191) | SU +0.1pp, Brier unchanged to 4 decimals | Same, smallest of the three |
+
+All 3 are opt-in flags (`geometry_hr_enabled`, `geometry_xbh_enabled`, the pulled-quality
+blend weight) defaulting `False` in `validate_game_simulator.py`/`game_simulator.py` — the
+code and the real `data/raw/park_dimensions_2026.csv` geometry dataset are kept as reusable
+assets, not deleted, per this project's standard practice (§10). See §11.44 for the full
+investigation, including why a purely statistical (outcome-frequency) approach to the same
+question failed first.
 
 ### 11.4 INVESTIGATED, NOT BUILT (failed its own component-level or safety check before
 reaching a full-stack A/B at all)
@@ -4194,152 +4220,671 @@ Known, documented, not-yet-solved gap: prop rows have no `team` column
 (the source parquet has none to read) — left NULL, the site can still
 group props by `game_id` without it.
 
+## 11.39 External review of `MODEL_REVIEW_PACKET.md` (2026-08-03): 4 findings, one
+real bug, one real bug found BY the reviewer's own follow-up
+
+An independent reviewer worked through the packet's §9 worked example and §10 open
+question by hand. Full detail (every verification step, every number) lives in
+`MODEL_REVIEW_RESPONSE.md`; this section is the durable summary.
+
+**Finding 1 (arithmetic mismatch, §9 Brandon Lowe example) — not a code bug, a docs
+gap.** The reviewer correctly guessed the missing piece was a second platoon leg
+(pitcher's own platoon-allowed multiplier, separate from the batter's) but estimated
+its magnitude wrong. Re-instrumented the real PA: Abbott's true platoon-allowed
+multiplier is 0.7206; with the real number the chain closes to the last decimal
+(`4.502% × 1.0815 × 0.8541 × 0.7206 × 1.1348 × 0.9604 × 0.9417 = 3.0757%` unnormalized,
+`/1.011394 = 3.0411%` — matches the packet's stated 3.0%). Fixed by rewriting packet
+§9 Step 7 to list both platoon legs in the same table the code actually applies them
+in.
+
+**Follow-up to Finding 1 — a real platoon double-counting bug.** Lowe-vs-Abbott's
+combined platoon effect (0.8541 × 0.7206 = 0.615, a 38.5% HR reduction for one
+same-hand matchup) was suspiciously large. Root cause: `platoon_splits.py` computes
+ONE population-level `league_mult` (same-vs-opposite-hand odds ratio) from raw PA
+data — since a raw PA-level rate ratio can't separate the batter's share of the
+effect from the pitcher's, this single value already reflects both sides combined.
+But both the batter-side and pitcher-side default tables independently fell back to
+`league_mult**0.5` when a player lacked enough own-hand history, and both legs get
+multiplied in every matchup — so two default players combined to `league_mult**1`,
+applying the shared population effect twice. A leakage-free decomposed regression on
+real 2024 data confirmed the combined attenuation should land near 1× (`λ_batter +
+λ_pitcher ≈ 1.09` for home_run, `≈1.22` for strikeout — not the ~2× implicitly
+applied). **Fix**: `platoon_splits.py`'s shared default changed from `league_mult**0.5`
+per side to `league_mult**0.25` (two defaults now combine to `league_mult**0.5`, the
+data-supported single-application magnitude); each player's own individually-measured
+deviation was untouched. **Pre-registered guardrail passed and exceeded expectations**:
+CRN-paired backtest (n=697, 2023-2024, K=30/100/300) showed a consistent,
+non-sign-flipping SU improvement at every K (e.g. +1.58pp at K=100), not just "no
+regression." Shipped: commit `0bd844a`.
+
+**Finding 2 (retest whiff-rate/walk-blend reverts under CRN).** Motivated by the
+observation that both reverts were killed on SU deltas resembling low-K estimator
+noise seen elsewhere this project. Wired the 3 dormant CRN decision-tags
+(`bullpen.py`/`weather_forecast.py` opt-in `crn_keys`) as infrastructure, then
+re-ran the walk-blend (`pitch_walk_multiplier`) under the same K-scaling protocol
+that saved the latent shock factor. Result did NOT show that clean signature — SU
+gap flipped sign across K (−1.29pp at K=30 → +0.57pp at K=300) rather than
+converging monotonically, and Brier stayed flat (~0.0004-0.0005) at every K.
+**Verdict: no detectable effect in either direction at n=697 — leave the walk-blend
+reverted**, now on the basis of a properly re-tested current null rather than a
+stale one. `whiff_rate_multiplier` was found to be fully deleted (not kept dormant
+per this project's usual revert discipline) — reconstructing it from its written
+description alone was judged too speculative; explicitly deferred, not dropped.
+
+**Finding 3 (bat-speed HR-share clip design) — already resolved one day before this
+review, packet was just citing a stale intermediate state.** The reviewer proposed
+shrinking input shares toward league average by reliability weight before the
+odds-ratio, instead of clipping the output. Task #159 (§11.32) had already
+root-caused the real defect (the base 2-term formula's clip floor at 0.02, not the
+bat-speed extension itself) and fixed it (floor 0.02→0.035), then re-tested
+full-stack at n=8,711: SU delta +0.0068pp (CI includes zero), a decisive null with
+the safety issue genuinely fixed — not a blowup-driven rejection. Corrected packet
+§8.4 to reflect this.
+
+**Finding 4 (is the stacked context-multiplier combination calibrated in the
+tails?) — a real, answered question, with a non-obvious practical conclusion.**
+Fit a per-category attenuation exponent λ (`unnormalized_prob ∝ p0 × M^λ`, M = base-out
+state × batter platoon × pitcher platoon × park × TTOP) via logistic regression on
+2024 data, held out on 2025. **home_run λ=0.598** (95% CI 0.451-0.746, excludes 1),
+**strikeout λ=0.869** (CI 0.774-0.964, excludes 1) — straight multiplication genuinely
+IS overconfident in aggregate for both. But applying the correction barely moves
+held-out multiclass log-loss (1.605455→1.605145), and restricted specifically to
+actual home runs / strikeouts it makes log-loss slightly WORSE (3.4088→3.4164 for
+HR) — the aggregate overconfidence is driven by the vast majority of true-negative
+PAs, and a single global λ doesn't clearly help (may slightly hurt) the rare
+true-positive predictions a prop bettor actually cares about. Not deployed; flagged
+a sharper untested follow-up (is λ<1 uniform across M, or concentrated in the
+extreme-M tail — a "cap the boost" design closer to this project's existing
+clip-based discipline).
+
+**Bonus finding (not part of the original review) — a 5th instance of the cold-start
+look-ahead pattern task #160 had fixed in 4 sibling modules.** While building
+Finding 4's factor tables, direct code inspection found `game_simulator.py`'s
+`build_state_factors_by_season` still had `ref = prior if len(prior) else
+X[X["season"] == season]` — apparently missed when the same pattern was fixed in
+`catcher_framing.py`/`weather.py`/`umpire_factor.py`/`ttop.py`. Quantified against a
+fully-neutral baseline for 2023 (the true cold-start season): median absolute
+deviation from neutral across all 384 (state, outcome) cells was ~9.2 percentage
+points, with mechanically-driven outliers up to 24.6× on rare categories — systematic,
+not marginal. **Fix**: unlike the sibling modules (which fall back to an empty dict
+at a `.get(state, NEUTRAL)` call site), `GameSimulator` indexes `state_factors[state]`
+directly with no default, so the true cold-start season instead gets an explicit,
+fully-neutral 1.0× cell for all 24 mechanically-possible states — same "neutral by
+construction" resolution `park_factors.py` already uses, applied to a full lookup
+table instead of a lookup-with-default. Every other season byte-identical pre/post.
+CRN-paired guardrail (n=697, 2023-2024, K=30/100/300) landed within noise at K=300 —
+ships regardless as a correctness fix, same category as the zombie-runner/
+park-neutralization precedent. Real side benefit: mean simulated total runs moved
+from 8.50 (leaky) to 8.82 against a real actual mean of 8.86, and all 3 PIT/z-score
+dispersion sub-metrics improved toward their targets.
+
+**Reviewer's second-round finding — the platoon fix's own OBSERVED leg was still
+double-counted.** Sent the residual investigation of the platoon fix's own
+strikeout-side under-closure (only ~45-46% vs. home_run's ~81%/42%) back to the
+reviewer. Their read: the fix only corrected the FALLBACK default; `own_same_mult`/
+`own_opp_mult` (each player's own measured split) were left as raw, unnormalized
+ratios — but a player's own same-hand PAs are, by definition, against same-handed
+opponents, so his own ratio mechanically re-embeds the SAME shared population effect
+the fallback fix had just corrected. Confirmed by code read: `own_same_mult` was
+literally `odds(own_same_rate)/odds(own_combined_rate)`, never divided by any
+league-derived normalization. Root-caused to **two distinct bugs**: (1) a currency
+mismatch (the shared term, an odds ratio, and the deviation, a different kind of
+odds ratio, were never expressed in the same units before multiplying) and (2)
+handedness pooling (the league reference normalizing the deviation pooled all
+players regardless of handedness, poisoning the same-hand reference toward whichever
+hand dominates the league's roster mix — same-hand is a MAJORITY-exposure regime for
+a RHB facing ~70% RHP starters, a MINORITY regime for a LHB). A uniform-exponent
+first attempt was tried and partially refuted (fixed K same-hand but broke HR
+same-hand and walk same-hand in the opposite direction) — no single exponent fit
+both categories. **Final fix**: measured the shared term directly rather than
+assuming or sweeping a functional form — ran the pipeline on 2024 with platoon
+entirely disabled, measured the real actual-vs-predicted odds ratio per
+(batter-hand × pitcher-hand) cell per outcome (the shared displacement, in the
+model's own native currency). Confirmed stable across 3 seasons and revealed real
+heterogeneity a single exponent could never represent (strikeout's LHB-vs-LHP cell:
++11.6% displacement vs. RHB-vs-RHP's +0.7%). Single confirming read on 2025 (holdout
+hygiene respected — no further adjustment after this read): 7 of 12 buckets
+improved substantially in exactly the worst-before buckets; one real regression
+carried forward explicitly (walk opposite-hand low-reliability, -0.461pp→-0.538pp).
+CRN-paired guardrail (n=697, K=300): within noise, ships regardless. **Shipped**:
+`platoon_splits.py` now conditions the deviation's league reference on each player's
+own predominant hand and uses a measured, per-(season, outcome, batter-hand,
+pitcher-hand) shared term loaded from `src/models/platoon_shared_term.json`,
+produced by the new `src/models/measure_platoon_shared_term.py` (deliberately
+committed to the repo, not regenerated at runtime, since production rebuilds
+`pa_table`/state/park/TTO fresh on every run but this measurement is meant to
+refresh only on the offseason cadence, task #155).
+
+**Open items carried forward from this review**: walk opposite-hand low-reliability
+regression (flagged, not fixed); a real platoon × times-through-the-order
+interaction concentrated in strikeout (same-hand over-predicted +1.15pp at TTO=1,
+under-predicted at TTO=2/3 — pre-existing under the old bug too, strikeout-specific,
+diagnosed not fixed — **anyone building this must re-run
+`measure_platoon_shared_term.py` first**, since its estimand already absorbs the
+average of this same interaction and building a joint factor on top of the current
+JSON without re-measuring would reintroduce the exact double-count this whole
+investigation existed to kill); `whiff_rate_multiplier` reconstruction (deferred);
+Finding 4's extreme-tail-vs-uniform follow-up.
+
+Separately, in production the same session: fixed a live "5 of 8 games showing"
+discrepancy (§11.40) and made a small Players-tab decimal-precision UI change
+(`_leaderboard.html`: stat lines `%.1f`→`%.2f`, probability columns `round()%`→`%.1f%`).
+
+---
+
+## 11.40 Production fix: RotoWire pitcher fallback + intraday light-refresh cron
+cadence (2026-08-03)
+
+Triggered by a live discrepancy (site showing 5 of 8 real scheduled MLB games).
+**Root cause**: `generate_daily_props.py` requires both teams' MLB-official probable
+pitcher before generating a game's props, but real starters post 2-4 hours before
+each game's own first pitch on a rolling basis, not a fixed daily clock — a
+once-a-day check structurally misses some games every day (confirmed live:
+WSH@PHI's pitchers both posted hours after that morning's cron already ran).
+
+**Fix 1 — RotoWire expected-pitcher fallback.** Added
+`resolve_rotowire_pitcher_id`/`rotowire_pitcher_for_team` to
+`fetch_rotowire_lineups.py` (resolves RotoWire's listed starter name to a real MLBAM
+id via `pybaseball.playerid_lookup`, best-effort, never guesses). Wired into
+`generate_daily_props.py` as a fallback before giving up on a missing MLB probable
+pitcher; source flagged explicitly via new `home_pitcher_source`/
+`away_pitcher_source` columns. **Verified real**: the day's slate went from 5/8 to
+8/8 games.
+
+**Fix 2 — light-refresh cadence architecture.** The pipeline previously re-did its
+full, expensive rebuild (re-fetch years of Statcast, rebuild every walk-forward
+table) on every invocation. Split into `full` mode (unchanged, but now caches the
+built context to disk for same-day reuse) and new `light` mode (skips the expensive
+rebuild, reuses the cache, but always still refreshes schedule/probable
+pitchers/RotoWire lineups and specifically `game_weather` since real weather posts
+close to game time). Self-healing: `light` falls back to a full rebuild if no cache
+exists. New `default_run_mode()` in `src/utils/tz.py` (same hour≥17-ET convention as
+the existing `default_slate_date()`) resolves an `"auto"` sentinel to the right mode
+from the real Eastern hour at firing time. **Verified real**: light mode completed
+in ~19 seconds vs. several minutes for a full rebuild (~20× cost reduction per
+intraday check). `railway.toml`'s `startCommand` made explicit and version-controlled
+for the first time; `cronSchedule` changed from 2×/day to `0 1,14,17,20 * * *`
+(4×/day: 9pm ET full rebuild, then 10am/1pm/4pm ET light refreshes, bracketing when
+day-game vs. night-game lineups actually post). Commit `f78e33e`; deployed, and that
+day's already-stale slate was manually backfilled via a direct production run +
+Postgres tunnel (confirmed via `psql`: all 8 real games written).
+
+**Separately, informational only**: investigated a user question about whether
+`nfl-worker-sunday` was broken (vs. `nfl-worker-tuesday`) — both are needed by
+design (CLV early-week vs. closing-line snapshots, documented in
+`nfl/MODEL_DOCUMENTATION.md` §11.2); no bug found, no code changed.
+
+---
+
+## 11.41 Full adversarial audit (2026-08-03): 4 criticals, ~22 majors — Phases A-C
+shipped
+
+Commissioned after §11.39's external review found a real platoon double-counting
+bug every prior internal audit had missed. Full detail (every finding, every
+verification, the complete resolution log) lives in `MODEL_AUDIT_2026-08-03.md`;
+this section is the durable summary and pointer — **that file is the first
+authoritative reference for anything below**, not reproduced here in full.
+
+**The 4 CRITICALs**: **C1** — the measured platoon shared term (§11.39's
+`platoon_shared_term.json`) leaked the target season's own outcomes into its own
+lookup. **C2** — past dates in the schedule cache were never re-fetched once games
+finished, so a date frozen at a non-Final status stayed wrong forever. **C3** — the
+Statcast pipeline could permanently lose night-game PAs on mixed day/night slates
+(advancing past a date before all its games were actually Final). **C4** — the
+per-pitcher expected-innings model was completely inert in production (every
+pitcher effectively used the same fallback, always 5.4 innings), meaning the
+*validated* bullpen configuration and the *deployed* one had silently diverged — a
+failure class no point-metric backtest could ever see, since the backtest itself
+uses the correct oracle innings.
+
+**Selected MAJORs** (~22 total, grouped by subsystem in the source file):
+statistical estimation (M1: 3 more reliability-unit bugs of task #53's exact class
+in `expected_stats.py`'s xBACON/barrel/pulled-air priors, mean reliability 0.657 vs.
+correct 0.435; M2: prior-weight monotonicity inversion — more prior PA could produce
+a *weaker* prior; M3: `effective_n` posterior-sampling width inverted vs. the
+stabilization literature; M4: TTOP double-counts pitcher-talent composition and
+survivor selection, same shared-component signature as the platoon bug; M5: SB
+volume double-counted between embedded transition movement and an explicit pre-PA
+layer; M6: the pitcher stuff shock is not mean-preserving post-renormalization,
+Jensen's-inequality-driven ~-0.23 runs/game hidden shift; M7: opponent-quality
+contamination real but never actually evaluated); data/environmental (M8: ATH/OAK
+team-code mismatch broke every 2023-24 Coliseum park factor; M9: zero-history venue
+got a systematically-biased factor instead of neutral 1.0; M10: weather factors not
+park-relative, double-counting each venue's own climate; M11: defense-composite
+imputation inflated thin-information lineups; M12: RotoWire suffix stripping
+silently dropped whole lineups); simulator mechanics (M13: non-HR walkoffs
+overcounted runs; M14: outs could decrease via an unguarded fallback tier; M15:
+mid-inning hook handoffs misattributed to the starter; M16: closer role scrambled by
+a pure-timing bullpen shift; M17: a starter could be drawn as his own reliever
+13.0% of the time; M18: projected lineups could contain a duplicate batter);
+pipeline/output (M19: prop calibration coefficients stale post-platoon-fix; M20:
+upsert-only export left phantom player rows; M21: slate context never contained the
+previous night's games; M22: reliever prop rows presented conditional-on-appearance
+means as unconditional).
+
+**Why phased, not fixed all at once**: a compensating-bias problem — aggregate
+calibration looked fine specifically BECAUSE the shock's run-suppression (M6) was
+offsetting the SB double-count, walkoff overcount, outs-decrease, and TTOP
+reliever-K inflation (M4) pushing the other way, with σ=0.40 and the prop
+calibration both tuned in that compensated state. Fixing any one mechanism in
+isolation would likely have worsened headline calibration, so per-fix acceptance
+used distribution-level/mechanism-level diagnostics (bucketed calibration, PIT
+dispersion, component invariants) — SU/Brier judgment was explicitly reserved for
+the post-retune re-baseline (§11.42).
+
+**Shipped, in order**: **Phase A** (data layer, independent) — C2 schedule
+re-fetch, C3 completeness guard, M8 ATH/OAK canonicalization, M12 suffix stripping,
+M20 phantom-row DELETE sweeps, several minors, plus C1's prior-season platoon
+keying (2 collateral regressions caught and fixed during verification). **Phase B**
+(mechanical correctness, shipped on invariants not point metrics) — C4 live
+per-pitcher expected innings (3-tier lookup), M13 walkoff truncation, M14 impossible
+outcomes zeroed + outs-decrease guard, M15 per-PA pitcher stamping, M16
+closer-anchored bullpen re-timing, M17 starter pool exclusion, M18 lineup dedup,
+M11 league-average imputation, M21 light-run relief-log refresh, M22
+appearance-rate column. **Phase C** (statistical re-estimation) — M1 raw-unit
+reliability fixes (re-derived constants: 200/75/800, pulled-air held-out MSE −62%),
+M2 monotone prior weight, M9 zero-history neutrality, M10 park-relative weather
+(per-venue applied-factor spread 0.0144→0.0035 std), M4 within-pitcher TTOP refit +
+reliever TT1 neutralization (TTO2 HR 1.075→0.997, TTO3 walk 0.942→1.007, matching
+the audit's own decomposition). **M7 evaluated, not built** — an additive
+opponent-quality correction failed its own pre-registered bar (≥2 of 3 categories
+>1% MSE improvement) on both sides; root cause is that the per-PA odds-ratio combine
+already conditions on the actual opponent, so schedule bias only enters through the
+Marcel input, where shrinkage dilutes it to near-nothing.
+
+Phase D (re-tune + re-baseline) is §11.42.
+
+---
+
+## 11.42 Phase D: re-tune the fixed stack, full re-baseline, 2026 H1 holdout
+re-run (2026-08-03/04)
+
+The last phase of §11.41's sequenced fix plan — re-tune every constant that Phase
+A-C's fixes invalidated, then read SU/Brier exactly once against the fully-fixed
+stack.
+
+**M5 (SB layer) — retired, not fixed in place.** CRN-paired A/B (n=697, K=300,
+OFF arm = empty pregame SB table) landed inside the pre-registered keep-bar (SU loss
+>1.5pp at K=300 or Brier loss >0.002) — not met — so volume correctness won: the
+embedded transition movement is now the single source of steals; the explicit
+pre-PA layer and its fetch code are retained for a possible future de-embed-and-
+re-add-with-identity redesign, not deleted.
+
+**M6 + SHOCK_SIGMA re-sweep — shipped together, deliberately atomic.** Built a
+renorm-aware, mean-preserving version of the pitcher stuff shock (correcting the
+Jensen's-inequality-driven suppression M6 found), then re-swept σ against the fixed
+renorm math rather than reusing the old σ=0.40 (which had been selected by an A/B
+whose arms differed in mean, not just variance). Landed at **σ=0.15**.
+
+**M3 — `effective_n` given a coherent posterior width.** Redesigned to combine the
+K-capped blend denominator with the raw prior PA count, rather than using the capped
+denominator alone — removing the inversion where a 1,471-PA veteran was sampled with
+n=60 (the *most* parameter noise on the *best-known* talents).
+
+**M19 — `BATTER_PROP_CALIBRATION` refit on the post-audit stack.** The existing
+slopes were fit 2026-07-23/25, before the platoon fixes (§11.39) changed the
+simulated distributions those shrinkage slopes were correcting; refit from raw
+(pre-calibration) probabilities on the fixed stack, closing the circularity trap a
+stale refit would otherwise re-introduce.
+
+**Platoon shared term re-measured, aligned with M4.** `measure_platoon_shared_term.py`
+re-run on the fixed stack; the first pass exposed a measurement-baseline mismatch
+with M4 (TTOP now applied to reliever PAs shifted every K cell ~4% uniformly versus
+the term's original measurement conditions) — corrected, keeps the validated
+category structure with <1% mean drift.
+
+**Full re-baseline** (`validate_game_simulator.py`, n=7237, K=200, oracle
+protocol): **SU 59.53%, Brier 0.2378, total MAE 3.521, margin MAE 3.416** — up from
+the pre-audit reference (2026-08-01, before any of §11.39-11.41's fixes landed):
+SU 58.70%, Brier 0.2387, total MAE 3.528, margin MAE 3.422. A real, if modest, net
+SU gain (+0.83pp) and Brier improvement across the full combined audit + re-tune,
+not attributable to any single fix in isolation (per the compensating-bias framing
+above — several fixes pushed SU up, several were explicitly correctness-only with
+no accuracy claim).
+
+**2026 H1 holdout re-run** (`validate_holdout_2026.py`, walk-forward, current
+frozen stack, never used for any fitting/selection decision): **SU 59.75%, Brier
+0.2368** at n=1,667 games — up from the last pre-audit holdout read (n=1,474: SU
+57.06%, Brier 0.2438). The holdout's own game count grew between reads (more 2026
+games completed by 2026-08-04 than at the earlier read), so this is not a perfectly
+matched-sample comparison, but the direction and magnitude are consistent with the
+in-sample re-baseline's own improvement, and the holdout figure landing slightly
+ABOVE the in-sample number (rather than below) is itself informative — no evidence
+the audit's fixes are curve-fitting to 2023-2025 at 2026's expense.
+
+Task #185 (Phase D) is now closed. Two items remain explicitly open from the audit
+resolution log, both already covered above (§11.39): the walk opposite-hand
+low-reliability platoon regression, and the platoon × TTOP strikeout interaction
+(diagnosed, not fixed — its own real trap for a future session is documented in
+§11.39's open-items list).
+
+---
+
+## 11.43 Task #131: cold-start audit round 2 — two more undocumented walk-forward
+leak risks, both documentation-only fixes (2026-08-04)
+
+A systematic sweep for the cold-start look-ahead pattern (the same class §11.39's
+bonus finding fixed in `game_simulator.py`) turned up two more factor functions
+whose cold-start behavior was real but never honestly documented — neither had an
+actual functional bug (both already degrade safely), but both made a false
+"unqualified walk-forward safe" claim in their own docstrings.
+
+**`game_simulator.py`'s `build_league_rates_by_season`** feeds the `lg` (league
+rate) term in `combine_matchup_distribution`'s log5-style combine for every
+simulated PA, live `props.py` path included. Its true-cold-start behavior (the
+first season with no prior data) falls back to that same season's own league rates
+— a narrow, explicitly-scoped exception, not a silent leak, matching the precedent
+already established in `true_talent.build_preseason_priors` (a raw-rate anchor has
+no natural neutral placeholder the way a multiplicative factor table does, so the
+established convention here is "fall back to the season's own data, and say so,"
+not "fabricate a neutral 1.0"). Fixed the docstring to state this exception
+honestly instead of claiming unconditional walk-forward safety; no functional
+code change.
+
+**`platoon_splits.py`'s `league_platoon_multiplier`** — same finding, same fix:
+documented the identical narrow true-cold-start exception, no functional change.
+
+Both fixes were audited specifically because §11.39's bonus finding proved this
+project had already missed instances of this exact leak pattern once (4 sibling
+modules, then a 5th) — this was a second, independent pass confirming no further
+instances hide behind an honest-sounding but inaccurate docstring, closing task
+#131.
+
+---
+
+## 11.44 Tasks #186-191: does the model correctly capture park-geometry ×
+handedness interactions (the "Green Monster problem")? (2026-08-04)
+
+Prompted directly by a user hypothesis: the live park factor (`build_outcome_park_factors`,
+§11.27) is a single number per park per outcome, averaged across all batters — it
+cannot represent that Fenway's Green Monster suppresses fly-ball HRs to LEFT field
+specifically (mostly hurting RHB pull power) while boosting doubles off the wall,
+or that Yankee Stadium's short right-field porch specifically helps LHB pull power.
+Two independent approaches were tried; the first failed on real data for a
+diagnosable reason, the second succeeded.
+
+**Approach 1 (statistical): component-method park factors split by batter
+handedness — investigated, real instability, not deployed.** Extended
+`park_factors.py` with `build_outcome_park_factors_by_stand` (pools ALL visiting
+batters of a given hand at a park, not just the home team's own, for a thicker
+sample than a team-own home/road split). Real-data check: season-to-season
+correlation of a park's own by-hand HR factor was weak-to-negative for several
+parks — traced to genuine data volume, not a shrinkage artifact (a shrinkage-prior
+sweep from 5000 down to 50 didn't change the wrong-signed conclusion at any point).
+Diagnosis: even pooling all visitors, a full season's worth of same-handed
+plate appearances at one park is too thin to estimate a *stand-specific* HR rate
+reliably at only 4 seasons of data — the outcome-frequency approach is
+information-starved for this specific cut, not broken.
+
+**Approach 2 (geometry-based): batter-level, physical park-geometry factors —
+succeeded, built, CRN-tested, real-but-immaterial.** Rather than inferring
+handedness×park interaction from outcome frequencies, model the actual mechanism:
+where a specific batter's own batted balls land (spray angle + launch angle),
+relative to that park's REAL fence distance/height at that specific angle.
+
+- **Real data acquisition**: `data/raw/park_dimensions_2026.csv` — official,
+  current (2026) Statcast fence distance + height data for all 30 parks (+2 special
+  venues), scraped via live browser automation from Baseball Savant's own
+  "Dimensions" leaderboard toggle (static HTTP fetch failed; the page is
+  JS-rendered). Confirmed real and correctly asymmetric on inspection: Fenway's
+  `lf_line_height_ft=37` (the Green Monster) vs. `rf_line_height_ft=4`; Yankee
+  Stadium uniform `8`ft walls everywhere but `rf_line_dist_ft=313` vs.
+  `lf_line_dist_ft=318`.
+- **`src/models/park_geometry.py`** (new, ~330 lines): converts each batted ball's
+  Statcast landing coordinates to a spray angle + raw distance, interpolates the
+  real park's fence distance/height at that angle from the 5 measured points
+  (LF line/gap, CF, RF gap/line), and classifies whether it would clear the fence
+  — including a specific tall-wall suppression term (walls ≥15ft dampen would-be
+  HRs in the 15-25° launch-angle band by 0.5×, the Green Monster's actual physical
+  mechanism). The distance-scale calibration is anchored to the real, independently-
+  known MLB average HR distance (~400ft) — NOT to maximizing "fraction of real HRs
+  correctly classified as clearing the fence," which is a degenerate objective
+  (monotonically increasing with no natural peak; an earlier version of this
+  calibration made exactly that mistake and was fixed). Validated: 97.8% of real
+  2025 HRs (n=20,723) correctly classify as clearing their own park's fence at the
+  calibrated scale; the Green Monster's launch-angle-specific suppression signature
+  reproduces correctly on real data. Walk-forward batter-level HR/double/triple
+  geometry factors use each batter's own PRIOR-SEASON batted-ball history only,
+  Bayesian-shrunk (`GEOMETRY_HR_PRIOR_BB=200`) toward a neutral (league-average-
+  fence) baseline. Spot-checked on Kyle Schwarber: real HR factors ranged 0.71
+  (STL/COL, deep parks) to 1.18 (BOS, Green Monster reachable for his profile);
+  double/triple factors were much smaller (±2%, e.g. BOS `double_factor`=0.984).
+- **3 independent CRN-paired A/B full-stack backtests** (n=1489 games, K=200,
+  2023-2025), each testing one mechanism in isolation:
+
+  | Task | Mechanism | SU (OFF→ON) | Brier (OFF→ON) | Decision |
+  |---|---|---|---|---|
+  | #188 | Pulled-quality-contact park-factor blend (`spray.py`'s pull-rate-weighted blend between the park's overall HR factor and a pulled-contact-specific one) | 57.35%→57.49% (+0.13pp) | 0.2392→0.2390 | real-but-immaterial null |
+  | #189/#190 | Batter-level HR geometry factor | 57.4%→57.6% (+0.2pp) | 0.2392→0.2391 | real-but-immaterial null |
+  | #191 | Doubles/triples geometry factor (empirical P(double)/P(triple) by real distance-ratio bin, quality-contact filtered) | +0.1pp | unchanged to 4 decimals | real-but-immaterial null, smallest of the three |
+
+  All three: nothing regressed, all score MAEs stayed within noise. **Decision on
+  all three: keep built + validated + wired as opt-in (`geometry_hr_enabled`,
+  `geometry_xbh_enabled`, pulled-quality blend all default `False`) — real,
+  physically-grounded signals and a real, reusable geometry dataset, but not worth
+  the added production complexity given the full-stack gain is negligible. None
+  deployed.** Same pattern as task #188's own blend and task #162's reliever
+  tier-selection (§11.36) — a consistent signature this session, not a string of
+  unrelated failures: several real, correctly-signed, physically-motivated
+  mechanisms all converge on the same conclusion about where this model's
+  remaining accuracy ceiling actually sits.
+
+**Was there a cheaper way to have known this in advance?** Investigated two
+pre-screening options rather than defaulting straight to full CRN backtests for
+every candidate:
+
+- **The Stage-0 run-value screen (`run_value_screen.py`, §11.5's task #124) does
+  NOT reliably work for effects this small.** Retroactively run against the
+  already-known-null HR geometry factor (300 real 2025 games, deduplicated to 3,109
+  unique (batter, season, team) tuples for tractability): the screen said
+  `frac_above_threshold=0.9`, verdict "passes screen — worth a full backtest" —
+  **the opposite of the real CRN result (+0.2pp SU).** Flagged as an honest,
+  useful limitation: the screen's linear-weights upper bound is loose enough that
+  it cannot discriminate "worth backtesting" from "real-but-immaterial" at this
+  effect size, even though it correctly separated a positive control (GB/FB
+  pitcher HR-share, real +1.53pp SU) from a negative one (rookie prior, confirmed
+  null) at the time it was built. Use it to reject obviously-dead ideas quickly;
+  don't trust a "passes" verdict to mean "worth the compute" for small,
+  plausible-but-marginal signals.
+- **A cheap, targeted diagnostic DID give a clean answer** for a different
+  question: whether the model's foundational (already-live) park factor needs the
+  bigger Osborne & Levine (2025/2026, *Journal of Sports Analytics*) personnel-
+  adjustment GLMM methodology (their finding: some parks' raw HR-factor rankings,
+  e.g. Progressive Field #1 raw → #15 personnel-adjusted, are driven almost
+  entirely by which players happen to play there). Computed each team's own
+  year-over-year offensive-quality change (run-value-weighted) vs. that team's own
+  `build_outcome_park_factors` HR-factor change: **correlation = -0.102** (n=90
+  team-seasons) — essentially zero. The live method's team-own-road baseline
+  already self-corrects for the personnel/quality-drift confound the GLMM targets,
+  meaningfully tempering the case for that bigger implementation lift.
+
+**Other threads investigated and explicitly declined this session** (not pursued
+further, for documented reasons): foul-territory-specific geometry (would extend
+the same `park_geometry.py` machinery, not separately investigated once the 3
+mechanisms above all converged on "real but immaterial"); pitcher-side geometry
+(does a pitcher's own suppression profile interact with a park's geometry the same
+way a batter's spray does — same expected-magnitude ceiling as the batter-side
+result, not built); a combined weather × geometry interaction beyond the existing
+independent wind/park factors (same reasoning). Baseball Savant's own official Park
+Factors methodology (confirmed via live browser inspection + Tom Tango's own
+tangotiger.com writeup) never isolates a wall-height component either — even MLB's
+own headline park factor misses the Green Monster-specific mechanism this
+investigation targeted, which is exactly why the geometry approach (not another
+outcome-statistics refinement) was the right one to try.
+
+---
+
+## 11.45 Monte Carlo variance reduction via control variates (2026-08-04,
+external report recommendation) — a real, decisive win, wired in as opt-in
+
+An external research report (comparing the model against published
+literature and its own benchmarks) flagged that this project's repeated
+"real, correctly-signed, but CI includes zero" verdicts (bat speed,
+pulled-air rate, all 3 park-geometry factors, the platoon×TTO interaction)
+might partly reflect an unresolvable Monte Carlo noise floor rather than a
+true null — CRN pairing (§11.10) synchronizes randomness BETWEEN two arms
+of a comparison but does nothing to shrink a SINGLE arm's own variance.
+Control variates are the standard fix: subtract a mean-zero, cheap-to-
+compute quantity correlated with the noisy estimator, at zero cost to
+unbiasedness.
+
+**The mechanism.** Traced the exact per-PA simulation loop
+(`game_simulator.py`'s `simulate_half_inning`): `combine_matchup_
+distribution` returns an EXACT, fully-known probability vector for every
+PA before any randomness happens; then two random draws follow — (1) which
+outcome category occurs, (2) `TransitionTable.sample()` resampling one
+matching real historical PA-row to get `runs_scored`/`post_state`. Since
+that resampling draws from a KNOWN, finite historical array, its
+conditional mean is exactly computable at zero marginal cost — new
+`TransitionTable.conditional_mean_runs(pre_state, outcome)` (refactored to
+share `sample()`'s own tier-resolution helper, `_resolve_array`, so the two
+can never silently drift onto different populations; memoized since the
+table is immutable after `__init__`).
+
+**Two versions were built and compared, and the difference between them
+was the real finding.** (1) A "narrow" control variate, `runs_this_pa -
+conditional_mean_runs(state, realized_outcome)` — mean-zero by
+construction, but measured only ~1.03x variance reduction on total runs
+(n=599 games, 200 trials, 2026-08-04): a real but practically useless
+effect, since it only captures the transition-table resampling noise, not
+the (dominant) noise from which outcome-category occurs in the first
+place. (2) A "full" control variate, marginalizing over the ENTIRE known
+per-PA distribution before any outcome is drawn — `runs_this_pa - sum_o
+dist[o] * conditional_mean_runs(state, o)` — still exactly mean-zero (a
+martingale difference; state and dist are both determined before either
+random draw happens), but captures BOTH stochastic layers. Measured
+**2.44x variance reduction on total runs, 2.65x on margin, 2.50x/2.57x on
+home/away score** (same n=599/200-trial sample) — fitted β's landed at
+0.95-1.02 for every quantity, meaning the control variate explains nearly
+all of the systematic within-game trial-to-trial variance. **Pre-
+registered acceptance bar (≥2x on total runs, adopted from the report's
+own suggested threshold): cleanly passed.**
+
+**Correctness, not just payoff, was verified.** The unbiasedness sanity
+check — pooled mean of the control variate should be statistically
+indistinguishable from zero in every game, since a bug (e.g. a tier
+mismatch between `sample()` and `conditional_mean_runs()`) would show up
+as a nonzero mean — held at both the small pilot (n=30) and the full
+n=599 sample (pooled means ~0.0006-0.009, noise-level). Every existing
+caller of `TransitionTable.sample()`/`GameSimulator.simulate_game()`/
+`simulate_half_inning()` (props.py, validate_oracle_vs_predictive.py,
+validate_predictive_bullpen.py, validate_game_simulator.py) is
+byte-for-byte unaffected — confirmed directly: identical simulated scores
+for the same seed with vs. without the new optional `cv_state`/`cv_accum`/
+`cv_full_accum` parameters passed.
+
+**What shipped**: `base_out_transitions.py`'s `conditional_mean_runs` +
+`_resolve_array` refactor; `game_simulator.py`'s optional `cv_accum`/
+`cv_full_accum` (per half-inning) and `cv_state` (per game) parameters, all
+`None`-default no-ops; `validate_game_simulator.py`'s new
+`fit_control_variate_beta` helper and opt-in `control_variate: bool =
+False` flag on `run_validation`, which self-fits β from the run's own
+sample (safe regardless of fit quality, since E[cv]=0 unconditionally —
+self-fitting only affects how MUCH variance is removed, never whether the
+result is unbiased) and adds `sim_home_mean_cv`/`sim_away_mean_cv` columns
+alongside the existing raw ones, never replacing them; new
+`src/models/validate_control_variate.py`, the standalone measurement/
+go-no-go script. The "narrow" version is kept wired (as `cv_accum`, always
+tracked alongside the "full" one when `cv_state` is requested) purely as a
+documented comparison point, not because it's independently useful.
+
+**What this unblocks, not yet done**: this session built and validated the
+TOOL; re-testing the actual backlog of "CI includes zero" signals (bat
+speed, pulled-air rate, the 3 park-geometry factors from §11.44, the
+platoon×TTO interaction from §11.39) against this tightened noise floor is
+explicitly a follow-up, not part of this work. At a ~2.4-2.6x variance
+reduction, the achievable trial-count-equivalent speedup is roughly the
+same factor (to match a given precision, ~40% as many trials suffice) —
+real, but each backlog item still needs its own honest re-run and CI read,
+not an assumption that it will now resolve to significant.
+
+---
+
 ## 12. Suggested next steps for a future session
 
-**§11.8's critique is now fully resolved except claim 5 and the 3 smaller notes** (2026-07-22):
-HFA and park-neutralization are built, wired, and kept (correctness-fix grounds, full-stack
-effect not distinguishable at n=597 — §11.8's status note). The backtest protocol is scaled to
-n=7237 (claim 6), now the reference baseline (56.3% SU / 0.2416 Brier / 3.543 total MAE / 3.442
-margin MAE) superseding every earlier-cited figure in this document. Rookie priors
-(`use_debut_prior`, task #119) tested decisively NULL on that protocol (tight CI, not
-deployed). GB/FB→pitcher-HR-allowed (task #120) tested REAL (SU +1.53pp, CI excludes zero) and
-is now live in all 3 consumer files. Bat speed and pulled-air rate were re-tested at n=7237
-too (§11.9) — both still NOISE (CI excludes neither zero nor a small effect, ~±1.2pp), a
-tighter confirmation of §11.7's original "unresolved" verdict, not a reversal — neither
-reverted. **Remaining open work**: (a) the total-runs dispersion diagnostic (claim 5,
-std(z)=1.087, under-dispersed — no fix attempted); (b) the 3 smaller notes (SB battery-side,
-bullpen back-to-back performance, stale AGE_PEAK=29); (c) HFA/park-neutralization's own
-full-stack delta is still only measured at the smaller n=597 protocol (§11.8's status note) —
-re-running that specific comparison on the n=7237 protocol remains open.
-**The phased roadmap below (per an external reviewer, 2026-07-22, reacting to §11.10-11.11's
-close-out) supersedes every list previously in this section — those are preserved in git
-history, not repeated here.** Sequenced by dependency and expected value; effort estimates
-assume the current toolkit (CRN pairing, run-value screen, n=7237 protocol) as standard.
+**Status as of 2026-08-04**: the Phase 0-4 roadmap that used to occupy this section (written
+2026-07-22, reacting to §11.10-11.11's close-out) is now **fully executed** — persisted
+metrics ledger (§0.1/task #128), full re-baseline (task #130, superseded again by §11.42's
+Phase D re-baseline), the 2026 H1 holdout adopted as a standing rolling out-of-sample check
+(task #129, re-run in §11.42), the pitcher-appearance latent-shock dispersion fix (§11.14,
+task #136-137, later re-tuned in §11.42's M6 fix), the prop-calibration refit (§11.15, task
+#138, refit again in §11.42's M19 fix), the oracle-vs-deployable gap decomposition (§11.18,
+task #143), the systematic audit table (§11.30, task #157), and monthly rolling-holdout +
+prop-calibration monitoring (task #142) all shipped. That full text is preserved in git
+history (and in §11.6-§11.36 above), not repeated here. Since then, an external review
+(§11.39) and a from-scratch internal audit (§11.41-§11.42) found and fixed real correctness
+bugs the roadmap above had no way to anticipate, and a park-geometry investigation (§11.44)
+converged with the audit table's own conclusion from a completely different angle. **The
+genuinely open items, as of this write-up, are these:**
 
-### Phase 0 — Lock the foundation (one short session)
+**1. Re-test the "CI includes zero" backlog against the new control-variate noise
+floor (§11.45).** The variance-reduction tool is built, validated (real ~2.4-2.6x
+reduction on total runs/margin), and wired in as an opt-in `control_variate` flag —
+but re-running bat speed, pulled-air rate, the 3 park-geometry factors (§11.44), and
+the platoon×TTO interaction (§11.39) against this tightened floor was explicitly
+scoped OUT of that work and is the natural next step now that it exists. Not
+guaranteed to flip any of them to significant — the honest next action is to re-run
+and read the result, not assume the outcome.
 
-**0.1 Persisted metrics ledger.** This session's own wrong-baseline mistake (§11.9) and the
-project's habit of citing numbers no file actually stores are the same disease: no
-append-only record of runs. Every validation run should write one row (run ID, git hash,
-config/factor flags, n, trials, SU, Brier, total/margin MAE, std(z), PIT coverage, home-win
-share) to a parquet this document can defer to instead of restating figures inline. Cheap
-(~an hour), and prevents the whole class of reference-point errors permanently.
+**2. Task #141 (low priority) — K-scale the 2026 holdout's own point-metric gap.** An
+identical K-scaling check to the one that saved the latent shock factor (§11.14) was started
+on the 2026 holdout itself but never finished; the holdout's own point-metric gap vs. the
+in-sample figure has not been independently K-scaled. Low priority because §11.42's holdout
+re-run already landed slightly ABOVE the in-sample number, which is itself informative
+(argues against, not for, an unresolved gap) — this would mostly firm up confidence in a
+result that already looks clean, not resolve an open question.
 
-**0.2 Re-baseline at full n with the complete diagnostic suite.** One canonical n=7237 run
-emitting every metric above together. Closes two open items for free: HFA/park-
-neutralization's full-stack effect gets measured at a sample size that can actually resolve
-it (§11.8's status note is still only at n=597), and simulated home-win share can be checked
-directly against the real 52.3% as confirmation the HFA fix is calibrated, not just present.
+**3. Task #151 (calendar-gated, October) — postseason-inclusive PA table + playoff-specific
+bullpen policy offsets.** `postseason=True` is already wired end-to-end through
+`generate_daily_props.py` (task #150); this is the remaining data-layer piece (a PA table
+that includes postseason games, and bullpen usage policy offsets specific to playoff
+conditions — shorter rotations, more aggressive hooks) needed before that flag does anything
+beyond pass through cleanly. Genuinely calendar-gated: can't be tested against real data
+until the 2026 postseason actually happens.
 
-**0.3 The 2026 first-half holdout — the single most informative run available right now.**
-It's 2026-07-22; roughly 1,300-1,400 completed 2026 games exist that NO fitting, selection,
-or keep/revert decision in this project has ever touched. Every kept signal was chosen using
-2023-2025 backtests, so selection bias accumulates across dozens of decisions even with fully
-honest per-test methodology — and no further 2023-2025 testing can detect that. One
-walk-forward run against the CURRENT FROZEN stack on 2026 H1 answers whether 57.9% is the
-real number. Two rules: run it once and don't iterate against it (iterating turns a holdout
-into just more training data), then adopt 2026 as a standing rolling out-of-sample set going
-forward so the selection-bias problem never re-accumulates silently.
+**4. Task #156 (calendar-gated, October) — RUN the pre-registered bat speed/pulled-air
+resolution.** The protocol is fully built and pre-registered (§11.29) specifically so it can
+run once, without iteration, against a full season of data not yet available. Also
+calendar-gated, not a design or build task — just execution once October data exists.
 
-### Phase 1 — The pitcher-appearance latent effect (the dispersion fix; 1-2 sessions)
+**5. Smaller, non-blocking open threads, each already fully diagnosed** (none currently
+scheduled — pick up opportunistically):
+- **Platoon × times-through-the-order interaction, strikeout-specific** (§11.39): a real,
+  pre-existing effect (same-hand strikeout over-predicted +1.15pp at TTO=1, under-predicted
+  at TTO=2/3) that the current architecture can't represent since platoon and TTOP are each
+  independent population-level multipliers. Building the fix means a new joint
+  (handedness × times-through) factor with its own fit and full-stack validation — **and
+  requires re-running `measure_platoon_shared_term.py` first** (its current measurement
+  already absorbs the average of this same interaction; building on top without re-measuring
+  would silently reintroduce the exact double-count this whole investigation existed to
+  kill).
+- **Walk opposite-hand low-reliability platoon regression** (§11.39): the final
+  measured-shared-term platoon fix made this one bucket worse (-0.461pp→-0.538pp held out on
+  2025) even though the overall change is a net win. Worth a look if walk-prop calibration in
+  low-reliability matchups gets revisited; not urgent on its own.
+- **`whiff_rate_multiplier` reconstruction** (§11.39, Finding 2): fully deleted (not kept
+  dormant per this project's usual revert discipline), so retesting it under the K-scaling
+  protocol that vindicated (then re-nulled) the walk-blend would require rebuilding it from
+  its written description first — judged too speculative to do within any single session so
+  far.
+- **Finding 4's extreme-tail-vs-uniform follow-up** (§11.39): the stacked-context-multiplier
+  overconfidence (λ<1 for home_run/strikeout) might be concentrated in the extreme-M tail
+  specifically rather than uniform across the whole range — a "cap the boost" design closer
+  to this project's existing clip-based discipline than a blanket exponent. The existing fit
+  can't distinguish the two shapes; nobody has built the test that would.
+- **M7 opponent-quality correction, foul-territory geometry, pitcher-side geometry,
+  weather×geometry interaction**: all investigated this session (§11.41, §11.44) and
+  explicitly declined — each failed its own pre-registered bar or was judged to face the same
+  expected-magnitude ceiling as an already-tested sibling mechanism. Listed here only so a
+  future session doesn't re-litigate them without first reading why they were declined.
 
-The marked frontier per §11.11 — the highest-value remaining build, with a known destination
-before starting (the diagnostic already proves the current shape is wrong).
-
-**1.1 Confirm the mechanism in real data FIRST** — the same component-level discipline this
-project already demands of every signal. Test for day-level pitcher overdispersion directly:
-for each real start, compare the variance of per-start outcome rates (wOBA-allowed, or
-K/BB/HR rate per start) against the binomial variance the pitcher's own season rate implies.
-Real day-to-day effectiveness variation shows up as excess variance beyond that binomial
-floor; a split-half check (odd vs. even PAs within the same start, do their residuals
-correlate) confirms it's a shared within-start shock, not noise. Run the same test on
-team-offense-days to size the batter-side analog too — published expectation is the pitcher
-side dominates, but measure both before assuming.
-
-**1.2 Minimal implementation once 1.1 confirms it's real**: one latent scalar per
-(pitcher-appearance, trial) — draw `g ~ Normal(0, σ²)` once, apply in odds space to that
-pitcher's whole allowed-rate vector (one shared shift moving K down and BB/hits/HR up
-together, or the reverse), mean-corrected so expected rates are unchanged in aggregate. Start
-with one global σ; only split starter-vs-reliever σ if 1.1's own measurement shows they
-differ materially. This is deliberately the smallest possible version of within-game
-correlation — one new parameter, drawn once per trial, touching no matchup logic.
-
-**1.3 Fit σ on 2023-2024, validate on 2025** (NOT on the same data used to tune it, to avoid
-overfitting the very diagnostic being targeted): sweep σ to close the dispersion diagnostic
-(std(z) → ~1.0, 13+/≤4-run tail frequencies matching reality) on the fit seasons, then check
-the held-out season's own PIT coverage at 50/80/95%.
-
-**1.4 Acceptance criteria, stated BEFORE running**: std(z) within ~0.03 of 1.0 on held-out
-data; PIT coverage CIs containing nominal; CRN-paired Brier delta not significantly worse;
-**SU expected flat and NOT the arbiter**. This targets distribution SHAPE, not matchup
-separation — judging it on SU is exactly how a good calibration fix gets wrongly reverted
-(the same mistake this session's §11.9 correction was about, in reverse). Note the explicit
-exception to §11.5's "new heterogeneity axis = full-stack risk" rule: this IS formally a new
-heterogeneity axis, but unlike the 6 that failed, it isn't trying to improve matchup
-separation — it's a correctness fix in the same family as HFA, with a diagnostic that already
-proves the current shape is wrong before any code is written. Judge it on the metric it
-targets, not the one it was never meant to move.
-
-**1.5 Measure the residual.** If a gap remains after 1.2-1.4, the leftover is within-INNING
-contagion (not just within-game) — a separate, harder build, worth attempting only if the
-residual after this phase actually justifies it.
-
-Note the ordering dependency already satisfied: without CRN pairing (§11.10), adding this new
-source of within-game variance would have wrecked the ability to measure anything ELSE
-afterward (every future A/B's noise floor would widen along with the intentional dispersion
-fix) — CRN had to come first, and now it has.
-
-### Phase 2 — Cash the calibration in where the value actually lives (one session)
-
-**2.1 Re-fit prop calibration.** `validate_prop_calibration.py`'s existing linear
-recalibration coefficients were fit under the under-dispersed model — after Phase 1 they are
-stale by construction. Re-fit and re-validate at full n once Phase 1 lands.
-
-**2.2 Build totals/margin distribution outputs** (P(total > X) across the ladder, P(team
-total > X), margin quantiles) directly from the now-correctly-dispersed trial distribution.
-This is where the dispersion fix actually converts into better posted picks: an
-under-dispersed model systematically overprices the middle and underprices the tails on
-every total, and Phase 1 removes that bias at its source.
-
-**2.3 Measure the oracle-vs-deployable gap at full n.** Scale `validate_predictive_bullpen.py`
-to the n=7237 protocol and decompose the degradation vs. the oracle backtest by component
-(predictive bullpen, predictive catcher, forecast weather, lineup projection). Whatever
-dominates that gap is a LIVE-accuracy improvement no further oracle-backtest signal work can
-buy — plausibly lineup-projection timing and bullpen usage, in that order, though this should
-be measured, not assumed.
-
-### Phase 3 — Clear the open ledger through the cheap funnel (ongoing, low effort each)
-
-Run everything below through the standard funnel (run-value screen → sliced CRN check →
-full-n confirmation, §11.10) and let most of it die cheaply rather than consuming a full
-backtest to reject:
-
-- **Bat speed and pulled-air rate, resolved permanently.** Run the run-value screen first —
-  if their maximum plausible per-game margin impact is small, reclassify as "kept on
-  component evidence, full-stack immaterial by construction" and stop re-litigating this
-  question. Only a screen showing real material impact earns one more CRN-paired full-n test.
-- **The systematic audit table** (generalizing how the GB/FB win was actually found): for
-  each of ~16 outcome categories × both sides, compute the walk-forward predictive R² of the
-  CURRENT production estimate, multiply by run-value leverage. This mechanically ranks where
-  a better estimator could matter, replacing research-pass-driven idea generation with a
-  checklist — and tells you definitively when the well is actually dry instead of guessing.
-- **The 3 smaller flagged items** (§11.8): `AGE_PEAK=29` → ~26-27 (a constants change, the
-  cheapest test in this entire queue — run it first), stolen-base battery-side suppression
-  folded into existing runner SB rates as a multiplier, reliever back-to-back-day performance
-  penalty on existing reliever rates. Plus two never-tried park/weather refinements: roof
-  status and a league-season ball/drag term.
-
-### Phase 4 — Operational hardening (background, ongoing)
-
-2026 is live and this model is presumably informing real picks: adopt rolling walk-forward
-evaluation against the current season (a weekly Brier/calibration check against the Phase 0.1
-ledger), automate the daily pipeline's completeness checks for in-season use, and version the
-model so any posted pick is traceable to a specific git hash. Unglamorous, but it's what makes
-whatever accuracy number gets quoted a real, checkable one rather than a vibe.
-
-**Sequencing logic in one line**: Phase 0 makes every future number trustworthy (and 0.3 is
-the single most informative run available this week); Phase 1 is the one remaining
-known-destination build; Phase 2 converts it into what the Discord use case actually consumes;
-Phase 3 is cheap opportunistic upside now that rejection costs minutes, not hours; Phase 4
-protects the whole thing once it's actually being used. **If only two things happen next
-session: the 2026 holdout run (0.3), then start the latent-effect measurement (1.1).**
+**Standing discipline, unchanged from the retired roadmap and still binding**: run
+candidate signals through the cheap funnel first (run-value screen → sliced CRN check →
+full-n confirmation) where the effect size plausibly warrants it, but remember §11.44's own
+finding that the screen does NOT reliably discriminate "worth backtesting" from
+"real-but-immaterial" for small, physically-plausible effects — a "passes screen" verdict is
+not a green light to skip judgment. Judge dispersion/calibration fixes on the metric they
+target (PIT coverage, bucketed calibration), not on SU. Never make a keep/revert or
+tuning decision from a holdout-season number; read it once, log it, move on. If a
+correctness bug is found, it ships regardless of its full-stack accuracy delta — the same
+standard §11.39-§11.42's whole audit was held to.
