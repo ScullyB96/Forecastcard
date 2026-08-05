@@ -464,7 +464,8 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
                     geometry_hr_enabled: bool = False,
                     geometry_xbh_enabled: bool = False,
                     cv_capture: dict | None = None,
-                    control_variate: bool = False) -> pd.DataFrame:
+                    control_variate: bool = False,
+                    platoon_tto_interaction: bool = False) -> pd.DataFrame:
     """Run the real-games oracle backtest against `shared` (from
     build_shared_tables). widen_w=1.0, shock_sigma=0.0, crn_pairing=False
     (all defaults) + seed=42 reproduces this file's own historical default
@@ -520,6 +521,12 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
     no-op -- sim.simulate_game isn't even passed a cv_state dict, so no
     extra computation happens on the hot path at all. See
     validate_control_variate.py, which is the one caller that sets this.
+
+    platoon_tto_interaction: opt-in (2026-08-05, EXPERIMENTAL -- see
+    game_simulator.SAME_HAND_TTO3_STRIKEOUT_K_ODDS_RATIO's own comment for
+    the full measurement writeup). Passed straight to GameSimulator's own
+    same-named constructor arg. False (the default) is a byte-for-byte
+    no-op.
 
     control_variate: opt-in (2026-08-04) -- when True, self-fits the
     "full" control-variate coefficient (see fit_control_variate_beta,
@@ -732,14 +739,43 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
         # stamped apply_ttop=False (finding M4): the TTOP table is fit
         # within-pitcher on starter PAs, and a reliever's own rates already
         # come from first-pass PAs -- see game_simulator.simulate_half_inning.
+        #
+        # Real bug found + fixed here (2026-08-05, compass-report-prompted
+        # investigation): the dict comprehension below used to call
+        # pitcher_profile(pid) FRESH for every inning key, even when the SAME
+        # real pid started multiple consecutive innings -- pid == home_
+        # pitcher_id is fixed per pid, so this cache is safe (never sees the
+        # same pid needing two different apply_ttop values). game_simulator.
+        # simulate_game resets each side's thruorder_counts (and re-draws the
+        # pitcher-appearance shock, task #137) via an id()-identity check
+        # against the PREVIOUS inning's pitcher-this-inning object -- a fresh
+        # dict every inning made that check ALWAYS true, even when the real
+        # pitcher hadn't changed, so times_through could never exceed 1 in
+        # this validator's oracle backtest (confirmed directly: 0 of ~6400
+        # sampled PAs reached TTO=3 across 150 games, vs ~12.5% in real PA-
+        # level data) and a multi-inning reliever's shock was silently
+        # re-drawn every inning instead of once per appearance. bullpen.
+        # sample_bullpen_plan (props.py's live/predictive path) never had
+        # this bug -- it assigns `profile_plan[inning] = starter_profile`,
+        # the SAME object, for every inning the real starter covers, and
+        # relievers there each get at most one inning by construction (no
+        # repeat-pid case to expose the bug). Caching per pid here makes the
+        # oracle backtest match that same "one stable object per real
+        # pitcher-appearance" invariant.
+        pitcher_profile_cache: dict = {}
+
+        def cached_pitcher_profile(pid, apply_ttop):
+            if pid not in pitcher_profile_cache:
+                base = pitcher_profile(pid)
+                pitcher_profile_cache[pid] = base if apply_ttop else {**base, "apply_ttop": False}
+            return pitcher_profile_cache[pid]
+
         home_bullpen = {
-            int(inn): (pitcher_profile(pid) if pid == home_pitcher_id
-                       else {**pitcher_profile(pid), "apply_ttop": False})
+            int(inn): cached_pitcher_profile(pid, pid == home_pitcher_id)
             for inn, pid in home_pitcher_by_inning.items() if pid in psnap.index
         }
         away_bullpen = {
-            int(inn): (pitcher_profile(pid) if pid == away_pitcher_id
-                       else {**pitcher_profile(pid), "apply_ttop": False})
+            int(inn): cached_pitcher_profile(pid, pid == away_pitcher_id)
             for inn, pid in away_pitcher_by_inning.items() if pid in psnap.index
         }
 
@@ -824,7 +860,8 @@ def run_validation(shared: dict, test_seasons: set[int], n_games: int, n_trials:
         # stay on the identical mechanism by construction.
 
         sim = GameSimulator(transitions, league_rates[season], rng, state_factors=state_factors[season],
-                            ttop_factors=ttop_factors[season], shock_sigma=shock_sigma)
+                            ttop_factors=ttop_factors[season], shock_sigma=shock_sigma,
+                            platoon_tto_interaction=platoon_tto_interaction)
         sim_home, sim_away = [], []
         cv_home, cv_away, cv_home_full, cv_away_full = ([], [], [], []) if cv_capture is not None \
             else (None, None, None, None)

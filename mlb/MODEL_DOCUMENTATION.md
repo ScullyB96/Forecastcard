@@ -4950,6 +4950,74 @@ effort or data availability in general.
 
 ---
 
+## 11.48 Real bug found while testing platoon×TTOP: `validate_game_simulator.py`'s
+oracle backtest never actually tracked pitcher identity across innings — fixed, shipped
+
+Surfaced while building and CRN-testing the small, narrow same-hand-strikeout-at-TTO=3
+platoon×TTOP factor (§12's "small one" open item, `SAME_HAND_TTO3_STRIKEOUT_K_ODDS_RATIO` /
+`GameSimulator.platoon_tto_interaction`, both landed as EXPERIMENTAL/opt-in, default `False`,
+a byte-for-byte no-op — see `game_simulator.py`'s own comment for the full measurement
+writeup). That factor's first CRN-paired A/B came back an exact zero on every metric —
+suspicious for a real, if small, per-PA probability shift, and worth chasing rather than
+accepting at face value.
+
+**Root cause.** `run_validation`'s `home_bullpen`/`away_bullpen` dicts were built via a dict
+comprehension calling `pitcher_profile(pid)` fresh for every inning key — even when the same
+real pid started several consecutive innings. `GameSimulator.simulate_game` resets each side's
+`thruorder_counts` (and re-draws the task #137 pitcher-appearance shock) via an `id()`-identity
+check against the previous inning's pitcher-this-inning object. A fresh dict every inning made
+that check always true, so `times_through` could never exceed 1 in this validator's oracle
+backtest — confirmed directly: 0 of ~6,400 sampled PAs reached TTO=3 across 150 games, vs.
+~12.5% in real PA-level data (post-fix: TTO=1 41.4%, TTO=2 35.6%, TTO=3 22.9% of 6,488 sampled
+PAs, matching real distribution). The same bug silently re-drew a multi-inning reliever's
+"stuff" shock every inning instead of once per real appearance.
+
+**Confirmed the live/predictive path was never affected.** `bullpen.py`'s
+`sample_bullpen_plan` (the one `props.py` actually uses) assigns `profile_plan[inning] =
+starter_profile` — the same object — for every inning the real starter covers, and gives each
+sampled reliever at most one inning by construction, so there's no repeat-pid case to expose
+the bug. This was an oracle-backtest-only defect: real production props were never affected by
+it, only the accuracy read this validator has been reporting for every A/B and holdout run
+since the oracle backtest existed.
+
+**Fix**: cache `pitcher_profile(pid)` per real pid within a game (`pitcher_profile_cache`),
+reusing one stable object across every inning key that maps to the same pid — the same
+"one object per real pitcher-appearance" invariant `sample_bullpen_plan` already had.
+
+**Measured impact — CRN-paired A/B, ON=fixed vs. OFF=bug faithfully reproduced (monkeypatched
+fresh-dict wrapper, not a separate checkout), same seed, `crn_pairing=True`:**
+
+| n (paired games) | SU delta | SU 95% CI | Brier delta | Brier 95% CI |
+|---|---|---|---|---|
+| 599 (pilot) | -1.84pp | (-4.34pp, +0.50pp) | +0.0011 | (-0.0009, +0.0031) |
+| 1,483 (scaled, per user's explicit call to get a more decisive read before deciding) | -1.35pp | (-2.90pp, +0.20pp) | +0.0019 | **(+0.0006, +0.0033)** |
+
+At n=1,483 the Brier delta is statistically significant — the fix measures worse on that
+metric, and SU is right at the edge (CI upper bound +0.20pp). Total MAE (+0.0221) and margin
+MAE (+0.0187) both trend worse too, untested for significance. One counter-signal: the PIT/
+z-score dispersion check actually improved with the fix (frac|z|>1.96: 0.0539→0.0499, almost
+exactly the 0.05 target; frac|z|>2.58: 0.0223→0.0189, closer to the 0.01 target) — the
+corrected simulator's uncertainty is better-calibrated in that specific sense even as
+headline SU/Brier tick worse.
+
+**Shipped anyway**, per this project's own standing rule (§11.39-§11.42, restated in §12): a
+genuine correctness bug ships regardless of its full-stack accuracy delta. The old behavior
+(pitcher identity never actually tracked) was never a real design choice to begin with. Most
+likely explanation for the negative delta, not confirmed: the TTOP factor magnitudes and/or
+`shock_sigma` were fit and re-tuned (§11.42's Phase D) against a simulator that silently never
+exercised real TTO=2/3 exposure or multi-inning shock persistence — i.e., those constants may
+be implicitly calibrated to the bug's distorted operating conditions rather than the real ones
+now in effect. **Flagged as an open follow-up, not re-tuned in this pass**: re-validate/re-fit
+`ttop.py`'s factors and `shock_sigma` against the now-corrected simulator before trusting either
+in isolation again.
+
+The platoon×TTOP factor itself (`SAME_HAND_TTO3_STRIKEOUT_K_ODDS_RATIO`,
+`platoon_tto_interaction=False` by default) remains built but genuinely untested — its only
+CRN read so far ran against the buggy stack, where the TTO=3 branch never fired at all. Testing
+it for real on the now-fixed stack is a separate, still-open next step.
+
+---
+
 ## 12. Suggested next steps for a future session
 
 **Status as of 2026-08-04**: the Phase 0-4 roadmap that used to occupy this section (written
@@ -4998,15 +5066,21 @@ calendar-gated, not a design or build task — just execution once October data 
 
 **4. Smaller, non-blocking open threads, each already fully diagnosed** (none currently
 scheduled — pick up opportunistically):
-- **Platoon × times-through-the-order interaction, strikeout-specific** (§11.39): a real,
-  pre-existing effect (same-hand strikeout over-predicted +1.15pp at TTO=1, under-predicted
-  at TTO=2/3) that the current architecture can't represent since platoon and TTOP are each
-  independent population-level multipliers. Building the fix means a new joint
-  (handedness × times-through) factor with its own fit and full-stack validation — **and
-  requires re-running `measure_platoon_shared_term.py` first** (its current measurement
-  already absorbs the average of this same interaction; building on top without re-measuring
-  would silently reintroduce the exact double-count this whole investigation existed to
-  kill).
+- **Platoon × times-through-the-order interaction, strikeout-specific** (§11.39, built in
+  §11.48): the `measure_platoon_shared_term.py` re-run prerequisite was already satisfied by
+  §11.42's Phase D re-tune, so the narrow same-hand-TTO=3+ strikeout factor
+  (`SAME_HAND_TTO3_STRIKEOUT_K_ODDS_RATIO`) got built and wired as an EXPERIMENTAL/opt-in flag
+  (`platoon_tto_interaction`, default `False`). Its only CRN read so far ran against the
+  oracle-backtest identity bug §11.48 also found and fixed — the TTO=3 branch never fired at
+  all — so that read is invalid. **Still open**: a real CRN-paired A/B of this factor against
+  the now-fixed stack.
+- **Re-tune TTOP factors / `shock_sigma` against the corrected simulator** (§11.48): the
+  thruorder-identity bug fix measured a statistically significant Brier degradation at
+  n=1,483 (+0.0019, CI excludes zero) even though it's a straightforward correctness fix that
+  ships regardless. Likely cause, not confirmed: `ttop.py`'s factors and/or `shock_sigma` were
+  fit against a simulator that silently never exercised real TTO=2/3 exposure or genuine
+  multi-inning shock persistence — worth a re-fit/re-validate pass before trusting either in
+  isolation again.
 - **Walk opposite-hand low-reliability platoon regression** (§11.39): the final
   measured-shared-term platoon fix made this one bucket worse (-0.461pp→-0.538pp held out on
   2025) even though the overall change is a net win. Worth a look if walk-prop calibration in

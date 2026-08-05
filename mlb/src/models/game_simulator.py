@@ -47,6 +47,28 @@ OUTCOMES = list(STABILIZATION_PA.keys())
 # decision, not a "stuff" effect) and every out/situational category.
 SHOCKED_CATEGORIES = {"walk", "hit_by_pitch", "single", "double", "triple", "home_run"}
 
+# Platoon x times-through-the-order interaction, same-hand strikeout at
+# TTO=3+ ONLY (2026-08-05, EXPERIMENTAL/opt-in -- see GameSimulator.
+# simulate_half_inning's own comment for where this applies). A compass-
+# report-prompted investigation re-measured the platoon x TTO strikeout
+# residual MODEL_DOCUMENTATION.md sec 11.39 originally diagnosed
+# (+1.15pp@TTO=1) on the CURRENT stack, after platoon_shared_term.json's
+# own M4-aligned refit -- that refit already absorbs most of the original
+# effect (its own docstring warns exactly this), so most cells came back
+# small/mixed. The one real, out-of-sample-confirmed exception: same-hand
+# strikeout at TTO=3+. Measured via a walk-forward, leakage-free re-run of
+# the REAL production combine_matchup_distribution machinery against real
+# PAs (not reimplemented): 2024 read odds ratio 1.0042 (n=9433, 1939
+# events), 2025 holdout read 1.0551 (n=9110, 1875 events) -- POOLED across
+# both (the honest estimate, not cherry-picking the larger single-season
+# read) gives 1.0282. Real but genuinely modest: the run-value screen puts
+# its per-game impact at a median ~0.008 runs (n=2430 games, 2025) -- do
+# not expect this to move full-stack SU/Brier meaningfully. Built and
+# CRN-backtested anyway to get a definitive number rather than rely on
+# that screen estimate alone (see run_validation's own platoon_tto_
+# interaction flag). False (every existing caller) is an exact no-op.
+SAME_HAND_TTO3_STRIKEOUT_K_ODDS_RATIO = 1.0282
+
 
 def _build_shock_renorm_table(sigma: float, n_s: int = 99, n_gh: int = 40) -> tuple[np.ndarray, np.ndarray]:
     """Precomputed correction c(s) making the pitcher shock mean-preserving
@@ -492,12 +514,16 @@ class GameSimulator:
     def __init__(self, transitions: TransitionTable, league_rates: dict[str, float], rng: np.random.Generator,
                  state_factors: dict[int, dict[str, float]] | None = None,
                  ttop_factors: dict[int, dict[str, float]] | None = None,
-                 shock_sigma: float = 0.0):
+                 shock_sigma: float = 0.0,
+                 platoon_tto_interaction: bool = False):
         self.transitions = transitions
         self.league_rates = league_rates
         self.rng = rng
         self.state_factors = state_factors  # {state: {outcome: factor}}, see build_state_factors_by_season
         self.ttop_factors = ttop_factors  # {times_through(capped at 3): {outcome: factor}}, see ttop.py
+        # EXPERIMENTAL/opt-in (2026-08-05) -- see SAME_HAND_TTO3_STRIKEOUT_K_
+        # ODDS_RATIO's own module-level comment. False (default) is a no-op.
+        self.platoon_tto_interaction = platoon_tto_interaction
         # Task #137 (Phase 1, latent per-pitcher-appearance shock): standard
         # deviation of the mean-preserving lognormal "stuff" shock drawn once
         # per pitcher-appearance per trial (see _draw_pitcher_shock,
@@ -887,6 +913,16 @@ class GameSimulator:
                     and pitcher.get("apply_ttop", True):
                 times_through = min(thruorder_counts.get(lineup_idx, 0) + 1, 3)
                 ttop = self.ttop_factors.get(times_through)
+                # platoon x TTOP interaction (EXPERIMENTAL/opt-in -- see
+                # SAME_HAND_TTO3_STRIKEOUT_K_ODDS_RATIO's own comment).
+                # Deliberately narrow: only this one (outcome, hand, TTO)
+                # cell, not a general joint factor -- the other cells'
+                # measured residuals were small/mixed. Copies ttop before
+                # mutating so self.ttop_factors' own cached dict is never
+                # touched (it's reused across every PA at this TTO level).
+                if self.platoon_tto_interaction and ttop is not None and is_same_hand and times_through == 3:
+                    ttop = dict(ttop)
+                    ttop["strikeout"] = ttop["strikeout"] * SAME_HAND_TTO3_STRIKEOUT_K_ODDS_RATIO
             else:
                 ttop = None
             dist = combine_matchup_distribution(
