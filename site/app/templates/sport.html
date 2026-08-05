@@ -2,6 +2,7 @@
 {% import "_game_card.html" as cards %}
 {% import "_countdown.html" as opener_ui %}
 {% import "_leaderboard.html" as board %}
+{% import "_fantasy.html" as fantasy_ui %}
 {% block title %}{{ sport|upper }} Predictions{% endblock %}
 {% block content %}
 <h1>{{ sport|upper }}</h1>
@@ -38,6 +39,9 @@
   <div class="view-toggle" data-view-toggle>
     <button type="button" class="view-toggle-btn active" data-view="games">Games</button>
     <button type="button" class="view-toggle-btn" data-view="players">Players</button>
+    {% if fantasy_leaderboard.sections %}
+    <button type="button" class="view-toggle-btn" data-view="fantasy">Fantasy</button>
+    {% endif %}
   </div>
   {% endif %}
   <div class="game-grid" data-view-panel="games">
@@ -50,6 +54,11 @@
   {% if leaderboard.sections %}
   <div data-view-panel="players" hidden>
     {{ board.leaderboard_panel(leaderboard, games) }}
+  </div>
+  {% endif %}
+  {% if fantasy_leaderboard.sections %}
+  <div data-view-panel="fantasy" hidden>
+    {{ fantasy_ui.fantasy_panel(fantasy_leaderboard) }}
   </div>
   {% endif %}
 {% elif opener %}

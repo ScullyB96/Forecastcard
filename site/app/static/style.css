@@ -681,6 +681,14 @@ h2 {
 .leaderboard-matchup { color: var(--text-faint); font-weight: 500; }
 .leaderboard-table td.num { font-weight: 700; }
 
+/* ---------- fantasy tab ---------- */
+.fantasy-omitted-note {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-meta);
+  color: var(--text-faint);
+}
+.leaderboard-table td.fantasy-points { color: var(--accent); font-weight: 800; }
+
 /* ---------- factors (debug/math panel) ---------- */
 
 .factors-panel {

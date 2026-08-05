@@ -12,7 +12,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import db, discord_notify, slack_notify
+from app import db, discord_notify, fantasy, slack_notify
 from app.access import AccessGateMiddleware, COOKIE_NAME, make_session_cookie_value, site_password
 from app.season_openers import OPENERS
 from app.team_meta import team_info
@@ -191,6 +191,46 @@ def _leaderboard(rows: list[dict], game_lookup: dict[str, str]) -> dict:
             "role": role, "label": ROLE_LABELS.get(role, "Players"),
             "columns": [{"key": c, "is_prob": prob_flags[c]} for c in columns],
             "players": players,
+        })
+    return {"sections": sections}
+
+
+def _fantasy_leaderboard(rows: list[dict], game_lookup: dict[str, str]) -> dict:
+    """Same slate-wide grouping as _leaderboard (one row per player per
+    role, merging every market into a stats dict keyed by MARKET_ABBREV),
+    but ranked by real Yahoo-default fantasy points (see fantasy.py)
+    instead of a naive unweighted sum. Roles fantasy.fantasy_points()
+    doesn't have a scoring table for (any non-MLB role today) are skipped
+    entirely -- this stays empty for NFL/NBA/NHL until each has its own
+    scoring table, the same "no data for this shape yet" gating
+    leaderboard.sections already uses to hide the Players tab there."""
+    by_role: dict[str, dict[int, dict]] = {}
+    for p in rows:
+        role = (p.get("extra") or {}).get("role")
+        if role not in fantasy.POINTS_BY_ROLE:
+            continue
+        abbrev = MARKET_ABBREV.get(p["market"], p["market"])
+        players = by_role.setdefault(role, {})
+        entry = players.setdefault(p["player_id"], {
+            "player_id": p["player_id"], "player_name": p["player_name"],
+            "game_id": p["game_id"], "matchup": game_lookup.get(p["game_id"], ""),
+            "stats": {},
+        })
+        entry["stats"][abbrev] = p.get("proj_mean")
+
+    sections = []
+    for role in sorted(by_role, key=lambda r: r != "batter"):
+        columns = list(fantasy.POINTS_BY_ROLE[role].keys())
+        players = list(by_role[role].values())
+        for e in players:
+            e["points"] = fantasy.fantasy_points(role, e["stats"])
+        players.sort(key=lambda e: e["points"] or 0.0, reverse=True)
+        for i, e in enumerate(players, start=1):
+            e["rank"] = i
+        sections.append({
+            "role": role, "label": ROLE_LABELS.get(role, "Players"),
+            "columns": columns, "players": players,
+            "omitted": fantasy.OMITTED_BY_ROLE[role],
         })
     return {"sections": sections}
 
@@ -413,6 +453,7 @@ def _render_sport(request: Request, sport: str, slate_key: str | None):
     props_by_game_id = _props_by_game_id(slate_props)
     game_lookup = {g["game_id"]: g["matchup"] for g in games}
     leaderboard = _leaderboard(slate_props, game_lookup)
+    fantasy_leaderboard = _fantasy_leaderboard(slate_props, game_lookup)
     run = db.run_for_slate(sport, slate_key) if slate_key else None
     latest = db.latest_slate_key(sport)
 
@@ -433,7 +474,7 @@ def _render_sport(request: Request, sport: str, slate_key: str | None):
     return templates.TemplateResponse(request, "sport.html", {
         "sports": db.SPORTS, "active_sport": sport, "sport": sport,
         "slate_key": slate_key, "games": games, "props_by_game_id": props_by_game_id,
-        "leaderboard": leaderboard,
+        "leaderboard": leaderboard, "fantasy_leaderboard": fantasy_leaderboard,
         "opener": OPENERS.get(sport), "run": run,
         "available_slates": available_slates,
         "slate_options": [{"key": s, "label": _slate_label(s)} for s in available_slates],

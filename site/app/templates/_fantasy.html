@@ -1,0 +1,47 @@
+{% macro fantasy_panel(fantasy_leaderboard) %}
+<div class="leaderboard">
+  {% for sec in fantasy_leaderboard.sections %}
+  <div class="leaderboard-section">
+    {% if fantasy_leaderboard.sections|length > 1 %}<h3 class="leaderboard-title">{{ sec.label }}</h3>{% endif %}
+    {% if sec.omitted %}
+    <p class="fantasy-omitted-note">Not yet included: {{ sec.omitted|join(", ") }}</p>
+    {% endif %}
+    <div class="leaderboard-table-wrap">
+      <table class="leaderboard-table">
+        <thead>
+          <tr>
+            <th data-sort-key="0" data-sort-type="num" class="sortable num">Rank</th>
+            <th data-sort-key="1" data-sort-type="text" class="sortable">Player</th>
+            <th data-sort-key="2" data-sort-type="text" class="sortable">Game</th>
+            <th data-sort-key="3" data-sort-type="num" class="sortable num sort-desc" data-sort-dir="desc">Pts</th>
+            {% for col in sec.columns %}
+            <th data-sort-key="{{ loop.index + 3 }}" data-sort-type="num" class="sortable num">{{ col }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in sec.players %}
+          <tr data-game="{{ p.game_id }}">
+            <td class="num" data-value="{{ p.rank }}">{{ p.rank }}</td>
+            <td data-value="{{ p.player_name }}">{{ p.player_name }}</td>
+            <td class="leaderboard-matchup" data-value="{{ p.matchup }}">{{ p.matchup }}</td>
+            <td class="num fantasy-points" data-value="{{ p.points if p.points is not none else '' }}">
+              {%- if p.points is not none -%}{{ '%.1f'|format(p.points) }}{%- else -%}—{%- endif -%}
+            </td>
+            {% for col in sec.columns %}
+            {% set v = p.stats.get(col) %}
+            <td class="num" data-value="{{ v if v is not none else '' }}">
+              {%- if v is none -%}—{%- else -%}{{ '%.2f'|format(v) }}{%- endif -%}
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <p class="empty-state">No fantasy-scorable players for this slate.</p>
+  {% endfor %}
+</div>
+{% endmacro %}
