@@ -101,6 +101,10 @@ from src.models.weather import (
 from src.models.weather_forecast import build_historical_game_buckets, resolve_weather_distribution, sample_weather_bucket
 from src.models.true_talent import build_debut_rate
 from src.models.validate_game_simulator import build_profile, player_game_snapshot, predominant_hand, SHOCK_SIGMA
+from src.models.park_geometry import (
+    load_park_dimensions, calibrate_scale_factor, build_batter_trajectory_history,
+    batter_geometry_hr_factor, build_ratio_outcome_table, batter_geometry_xbh_factor,
+)
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
 HIT_OUTCOMES = {"single", "double", "triple", "home_run"}
@@ -196,10 +200,30 @@ def build_generic_debut_profile(pa: pd.DataFrame, player_col: str, season: int,
             "pull_tercile": None, "effective_n": effective_n}
 
 
-def build_pregame_context(pa: pd.DataFrame) -> dict:
+def build_pregame_context(pa: pd.DataFrame, geometry_hr_enabled: bool = False,
+                           geometry_xbh_enabled: bool = False) -> dict:
     """Every walk-forward table the props generator needs, built once and
     reused across as many games as you want to generate props for -- the
-    expensive part; generating props for one more game after this is cheap."""
+    expensive part; generating props for one more game after this is cheap.
+
+    geometry_hr_enabled/geometry_xbh_enabled (2026-08-05, EXPERIMENTAL/
+    opt-in -- see park_geometry.py, MODEL_DOCUMENTATION.md sec 11.44): the
+    batter-level park-geometry HR/doubles/triples factors were built and
+    CRN-tested against the ORACLE backtest (validate_game_simulator.py) but
+    never wired into this live/predictive props path at all -- this is
+    that wiring, so validate_prop_calibration.py can check whether a
+    real-but-full-stack-immaterial signal on SU/Brier is ALSO immaterial on
+    the actual prop probabilities it's meant to move (HR/TB props). Both
+    False (the default, every existing caller) is a byte-for-byte no-op --
+    geometry_dims/geometry_history/geometry_ratio_table stay None below,
+    generate_game_props's own geometry lookups all short-circuit to None."""
+    geometry_dims, geometry_history, geometry_ratio_table = None, None, None
+    if geometry_hr_enabled or geometry_xbh_enabled:
+        geometry_dims = load_park_dimensions()
+        geometry_scale = calibrate_scale_factor(pa, geometry_dims)["scale"]
+        geometry_history = build_batter_trajectory_history(pa, geometry_scale)
+        if geometry_xbh_enabled:
+            geometry_ratio_table = build_ratio_outcome_table(pa, geometry_dims, geometry_scale)
     # park-neutralize batter/pitcher rates BEFORE this project's own per-game
     # park_factors multiplier acts on them below (see park_factors_wide) --
     # otherwise a park effect gets double-counted (true_talent.build_pregame_rates).
@@ -326,6 +350,8 @@ def build_pregame_context(pa: pd.DataFrame) -> dict:
         # already in the exact shape nearest_prior_bullpen expects.
         defense_snap=defense_snap,
         transitions=TransitionTable(pa),
+        geometry_dims=geometry_dims, geometry_history=geometry_history,
+        geometry_ratio_table=geometry_ratio_table,
     )
 
 
@@ -447,8 +473,27 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
             gb_rate = gbrow["pregame_gb_rate"] if gbrow is not None else None
         sprint_speed = speed_snap.loc[pid] if pid in speed_snap.index else None
         bat_speed = bat_speed_snap.loc[pid] if pid in bat_speed_snap.index else None
+        # park-geometry factors (2026-08-05, EXPERIMENTAL/opt-in -- see
+        # build_pregame_context's own docstring): None on both counts
+        # (ctx["geometry_history"] absent, i.e. build_pregame_context's
+        # flags were both False) is a byte-for-byte no-op, same as every
+        # other optional signal in this function.
+        geom_factor = None
+        if ctx.get("geometry_history") is not None:
+            geom_factor = batter_geometry_hr_factor(
+                ctx["geometry_history"], pid, season, home_team, ctx["geometry_dims"])
+        geom_2b, geom_3b = None, None
+        if ctx.get("geometry_history") is not None and ctx.get("geometry_ratio_table") is not None:
+            geom_2b = batter_geometry_xbh_factor(
+                ctx["geometry_history"], pid, season, home_team, ctx["geometry_dims"],
+                ctx["geometry_ratio_table"], "double")
+            geom_3b = batter_geometry_xbh_factor(
+                ctx["geometry_history"], pid, season, home_team, ctx["geometry_dims"],
+                ctx["geometry_ratio_table"], "triple")
         return build_profile(row, prow, hand, pull_tercile=tercile, pregame_xbacon=xbacon, pregame_barrel_rate=barrel,
                               pregame_bacon_gb=bacon_gb, pregame_sprint_speed=sprint_speed, pregame_gb_rate=gb_rate,
+                              geometry_hr_factor=geom_factor, geometry_double_factor=geom_2b,
+                              geometry_triple_factor=geom_3b,
                               pregame_bat_speed=bat_speed, pregame_pulled_air_rate=pulled_air)
 
     def _pitcher_gb_fb(pid):

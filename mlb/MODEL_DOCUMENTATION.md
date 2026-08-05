@@ -4820,6 +4820,46 @@ not the breakthrough that would have unblocked this specific backlog.
 
 ---
 
+## 11.46 Do the park-geometry factors matter for PROP calibration, even
+though they're immaterial for game-level SU/Brier? (2026-08-05) — checked
+directly, still no
+
+§11.44's park-geometry HR/XBH factors were only ever tested against
+game-level SU/Brier (tasks #188-191) — a real, physically-grounded signal
+could still be immaterial in aggregate (whole-game outcome) while moving a
+specific player's specific prop line. Wired `geometry_hr_enabled`/
+`geometry_xbh_enabled` into `props.py`'s live/predictive path for the
+first time (`build_pregame_context`, `generate_game_props`'s `batter_
+profile` — previously only `game_simulator.py`'s oracle-backtest path had
+this), then ran `validate_prop_calibration_geometry.py` (new script): OFF
+vs. ON, same real games/seasons, n=5,399 batter-games (n=300 games, 150
+trials, seasons 2024-2025).
+
+**Result: no, checked directly, and if anything very slightly worse.**
+`p_1plus_hr` (the HR prop geometry_hr_factor directly targets): Brier
+0.1009→0.1014 (worse), calibration slope 0.899→0.775 (moved further from
+1.0, i.e. more overconfident). `p_2plus_hits` (closest existing proxy for
+the XBH factor): Brier unchanged (0.1700→0.1700), slope moved marginally
+toward 1.0 (1.117→1.096) but correlation dropped (0.911→0.876) — a wash,
+not an improvement. `mean_hits` MAE: unchanged to 4 decimals
+(0.6898→0.6897). Every effect here is small enough to plausibly be noise,
+but none of them point toward "this matters for props" — the honest
+answer to the report's own suggested follow-up is a clean no, not just at
+the game level but at the prop level too.
+
+**Shipped, still opt-in**: the `props.py` wiring itself (`geometry_hr_
+enabled`/`geometry_xbh_enabled` on `build_pregame_context`, both default
+`False`) is a real, correct, byte-for-byte-no-op-when-off addition — kept
+as the same class of "built + validated + not deployed" artifact as the
+underlying factors themselves (§11.44), since it may be useful if a
+future, stronger version of the geometry signal is built. New
+`src/models/validate_prop_calibration_geometry.py` kept as the permanent
+test script for the same reason. This closes out the report's own
+suggestion #3 with a real, direct answer rather than an assumption either
+way.
+
+---
+
 ## 12. Suggested next steps for a future session
 
 **Status as of 2026-08-04**: the Phase 0-4 roadmap that used to occupy this section (written

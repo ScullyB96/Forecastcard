@@ -65,13 +65,20 @@ def _real_pitcher_outcomes(game_pa: pd.DataFrame) -> pd.DataFrame:
 
 
 def collect_prop_predictions(pa: pd.DataFrame, seasons=TEST_SEASONS, n_games: int = N_GAMES,
-                              n_trials: int = N_TRIALS, random_state: int = 1) -> dict[str, pd.DataFrame]:
+                              n_trials: int = N_TRIALS, random_state: int = 1,
+                              geometry_hr_enabled: bool = False,
+                              geometry_xbh_enabled: bool = False) -> dict[str, pd.DataFrame]:
     """Runs generate_game_props on n_games real completed games (split evenly
     across `seasons`) and returns {batter_props, pitcher_props}, each one row
     per (game_pk, player_id) with both the model's predicted prop
-    probabilities and the real outcome from that specific game."""
+    probabilities and the real outcome from that specific game.
+
+    geometry_hr_enabled/geometry_xbh_enabled: forwarded to build_pregame_
+    context (2026-08-05, see its own docstring) -- both False (default) is
+    a byte-for-byte no-op."""
     print("building pregame context (all walk-forward tables)...", flush=True)
-    ctx = build_pregame_context(pa)
+    ctx = build_pregame_context(pa, geometry_hr_enabled=geometry_hr_enabled,
+                                 geometry_xbh_enabled=geometry_xbh_enabled)
 
     schedules, lineups = {}, {}
     for season in seasons:
