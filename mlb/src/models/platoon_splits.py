@@ -97,9 +97,19 @@ SPLIT_RATE_PRIOR_PA = 20  # small Bayesian prior for the observed same/opp rate
 
 def league_platoon_multiplier(pa: pd.DataFrame, outcome: str, target_season: int) -> float:
     """odds(opposite-hand rate) / odds(same-hand rate), league-wide, using
-    only seasons strictly before target_season (no leakage)."""
+    only seasons strictly before target_season (no leakage) -- EXCEPT the
+    true cold-start season (2026-08-04 audit, task #131: same class of
+    unavoidable exception as true_talent.build_preseason_priors and
+    game_simulator.build_league_rates_by_season -- a real rate-ratio anchor
+    has no neutral placeholder value the way a multiplicative factor table
+    does, so the very first season with zero prior data falls back to that
+    season's own rate). Only reachable in practice for a cell the measured
+    shared-term table (_measured_shared_term_for) has no coverage for at
+    all, which per that function's own docstring is specifically the true
+    cold-start season -- not a live per-PA leak for any season with real
+    prior data."""
     prior = pa[pa["season"] < target_season]
-    ref = prior if len(prior) else pa[pa["season"] == target_season]
+    ref = prior if len(prior) else pa[pa["season"] == target_season]  # true cold start only, see above
     same = ref[ref["stand"] == ref["p_throws"]]
     opp = ref[ref["stand"] != ref["p_throws"]]
     same_rate = (same["outcome"] == outcome).mean()
