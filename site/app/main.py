@@ -65,8 +65,9 @@ templates.env.filters["is_stale"] = _is_stale
 # market this list doesn't know about yet (a new sport, a new stat) still
 # renders instead of erroring, just without a curated position.
 MARKET_ORDER = [
-    "HR", "Hits", "Total Bases", "RBI", "BB", "Batter Strikeouts",
-    "Strikeouts", "Walks Allowed", "Hits Allowed", "Runs Allowed", "Batters Faced",
+    "HR", "Hits", "Total Bases", "RBI", "BB", "Stolen Bases", "Hit By Pitch", "Batter Strikeouts",
+    "Innings Pitched", "Strikeouts", "Walks Allowed", "Hits Allowed", "Hit By Pitch Allowed",
+    "Runs Allowed", "Batters Faced",
 ]
 _MARKET_RANK = {m: i for i, m in enumerate(MARKET_ORDER)}
 
@@ -76,8 +77,9 @@ _MARKET_RANK = {m: i for i, m in enumerate(MARKET_ORDER)}
 # ever fails to render, just without a shortened label.
 MARKET_ABBREV = {
     "HR": "HR", "Hits": "H", "Total Bases": "TB", "RBI": "RBI", "BB": "BB",
-    "Batter Strikeouts": "K", "Strikeouts": "K", "Walks Allowed": "BB",
-    "Hits Allowed": "H", "Runs Allowed": "R", "Batters Faced": "BF",
+    "Stolen Bases": "SB", "Hit By Pitch": "HBP",
+    "Batter Strikeouts": "K", "Innings Pitched": "IP", "Strikeouts": "K", "Walks Allowed": "BB",
+    "Hits Allowed": "H", "Hit By Pitch Allowed": "HBP", "Runs Allowed": "R", "Batters Faced": "BF",
 }
 
 # Column order for the slate-wide leaderboard, keyed by abbreviation

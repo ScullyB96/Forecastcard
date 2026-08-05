@@ -45,6 +45,7 @@ import numpy as np
 import pandas as pd
 
 from src.models.base_out_transitions import TransitionTable
+from src.models.baserunning import build_pregame_sb_rates, build_season_sb_stats
 from src.models.blowout import build_position_player_profile
 from src.models.bullpen import (
     build_all_appearance_log,
@@ -109,6 +110,19 @@ from src.utils.paths import DATA_PROCESSED, DATA_RAW
 
 HIT_OUTCOMES = {"single", "double", "triple", "home_run"}
 TOTAL_BASES = {"single": 1, "double": 2, "triple": 3, "home_run": 4}
+# Outs the PITCHER is credited with per outcome (2026-08-05, fantasy tab
+# improvement -- see main.py's _pitcher_props docstring, which already
+# described "outs recorded (an innings-pitched proxy)" as a real column
+# before it actually existed). Every one of the 16 OUTCOMES categories
+# (true_talent.STABILIZATION_PA_BATTER) is covered explicitly rather than
+# defaulting unlisted outcomes to 0, so a future new outcome category fails
+# loudly (KeyError) instead of silently under-counting outs.
+OUTS_PRODUCED = {
+    "strikeout": 1, "field_out": 1, "sac_fly": 1, "sac_bunt": 1, "fielders_choice": 1,
+    "double_play": 2, "triple_play": 3,
+    "walk": 0, "intent_walk": 0, "hit_by_pitch": 0, "single": 0, "double": 0,
+    "triple": 0, "home_run": 0, "field_error": 0, "catcher_interf": 0,
+}
 N_TRIALS = 1000
 
 # Task #154 (2026-07-25 prop-rules audit) -- see module docstring for the
@@ -252,6 +266,17 @@ def build_pregame_context(pa: pd.DataFrame, geometry_hr_enabled: bool = False,
     defense_snap = pd.concat(defense_snap_frames, ignore_index=True)
     pull_rate_pa = build_pull_rate_by_season(pa)
     pull_rate_snapshot = build_pull_rate_snapshot(pa, pull_rate_pa)
+    # Stolen-base rates (2026-08-05, fantasy tab improvement): walk-forward
+    # attempt_rate/success_rate per batter, built ONCE per season the same
+    # way sprint_speed_by_season/bat_speed_by_season are below. Used purely
+    # as an INFORMATIONAL expected-SB estimate for the Fantasy tab (see
+    # generate_game_props's own use below) -- NOT re-injected into the
+    # simulator's own outcome sampling, which is exactly what the 2026-08-03
+    # audit's finding M5 retired (the explicit pre-PA SB layer double-
+    # counted movement already embedded in the resampled transitions). This
+    # is a side calculation with zero effect on simulated scores/win probs.
+    sb_season_stats = build_season_sb_stats(pa)
+    sb_rates_by_season = {season: build_pregame_sb_rates(sb_season_stats, season) for season in pa["season"].unique()}
     pa_with_weather = attach_weather_bucket(pa, all_schedules)
     pa_with_weather = attach_pull_tercile_column(pa_with_weather, pull_rate_pa)
     weather_factors_by_season = build_weather_factors_by_season(pa_with_weather)
@@ -352,6 +377,7 @@ def build_pregame_context(pa: pd.DataFrame, geometry_hr_enabled: bool = False,
         transitions=TransitionTable(pa),
         geometry_dims=geometry_dims, geometry_history=geometry_history,
         geometry_ratio_table=geometry_ratio_table,
+        sb_rates_by_season=sb_rates_by_season,
     )
 
 
@@ -808,8 +834,9 @@ def generate_game_props(ctx: dict, season: int, game_pk: int, home_team: str, aw
 
     events_df = pd.DataFrame(all_events)
     scores_df = pd.DataFrame(final_scores, columns=["home_score", "away_score"])
+    sb_rates = ctx["sb_rates_by_season"].get(season, pd.DataFrame(columns=["player", "attempt_rate", "success_rate"]))
     return {
-        "batter_props": _batter_props(events_df, n_trials),
+        "batter_props": _attach_expected_sb(_batter_props(events_df, n_trials), sb_rates),
         "pitcher_props": _pitcher_props(events_df, n_trials),
         "inning_props": _inning_props(events_df, n_trials),
         "game_props": _game_props(scores_df, n_trials),
@@ -898,6 +925,7 @@ def _batter_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
     events_df["is_hr"] = events_df["outcome"] == "home_run"
     events_df["is_bb"] = events_df["outcome"].isin({"walk", "intent_walk"})
     events_df["is_k"] = events_df["outcome"] == "strikeout"
+    events_df["is_hbp"] = events_df["outcome"] == "hit_by_pitch"
     events_df["bases"] = events_df["outcome"].map(TOTAL_BASES).fillna(0)
     # Task #154: a run scored on a PA whose outcome is in RBI_EXCLUDED_OUTCOMES
     # (double_play, field_error) doesn't count toward this batter's RBI prop --
@@ -907,7 +935,7 @@ def _batter_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
     events_df["rbi_eligible_runs"] = events_df["runs"].where(~events_df["outcome"].isin(RBI_EXCLUDED_OUTCOMES), 0)
 
     per_trial = events_df.groupby(["batter_id", "trial"]).agg(
-        hits=("is_hit", "sum"), hr=("is_hr", "sum"), bb=("is_bb", "sum"),
+        hits=("is_hit", "sum"), hr=("is_hr", "sum"), bb=("is_bb", "sum"), hbp=("is_hbp", "sum"),
         k=("is_k", "sum"), rbi=("rbi_eligible_runs", "sum"), bases=("bases", "sum"), pa=("outcome", "size"),
     ).reset_index()
 
@@ -924,12 +952,34 @@ def _batter_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
             "mean_hits": g["hits"].mean(),
             "mean_hr": g["hr"].mean(),
             "mean_bb": g["bb"].mean(),
+            "mean_hbp": g["hbp"].mean(),
             "mean_rbi": g["rbi"].mean(),
             "mean_k": g["k"].mean(),
         })
 
     result = per_trial.groupby("batter_id").apply(summarize, include_groups=False)
     return _apply_batter_prop_calibration(result)
+
+
+def _attach_expected_sb(batter_props: pd.DataFrame, sb_rates: pd.DataFrame) -> pd.DataFrame:
+    """Attach a purely-informational expected_sb column (2026-08-05, fantasy
+    tab improvement, task #207). No per-PA on-base-state is tracked in
+    events_df (that lives inside the simulator's own transition sampling),
+    so game-level SB opportunities are approximated as non-HR times on base
+    (hits - HR + BB + HBP), scaled by this batter's own walk-forward
+    attempt_rate x success_rate (baserunning.build_pregame_sb_rates). This
+    is display-only -- NOT fed back into the simulator's outcome sampling,
+    which is exactly what the 2026-08-03 audit's finding M5 retired (see
+    build_pregame_context's sb_rates_by_season comment). A batter with no
+    rate data (debut, or a season with zero prior stolen_bases.parquet
+    history) gets NaN here rather than a fabricated 0 or an error."""
+    on_base_non_hr = batter_props["mean_hits"] - batter_props["mean_hr"] + batter_props["mean_bb"] + batter_props["mean_hbp"]
+    if sb_rates.empty:
+        batter_props["expected_sb"] = np.nan
+        return batter_props
+    rate_product = sb_rates.set_index("player")["attempt_rate"] * sb_rates.set_index("player")["success_rate"]
+    batter_props["expected_sb"] = on_base_non_hr * batter_props.index.map(rate_product)
+    return batter_props
 
 
 def _pitcher_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
@@ -951,16 +1001,27 @@ def _pitcher_props(events_df: pd.DataFrame, n_trials: int) -> pd.DataFrame:
     events_df["is_k"] = events_df["outcome"] == "strikeout"
     events_df["is_bb"] = events_df["outcome"].isin({"walk", "intent_walk"})
     events_df["is_hit"] = events_df["outcome"].isin(HIT_OUTCOMES)
+    events_df["is_hbp"] = events_df["outcome"] == "hit_by_pitch"
+    events_df["outs"] = events_df["outcome"].map(OUTS_PRODUCED)
 
     per_trial = events_df.groupby(["pitcher_id", "trial"]).agg(
-        k=("is_k", "sum"), bb=("is_bb", "sum"), hits=("is_hit", "sum"),
-        runs_allowed=("runs", "sum"), batters_faced=("outcome", "size"),
+        k=("is_k", "sum"), bb=("is_bb", "sum"), hits=("is_hit", "sum"), hbp=("is_hbp", "sum"),
+        runs_allowed=("runs", "sum"), batters_faced=("outcome", "size"), outs=("outs", "sum"),
     ).reset_index()
 
     def summarize(g):
         return pd.Series({
             "mean_k": g["k"].mean(), "mean_bb": g["bb"].mean(), "mean_hits_allowed": g["hits"].mean(),
+            "mean_hbp_allowed": g["hbp"].mean(),
             "mean_runs_allowed": g["runs_allowed"].mean(), "mean_batters_faced": g["batters_faced"].mean(),
+            # Outs recorded per trial this pitcher appeared -- a real,
+            # directly-simulated innings-pitched proxy (2026-08-05, fantasy
+            # tab improvement), not a pregame estimate: derived from the
+            # SAME per-PA event stream as every other stat here via
+            # OUTS_PRODUCED, so it applies uniformly to starters AND
+            # relievers alike (unlike bullpen.build_expected_starter_innings,
+            # which only has a meaningful estimate for starters).
+            "mean_outs": g["outs"].mean(), "mean_innings": g["outs"].mean() / 3,
             "p_6plus_k": (g["k"] >= 6).mean(),
             # 2026-08-03 audit, finding M22: per_trial only has rows for
             # trials where this pitcher actually appeared, so every mean

@@ -62,6 +62,12 @@ BATTER_MARKETS = {
     # on ON CONFLICT and drop one row. Confirmed against real 2026-07-25
     # data: 6 real two-way-appearance collisions before this rename.
     "mean_k": ("Batter Strikeouts", "mean"),
+    # Fantasy tab improvement (2026-08-05, task #208) -- HBP is a real
+    # simulated outcome (true_talent.STABILIZATION_PA_BATTER), just never
+    # aggregated/exported before. expected_sb is display-only (see
+    # props._attach_expected_sb's docstring for the M5-safety rationale).
+    "mean_hbp": ("Hit By Pitch", "mean"),
+    "expected_sb": ("Stolen Bases", "mean"),
 }
 PITCHER_MARKETS = {
     "mean_k": ("Strikeouts", "mean"),
@@ -69,6 +75,12 @@ PITCHER_MARKETS = {
     "mean_hits_allowed": ("Hits Allowed", "mean"),
     "mean_runs_allowed": ("Runs Allowed", "mean"),
     "mean_batters_faced": ("Batters Faced", "mean"),
+    # Fantasy tab improvement (2026-08-05, task #208): mean_innings is the
+    # single largest positive component of real Yahoo pitcher scoring and
+    # was the direct cause of every pitcher showing a negative total before
+    # this was added -- see props._pitcher_props's OUTS_PRODUCED comment.
+    "mean_hbp_allowed": ("Hit By Pitch Allowed", "mean"),
+    "mean_innings": ("Innings Pitched", "mean"),
 }
 
 GAME_EXTRA_COLUMNS = [
