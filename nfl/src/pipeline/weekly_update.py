@@ -73,6 +73,24 @@ CALIBRATION_SEASONS = {2022, 2023, 2024, 2025}  # most recent, non-COVID-anomalo
 # weekly auto-recompute would re-run that judgment-laden process with no human review.
 SWAP_B_MARKET = 2.970
 
+# Win-probability calibration for the game simulator's recentered win prob (review round 4's
+# recentering fix, re-validated + this correction added 2026-08 -- see
+# validate_win_prob_calibration.py). Recentering was verified exact by construction and,
+# separately, shown to genuinely improve Brier/CRPS over the raw simulator on TEST -- but the
+# recentered probability itself still shows a real, out-of-sample-confirmed miscalibration
+# pattern (overconfident near 0.5, underconfident in its most lopsided games). A strict
+# CALIB=2022-2023 -> HOLDOUT=2024-2025 split (never overlapping either the TRAIN=2018-2021
+# drive pools or each other) found linear-refit narrowly beat isotonic and Beta calibration on
+# HOLDOUT Brier (0.2064 vs 0.2065 vs 0.2067, vs. 0.2084 uncalibrated) -- same decision rule as
+# TD_PROB_CALIB (§9.4): linear ships since nothing beat it outright. FROZEN, not auto-refit
+# every run, unlike TD_PROB_CALIB -- doing this safely without leakage would require
+# re-simulating years of history walk-forward every pipeline run (this simulator's drive pools
+# are a single fixed TRAIN-period pool, not internally walk-forward like the share/rate
+# engines TD_PROB_CALIB's inputs come from), not worth the runtime cost for a ~1% Brier gain.
+# Fit on all of 2022-2025 (the strict split above already answered the out-of-sample question).
+WIN_PROB_CALIB_A = -0.1467
+WIN_PROB_CALIB_B = 1.2790
+
 # TD-probability calibration: TD_PROB_CALIB_A/B is now AUTO-REFIT LINEAR every pipeline run
 # (review round 4, #7; see the computation below, near calib_bucket_means) -- not a frozen
 # literal, and not isotonic (round 3's choice, reverted -- isotonic underperformed a strict
@@ -592,11 +610,16 @@ if __name__ == "__main__":
             # location.
             recentered_margins = sim_result["margins"] - sim_result["margin_mean"] + our_margin
             recentered_win_prob = float((recentered_margins > 0).mean())
+            # Calibration correction on top of recentering (see WIN_PROB_CALIB_A/B's own
+            # comment above) -- recentering fixes LOCATION consistency with our_margin;
+            # this fixes a separate, out-of-sample-confirmed miscalibration in the resulting
+            # probability itself.
+            calibrated_win_prob = min(max(WIN_PROB_CALIB_A + WIN_PROB_CALIB_B * recentered_win_prob, 0.0), 1.0)
 
             sim_margin_std = round(sim_result["margin_std"], 2)
-            sim_home_win_prob = round(recentered_win_prob, 3)
-            sim_home_moneyline = american_odds_from_prob(recentered_win_prob)
-            sim_away_moneyline = american_odds_from_prob(1 - recentered_win_prob)
+            sim_home_win_prob = round(calibrated_win_prob, 3)
+            sim_home_moneyline = american_odds_from_prob(calibrated_win_prob)
+            sim_away_moneyline = american_odds_from_prob(1 - calibrated_win_prob)
 
             # Ship the simulated total distribution (review round 4, #5), unblocked by the same
             # recentering trick: total was held back because its LOCATION trails the top-down

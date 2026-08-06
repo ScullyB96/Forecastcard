@@ -1301,15 +1301,53 @@ the simulator's real value-add remains its *shape* (skew, heavy tails, key-numbe
 §9.6 and the alt-line/team-total framing above), not raw Brier/CRPS superiority over a simpler
 model, consistent with how this has been framed since Phase 2.
 
-**One genuine, not-yet-acted-on finding from this re-validation**: the recentered win-probability
-reliability table shows a real-looking miscalculation pattern, not pure noise-shaped scatter —
-predicted 44.3% actual 35.8% in the (0.4, 0.5] bucket (n=212, overconfident toward the home
-team), but predicted 76.6% actual 83.7% in the (0.7, 1.0] bucket (n=166, underconfident in
-the model's most lopsided games). Not yet bootstrap-CI'd to rule out sampling noise, and not
-acted on — flagging as a legitimate candidate for a future isotonic/Platt recalibration pass on
-`sim_home_win_prob`, the same treatment already validated for `TD_PROB_CALIB` (§9.4), rather
-than assuming the raw simulator output is already well-calibrated just because it's a real
-Monte Carlo distribution.
+**Follow-up, same day: the recentered win-probability reliability table showed a real-looking
+miscalibration pattern** (predicted 44.3% actual 35.8% in the (0.4, 0.5] bucket, overconfident
+toward the home team; predicted 76.6% actual 83.7% in the (0.7, 1.0] bucket, underconfident in
+the model's most lopsided games) — not acted on immediately above, but investigated the same
+day via `src/models/validate_win_prob_calibration.py` (§9.5.1 below) rather than left as an
+unresolved flag.
+
+### 9.5.1 Win-probability calibration correction (`WIN_PROB_CALIB_A/B`, 2026-08)
+
+The pattern above was measured across all of TEST=2022-2025 scored by a single TRAIN-fit
+simulator — real, but not yet a genuine calibration-fit/holdout split (no in-sample leakage,
+since the pools never touch TEST, but also no confirmation the pattern holds on data never
+touched while choosing a fix). Built that split: `CALIB=2022-2023` (fit candidate calibration
+maps) → `HOLDOUT=2024-2025` (score them, never touched while fitting) — deliberately NOT a
+TRAIN-games comparison, unlike `TD_PROB_CALIB`'s (§9.4), because this simulator's drive pools
+are a single fixed pool built from all of TRAIN at once (not internally walk-forward like the
+share/rate engines), so a TRAIN game's own drives sit inside the very pool that simulates it —
+fitting a calibration map on TRAIN games here would risk real leakage that doesn't exist for
+`TD_PROB_CALIB`'s walk-forward-by-construction inputs.
+
+The miscalibration pattern reproduced independently on this genuinely held-out split (HOLDOUT
+(0.4,0.5] bucket: predicted 44.4%, actual 39.8%, n=83; (0.7,1.0] bucket: predicted 76.5%,
+actual 79.0%, n=124) — not a fluke of the first check. Same decision rule as §9.4 (auto-refit
+linear ships as default; isotonic/Beta only promoted if one wins the strict comparison
+outright): fit linear-refit/isotonic/Beta calibration on CALIB, scored all three on HOLDOUT
+Brier:
+
+| | Brier (HOLDOUT=2024-2025, n=544) |
+|---|---|
+| No calibration | 0.2084 |
+| Linear-refit | **0.2064** (best) |
+| Isotonic | 0.2065 |
+| Beta | 0.2067 |
+
+All three beat no-calibration; none beat linear-refit outright, so linear-refit ships, per the
+established rule. **Frozen, not auto-refit every run** (unlike `TD_PROB_CALIB`) — for the same
+reason a TRAIN-games comparison was unsafe above: auto-refitting safely in production would
+require re-simulating years of history walk-forward on every pipeline run, not worth the
+runtime cost for a ~1% Brier improvement. Refit one final time on all of CALIB+HOLDOUT
+(2022-2025, n=1087 — the strict split already answered the out-of-sample question, so the
+shipped constant uses every available point): `WIN_PROB_CALIB_A=-0.1467`,
+`WIN_PROB_CALIB_B=1.2790`, applied in `weekly_update.py` as
+`clip(A + B*recentered_win_prob, 0, 1)`, layered on top of (not replacing) the recentering fix
+above — recentering fixes LOCATION consistency with `our_margin`; this fixes calibration of
+the resulting probability itself. Verified on a live Week 1 2026 slate: win probabilities range
+32.7%–90.2% across 16 games, moneylines/margins move in the expected direction together, no
+degenerate values.
 
 **Total is now shipped too (review round 4, #5), unblocked by the same fix.** Total was held
 back because its MAE (12.28) trails the top-down model's (10.20) — but that gap is location,
