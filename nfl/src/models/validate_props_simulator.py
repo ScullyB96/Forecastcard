@@ -8,6 +8,13 @@ pricing) stating plainly whether the improvement is large enough to matter for b
 
 Measurement only -- no pipeline wiring change. Walk-forward: residual pools + share engine
 fit on TRAIN=2018-2021 only, scored on TEST=2022-2025.
+
+**2026-08 addition**: also compares TouchCountSimulator's default (raw, non-demeaned
+bootstrap) against its `demean=True` option -- an external review flagged the raw bootstrap's
+real, non-uniform per-tier mean bias (fringe +0.67 SD, role_player +0.26 SD, primary ~0.01 SD
+on TRAIN) as reinjecting an unintended bias into every simulated trial. Tested directly rather
+than assumed: see MODEL_DOCUMENTATION.md §9.6.1 for the result and why it's the OPPOSITE of
+what that framing predicted.
 """
 
 import numpy as np
@@ -42,7 +49,10 @@ if __name__ == "__main__":
 
     train_result = tgt_result[tgt_result["season"].isin(TRAIN_SEASONS)]
     resid_table = build_standardized_residuals(train_result, "target_share_calc", "team_targets", "targets")
+    print("per-tier residual mean (TRAIN) -- the bias the demeaning comparison below tests:")
+    print(resid_table.groupby("usage_tier")["standardized_resid"].agg(["mean", "std", "count"]).round(3))
     simulator = TouchCountSimulator(resid_table, seed=0)
+    simulator_demeaned = TouchCountSimulator(resid_table, seed=0, demean=True)
 
     test = tgt_result[tgt_result["season"].isin(TEST_SEASONS)].copy()
     test = test[(test["pregame_target_share_calc"] > 0.03) & (test["team_targets"] > 0)]
@@ -54,22 +64,27 @@ if __name__ == "__main__":
         p_naive = 1 - stats.binom.cdf(thresh - 1, test["team_targets"], test["pregame_target_share_calc"])
 
         sim_probs = np.empty(len(test))
+        sim_probs_demeaned = np.empty(len(test))
         for i, row in enumerate(test.itertuples()):
             sims = simulator.simulate(row.pregame_target_share_calc, row.team_targets, n_trials=N_TRIALS)
+            sims_dm = simulator_demeaned.simulate(row.pregame_target_share_calc, row.team_targets, n_trials=N_TRIALS)
             sim_probs[i] = (sims >= thresh).mean()
+            sim_probs_demeaned[i] = (sims_dm >= thresh).mean()
 
         y = (test["targets"] >= thresh).to_numpy().astype(float)
         corr_naive = np.corrcoef(p_naive, y)[0, 1]
         corr_sim = np.corrcoef(sim_probs, y)[0, 1]
+        corr_dm = np.corrcoef(sim_probs_demeaned, y)[0, 1]
         print(f"--- threshold >= {thresh} targets ---")
-        print(f"  naive Binomial:      corr={corr_naive:.4f}  Brier={brier(p_naive, y):.5f}  log-loss={log_loss(p_naive, y):.5f}")
-        print(f"  bootstrap simulator: corr={corr_sim:.4f}  Brier={brier(sim_probs, y):.5f}  log-loss={log_loss(sim_probs, y):.5f}")
+        print(f"  naive Binomial:        corr={corr_naive:.4f}  Brier={brier(p_naive, y):.5f}  log-loss={log_loss(p_naive, y):.5f}")
+        print(f"  bootstrap (raw, ship): corr={corr_sim:.4f}  Brier={brier(sim_probs, y):.5f}  log-loss={log_loss(sim_probs, y):.5f}")
+        print(f"  bootstrap (demeaned):  corr={corr_dm:.4f}  Brier={brier(sim_probs_demeaned, y):.5f}  log-loss={log_loss(sim_probs_demeaned, y):.5f}")
         diffs_by_threshold[thresh] = np.abs(sim_probs - p_naive)
         print(f"  |bootstrap - naive| probability gap: mean={diffs_by_threshold[thresh].mean():.4f}  median={np.median(diffs_by_threshold[thresh]):.4f}\n")
 
         if thresh == 7:
             print("=== R3.10: tail calibration, top 5% of predicted P(targets>=7) ===")
-            for label, p in [("naive", p_naive), ("bootstrap", sim_probs)]:
+            for label, p in [("naive", p_naive), ("bootstrap raw", sim_probs), ("bootstrap demeaned", sim_probs_demeaned)]:
                 cutoff = np.quantile(p, 0.95)
                 top = y[p >= cutoff]
                 print(f"  {label}: predicted-mean in top 5%={p[p >= cutoff].mean():.3f}  realized rate={top.mean():.3f}  n={len(top)}")

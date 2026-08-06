@@ -747,6 +747,53 @@ at the edge of conventional significance (~95th percentile), not comfortably in 
 provisionally: real-looking, not yet proven at the strength previously claimed, with the
 production coefficient conservatively set regardless of how this resolves.
 
+**New check (2026-08): real-world CB-value benchmarks from the literature, and the coefficient's
+magnitude looks too large against them.** An external review suggested checking the fitted
+±2.446-point CB coefficient against two cited real-world sources: Hoffer & Pincin (2019,
+*Journal of Sports Economics* 20(7)) and the *Sports Insights* NFL player point-spread-value
+survey of real sportsbook oddsmakers. Checked both directly rather than taking the citation on
+faith:
+
+- **Hoffer & Pincin (2019) turns out not to give a comparable CB number at all.** Their
+  regression's own listed independent variables are entirely offensive (passing/rushing/
+  receiving yards and TDs, receptions, interceptions thrown, fumbles) — no defensive-position
+  variable of any kind. Consistent with that, their own reported result is that zero non-
+  quarterbacks appear in their top-35 predicted point-spread values for the season studied.
+  This paper doesn't estimate cornerback value; it's a QB/skill-position marginal-product model
+  that structurally has no mechanism to assign defensive players any value, so there's no
+  number here to benchmark against — the citation doesn't support the comparison it was
+  suggested for.
+- **The Sports Insights oddsmaker survey does speak to this, and it's a sobering result.**
+  Sportsbook oddsmakers surveyed there report no consensus that any individual defensive
+  player moves a real line; the single most speculative estimate found (for J.J. Watt, an
+  elite edge rusher — arguably the single most valuable non-QB defensive player of his era, not
+  merely a solid corner) tops out around 1.5 points, and that's explicitly framed as
+  speculation, not a settled figure. Elite non-QB *offensive* skill players (the article names
+  Gronkowski/A. Peterson/A. Brown-caliber players) are given a real but small ~0.5-point value.
+  No cornerback is named with any number at all.
+
+**This model's production coefficient (±2.446, pre-shrink ±2.977) for a single missing top-3
+corner is roughly 1.6-2x the real-world speculative ceiling for the single best defensive
+player in the league, not an average cornerback specifically.** This is a new, independent
+form of skepticism beyond the multiplicity/permutation-test concern already documented above —
+even if the specification-search adjustment is set aside entirely, the raw *size* of the effect
+looks large against what actual sportsbook oddsmakers believe any defensive player is worth.
+This doesn't overturn the walk-forward evidence for the adjustment's *direction* (still
+real, still ruled out for lookahead), but it meaningfully sharpens the case that the current
+±2.446 magnitude — already shrunk once, to the rolling-origin fold median, for an unrelated
+reason (overstated point-estimate concern, §6.1.1 above) — may still be too large relative to
+what the real market believes is plausible. Not acted on with a further shrink this round
+(that would need its own justified target, not just "smaller because a qualitative source says
+so"), but it materially updates the honest bottom line: hold this adjustment's *direction* with
+real confidence, and its *magnitude* with real skepticism, more skepticism than stated above
+before this check.
+
+Sources: Hoffer, A., & Pincin, J. A. (2019). Quantifying NFL Players' Value With the Help of
+Vegas Point Spreads Values. *Journal of Sports Economics*, 20(7), 959–974.
+https://doi.org/10.1177/1527002519832060. Sports Insights, "NFL Player Point Spread Values"
+(sportsinsights.com/blog/nfl-player-point-spread-values/) and "2017 NFL Player Point Spread
+Values" (sportsinsights.com/blog/2017-nfl-player-point-spread-values).
+
 ### 6.2 `src/models/injury_reallocation.py` — props-level detection + reallocation (added 2026-07)
 A **completely separate mechanism** from §6.1, solving a different problem: §6.1 answers
 "how much does the game margin shift when a starter is out," this answers "who actually
@@ -1562,6 +1609,58 @@ project still doesn't have (§13.3, the still-ungated prop-odds experiment, §14
 but the honest, walk-forward-consistent conclusion is **"plausibly large enough to be worth
 testing against real market odds," not "too small to matter,"** a genuine update from what was
 expected going in, not a confirmation of it.
+
+### 9.6.1 The raw bootstrap's mean bias, investigated (2026-08) — not a bug, checked directly
+
+An external review flagged something that looks, on first read, like a real bug: the mean=0.38
+SD residual bias quoted above (§9.6's opening) gets bootstrap-resampled RAW, with no demeaning
+step, so it looks like `TouchCountSimulator` reinjects an unintended systematic upward bias
+into every simulated trial rather than just the intended shape/variance. Investigated rather
+than assumed either way (per this project's standing discipline — see §12).
+
+**First finding: the quoted 0.38 is a pooled statistic; the simulator already stratifies by
+tier, and the real per-tier bias is far from uniform** (TRAIN=2018-2021):
+
+| Tier | mean resid (SD) | std | n |
+|---|---|---|---|
+| fringe (<5% share) | +0.672 | 1.877 | 7,461 |
+| role_player (5-15%) | +0.257 | 1.313 | 8,859 |
+| primary (>15%) | +0.007 | 1.234 | 4,344 |
+
+`primary` — the tier that matters most for props betting — is already essentially unbiased.
+The bias concentrates in low-share players, and has a real mechanical explanation: the
+residual pool is built from weeks a player was actually `involved` (real touches > 0, §9), a
+survivorship-conditioned population that mechanically excludes the zero-touch weeks a
+low-share player's pregame prediction is also implicitly weighing — a fringe player who shows
+up in this table at all, by construction, is one who beat their own low expectation that week.
+
+**Second finding, the decisive one: added a `demean` option to `TouchCountSimulator` and ran
+the exact same TEST=2022-2025 comparison already validated above (n=16,368) — demeaning is
+NOT an improvement, and at two of three thresholds it's measurably worse:**
+
+| Threshold | Brier: raw (shipped) | Brier: demeaned | log-loss: raw | log-loss: demeaned |
+|---|---|---|---|---|
+| ≥3 | **0.16753** | 0.16907 | **0.50388** | 0.50675 |
+| ≥5 | **0.14325** | 0.14380 | **0.44453** | 0.44517 |
+| ≥7 | **0.09948** | 0.09960 | 0.32125 | **0.32056** |
+
+Raw wins outright at ≥3 and ≥5 on both metrics; the two are essentially tied at ≥7 (each wins
+one metric by a margin smaller than rounding noise). Tail calibration at ≥7 (the
+decision-relevant bucket) is also a near-wash: predicted-mean 0.864 (raw) vs. 0.863
+(demeaned) against the same 0.827 realized rate.
+
+**Verdict: this is the opposite of a bug — the raw bootstrap's tier-level bias is a real,
+calibration-positive signal, not noise to strip out.** The mechanism: `TouchCountSimulator` is
+asked, at use time, "will this specific rostered, pregame-projected player hit a threshold" —
+already much closer to the fit-time `involved` conditioning than a hypothetical zero-context
+roster spot would be, so the historical asymmetry generalizes rather than overfitting the fit
+population. Demeaning would only be the right call if the simulator's own mean needed to match
+`predicted_touches` exactly for some other downstream reason (e.g. if it fed a display that
+also showed the point estimate and the two needed to agree) — not for calibration's own sake.
+`demean=False` stays the default; `demean=True` is kept as an option (`props_simulator.py`),
+not deleted, for that possible future need. Still not wired into the live pipeline (unchanged
+from above) — this was a pre-emptive investigation of validated-but-unshipped infrastructure,
+not a live-pipeline fix.
 
 ---
 

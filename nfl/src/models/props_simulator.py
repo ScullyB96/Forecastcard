@@ -61,19 +61,46 @@ class TouchCountSimulator:
     """Bootstrap-resample a real historical standardized residual (matching
     the player's own usage tier), apply it to this week's prediction to draw
     a simulated touch count. Falls back to the pooled (all-tier) residual
-    distribution if a tier's pool is too small."""
+    distribution if a tier's pool is too small.
 
-    def __init__(self, residual_table: pd.DataFrame, seed: int = 0):
+    `demean` (default False -- see MODEL_DOCUMENTATION.md §9.6.1 for the full
+    empirical comparison this default is based on, 2026-08). Each tier's
+    residual pool has a real, substantial, NON-uniform mean bias on
+    TRAIN=2018-2021 -- fringe +0.67 SD, role_player +0.26 SD, primary +0.01 SD
+    (near zero) -- because the pool is built from weeks the player was
+    actually `involved` (real touches > 0), a survivorship-conditioned
+    population that mechanically excludes the zero-touch weeks a low-share
+    player's pregame prediction is also implicitly weighing. This looked, on
+    first read, like an unintended bias the raw (non-demeaned) bootstrap
+    reinjects into every simulated trial -- tested it directly (TEST=2022-
+    2025, n=16,368) rather than assume the fix helps: demeaning first
+    (`predicted_touches` exactly, no tier-level shift) is WORSE at >=3 (Brier
+    0.16907 vs. raw's 0.16753) and >=5 (0.14380 vs. 0.14325 Brier), and
+    essentially tied at >=7 (both metrics within 0.0002 of each other). Kept
+    as an option, not the default -- the raw bootstrap's tier-level bias is a
+    real, calibration-positive signal here, not a bug: the simulator is asked
+    "will this specific rostered player hit a threshold," which is already
+    closer to the `involved` conditioning than a hypothetical zero-context
+    roster spot, so the historical asymmetry generalizes rather than
+    overfitting the fit population."""
+
+    def __init__(self, residual_table: pd.DataFrame, seed: int = 0, demean: bool = False):
         self.rng = np.random.default_rng(seed)
+        self.demean = demean
         self._pools = {tier: g["standardized_resid"].to_numpy() for tier, g in residual_table.groupby("usage_tier")}
         self._all = residual_table["standardized_resid"].to_numpy()
+        self._means = {tier: pool.mean() for tier, pool in self._pools.items()}
+        self._all_mean = self._all.mean()
 
     def simulate(self, predicted_share: float, team_touches: float, n_trials: int = 1000) -> np.ndarray:
         tier = usage_tier(predicted_share)
         pool = self._pools.get(tier)
+        pool_mean = self._means.get(tier)
         if pool is None or len(pool) < MIN_RESID_POOL:
-            pool = self._all
+            pool, pool_mean = self._all, self._all_mean
         sampled_resid = pool[self.rng.integers(0, len(pool), size=n_trials)]
+        if self.demean:
+            sampled_resid = sampled_resid - pool_mean
         predicted_touches = predicted_share * team_touches
         multinomial_sd = max(np.sqrt(team_touches * predicted_share * (1 - predicted_share)), 0.5)
         simulated = predicted_touches + sampled_resid * multinomial_sd
