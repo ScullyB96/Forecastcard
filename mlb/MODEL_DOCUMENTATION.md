@@ -29,12 +29,13 @@ distribution, win probability, and player props.
 
 **Current validated full-stack performance** (oracle backtest, `validate_game_simulator.py`,
 n=7237 real 2023-2025 games, 200 trials/game, canonical protocol per §11.33 — the reference
-figures as of the Phase D re-baseline, §11.42, 2026-08-04): **total score MAE 3.521, margin
-MAE 3.416, straight-up (SU) win/loss accuracy 59.53%, Brier 0.2378.** Independently confirmed
-on a genuine, never-fitted-against holdout (`validate_holdout_2026.py`, 2026 H1, n=1,667
-games): **SU 59.75%, Brier 0.2368** — the holdout figure lands slightly ABOVE the in-sample
-number, evidence against the accumulated selection bias a long series of 2023-2025-only
-keep/revert decisions could otherwise introduce (see §11.42, §0.3/Phase 0.3 discipline below).
+figures as of the §11.48 thruorder-identity-fix re-baseline, 2026-08-05): **total score MAE
+3.557, margin MAE 3.447, straight-up (SU) win/loss accuracy 58.8%, Brier 0.2402.** (Prior
+reference point, Phase D re-baseline §11.42, 2026-08-04, predating the §11.48 fix: MAE 3.521/
+3.416, SU 59.53%, Brier 0.2378 — the gap between the two is exactly the correctness-fix
+tradeoff §11.48 measured and shipped anyway.) The 2026 H1 holdout
+(`validate_holdout_2026.py`, n=1,667 games, **SU 59.75%, Brier 0.2368**) still predates the
+§11.48 fix too — not yet re-run against the corrected stack.
 
 **How this document's own numbers evolved, briefly**: an original n=597/200-trial protocol
 reported SU 60.5%; a tightened bootstrap-CI re-validation (§11.7) found that figure's own
@@ -5015,6 +5016,16 @@ The platoon×TTOP factor itself (`SAME_HAND_TTO3_STRIKEOUT_K_ODDS_RATIO`,
 `platoon_tto_interaction=False` by default) remains built but genuinely untested — its only
 CRN read so far ran against the buggy stack, where the TTO=3 branch never fired at all. Testing
 it for real on the now-fixed stack is a separate, still-open next step.
+
+**Full canonical re-baseline, post-fix (2026-08-05, same day, n=7237, 200 trials, same
+protocol as §11.33/§11.42)**: SU 58.8%, Brier 0.2402, log loss 0.6733, total MAE 3.557, margin
+MAE 3.447 — down from the pre-fix §11.42 figures (SU 59.53%, Brier 0.2378, total MAE 3.521,
+margin MAE 3.416), a slightly larger drop than the isolated n=1,483 CRN A/B implied (that
+measured -1.35pp/+0.0019; this full re-baseline reads -0.73pp/+0.0024 on SU/Brier
+respectively — different comparison bases, not a contradiction: this is old-canonical-run
+vs. new-canonical-run on non-CRN-paired independent Monte Carlo draws, not a same-seed paired
+delta). This is now the standing reference figure at the top of this document. The 2026 H1
+holdout has NOT yet been re-run against this fix — still predates it.
 
 ---
 
