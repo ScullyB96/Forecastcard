@@ -1,9 +1,13 @@
 """Wind adjustment for QB yards/attempt and WR/TE yards/target -- validated
-walk-forward (TRAIN=2018-2021 fit / TEST=2022-2025 held out):
+walk-forward (TRAIN=2018-2021 fit / TEST=2022-2025 held out). The fit itself
+operates on the RATE (yards/attempt, yards/target); the MAE numbers below are
+on the resulting projected TOTAL yards for the game (rate * volume), not on
+the rate itself -- caught and corrected 2026-08 (external review): a rate-MAE
+of 44 is physically impossible at this scale (real QB ypa is ~7).
 
-  QB yards/attempt:      MAE 44.72 -> 44.09 (p=0.0022, n=1282)
-  WR/TE yards/target:    MAE 13.55 -> 13.31 (p<0.0001, n=9534, much larger
-                         sample -- this is the stronger, more confident one)
+  QB projected passing yards:      MAE 44.72 -> 44.09 (p=0.0022, n=1282)
+  WR/TE projected receiving yards: MAE 13.55 -> 13.31 (p<0.0001, n=9534, much
+                         larger sample -- this is the stronger, more confident one)
 
 Completion rate showed the same directionally-correct (negative) raw
 correlation but did NOT clear significance (p=0.34, n=1282) -- not included

@@ -1038,9 +1038,16 @@ walk-forward, TRAIN=2018-2021 fit / TEST=2022-2025:
 
 | Target | Result |
 |---|---|
-| QB yards/attempt | MAE 44.72 → 44.09, **p=0.0022** — validated, shipped |
-| WR/TE yards/target | MAE 13.55 → 13.31, **p<0.0001**, n=9534 — validated, shipped (stronger of the two) |
+| QB projected passing yards | MAE 44.72 → 44.09, **p=0.0022** — validated, shipped |
+| WR/TE projected receiving yards | MAE 13.55 → 13.31, **p<0.0001**, n=9534 — validated, shipped (stronger of the two) |
 | QB completion rate | Same directionally-correct (negative) raw correlation, but p=0.34 — **not shipped**, correlation alone isn't sufficient |
+
+**Label correction (2026-08, external review):** the MAE numbers above are on the resulting
+*projected total yards for the game* (rate × volume), not on the fitted rate itself — the fit
+operates on yards/attempt and yards/target, but a rate-scale MAE of 44 is physically
+impossible (real QB yards/attempt is ~7). Pre-existing mislabel inherited uncritically into
+`MODEL_ARCHITECTURE_REVIEW.md`; the underlying fit/validation/shipped adjustment itself was
+never wrong, only its units label here and in `weather_adjustment.py`'s docstring.
 
 `fit_wind_adjustment()` fits `rate_residual = intercept + slope*wind` on outdoor games only
 (`roof=="outdoors"`), refit fresh each pipeline run on the full available history (2018-
@@ -1271,6 +1278,38 @@ precision, checked directly on a real game) — a residual ~0.66-point average g
 the *Gaussian-inverse-CDF diagnostic* specifically, which is expected and not a bug: that
 diagnostic assumes normality, and the simulator's whole value is capturing real skew a
 Gaussian can't, so it won't perfectly invert even after exact recentering.
+
+**Re-validated on TEST, not just verified by construction (2026-08, `validate_game_simulator.py`
+rewritten).** The recentering fix above had only ever been checked for internal consistency on
+a single live game — never actually re-run through the full TEST=2022-2025 walk-forward harness
+to see whether it *helps calibration*, not just fixes the spread/moneyline contradiction. That
+harness's own "current model" baseline had also gone stale (`blended_margin`/`blended_total`,
+the market/own-model blend removed from production back in Phase 0) — rewritten to compare
+against the real shipped baseline, market `spread_line`/`total_line` directly (§4.3), and to
+report BOTH the raw and recentered simulator side by side:
+
+| | margin CRPS | total CRPS | win-prob Brier |
+|---|---|---|---|
+| Simulator, raw (uncorrected location) | 7.061 | 7.403 | 0.2136 |
+| Simulator, recentered (shipped) | 6.983 | 7.291 | 0.2120 |
+| Current model (market direct + Gaussian sigma) | 6.918 | 7.287 | 0.2105 |
+
+Recentering is confirmed to be a real, if modest, improvement over the raw simulator on every
+metric — not just a spread/moneyline-consistency fix, it measurably helps calibration too. It
+does not, however, close the gap to the plain Gaussian-around-the-market-line approximation;
+the simulator's real value-add remains its *shape* (skew, heavy tails, key-number mass — see
+§9.6 and the alt-line/team-total framing above), not raw Brier/CRPS superiority over a simpler
+model, consistent with how this has been framed since Phase 2.
+
+**One genuine, not-yet-acted-on finding from this re-validation**: the recentered win-probability
+reliability table shows a real-looking miscalculation pattern, not pure noise-shaped scatter —
+predicted 44.3% actual 35.8% in the (0.4, 0.5] bucket (n=212, overconfident toward the home
+team), but predicted 76.6% actual 83.7% in the (0.7, 1.0] bucket (n=166, underconfident in
+the model's most lopsided games). Not yet bootstrap-CI'd to rule out sampling noise, and not
+acted on — flagging as a legitimate candidate for a future isotonic/Platt recalibration pass on
+`sim_home_win_prob`, the same treatment already validated for `TD_PROB_CALIB` (§9.4), rather
+than assuming the raw simulator output is already well-calibrated just because it's a real
+Monte Carlo distribution.
 
 **Total is now shipped too (review round 4, #5), unblocked by the same fix.** Total was held
 back because its MAE (12.28) trails the top-down model's (10.20) — but that gap is location,
