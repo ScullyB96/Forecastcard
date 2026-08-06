@@ -353,11 +353,17 @@ slope_off = 0.9163 (se=0.0264)      slope_def = 0.9066 (se=0.0297)
 Both are real, ~3.1–3.2-standard-error departures from 1.0 — **real outcomes regress toward league
 average MORE than the combine's implicit slope assumes**, meaning the model is mildly overconfident
 for teams far from average. The identical check for pace found the OPPOSITE sign
-(`slope_home=1.0721, slope_away=1.1034`, both above 1.0 — pace slightly UNDER-extrapolates). Not yet
-built into a corrected model — this is a validated diagnostic finding, queued as a candidate lever
-(a fitted damping/amplification coefficient per deviation term, tested through the same two-stage-
-then-holdout protocol as everything else) rather than adopted on the strength of the diagnostic
-alone. See `MODEL_DOCUMENTATION.md` Sec44.3.
+(`slope_home=1.0721, slope_away=1.1034`, both above 1.0 — pace slightly UNDER-extrapolates).
+
+**Tested (2026-08-02) via `gamma_rtg`/`gamma_pace` exponents added to `project_game` (default 1.0,
+byte-identical to the original) — a clean negative, not adopted.** `gamma_rtg` swept 0.85–0.95 on
+the recent-dev slice: every value shows the SAME real tradeoff (total_mae improves, margin_mae
+regresses, both shrinking monotonically toward zero as gamma→1.0) — the identical "one metric at
+the expense of the other" pattern Sec26's shrinkage-strength lever hit for this same still-open
+margin question. `gamma_pace` swept 1.03–1.15: no real effect at any value (NOISE throughout, same
+conclusion as the home-court EWMA halflife — pace's contribution to total variance is too small for
+this parameter to matter). Neither clears the net-win bar; no holdout read spent. See
+`MODEL_DOCUMENTATION.md` Sec44.3 (diagnostic) and Sec48 (the test).
 
 ### 2.5 Headline validated results
 

@@ -40,7 +40,9 @@ from src.models.lineup_rating import predictive_minutes_shares, semi_oracle_minu
 from src.models.rapm_lite import _career_games_played, prepare_stints
 from src.models.team_stat_rates import (ADOPTED_CATEGORIES, CROSS_SEASON_WEIGHT_STAT, OWN_HALFLIFE_GAMES_STAT,
                                          STAT_COLUMNS, add_team_stat_ratings, build_team_stat_game_log, project_team_stat)
-from src.models.team_strength import OWN_HALFLIFE_GAMES_RATING, PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings
+from src.models.team_strength import (
+    OWN_HALFLIFE_GAMES_RATING, PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings, project_game,
+)
 from src.pipeline.generate_props import (
     _anchor_preserving_missing, _component_scale_factors, _latest_snapshot, _team_stat_totals,
 )
@@ -626,6 +628,40 @@ def test_add_team_ratings_new_prior_games_params_default_preserving():
         check(f"{col}: default params reproduce the explicit-constant call exactly",
               (default_out[col].reset_index(drop=True).fillna(-999)
                == explicit_out[col].reset_index(drop=True).fillna(-999)).all())
+
+
+def test_project_game_gamma_defaults_preserve_original_combine_and_actually_damp():
+    """`team_strength.project_game`'s new `gamma_rtg`/`gamma_pace` exponents (2026-08-02,
+    external-review follow-up): a dev-only regression of realized log-rating deviation on the
+    walk-forward-predicted log-deviation found the implicit gamma=1.0 assumption is measurably
+    wrong (rating slopes ~0.87-0.91, pace slopes ~1.04-1.10). Confirms (1) the new params default
+    to 1.0 and reproduce the ORIGINAL bare-ratio combine exactly, byte-for-byte; (2) a gamma<1
+    actually dampens the projection toward league average for an extreme (far-from-average) team,
+    and a gamma>1 actually amplifies it -- confirming the exponent has the intended directional
+    effect, not just a no-op wired in without doing anything."""
+    kwargs = dict(home_pace=100.0, away_pace=96.0, league_avg_pace=98.0,
+                  home_oRtg=118.0, home_dRtg=104.0, away_oRtg=106.0, away_dRtg=112.0,
+                  league_avg_rtg=110.0, home_court_mult=1.01)
+    default_pace, default_home, default_away = project_game(**kwargs)
+    explicit_pace, explicit_home, explicit_away = project_game(**kwargs, gamma_rtg=1.0, gamma_pace=1.0)
+    check("gamma_rtg/gamma_pace default (1.0) reproduces the original combine exactly (pace)",
+          abs(default_pace - explicit_pace) < 1e-12)
+    check("gamma_rtg/gamma_pace default (1.0) reproduces the original combine exactly (home score)",
+          abs(default_home - explicit_home) < 1e-12)
+    check("gamma_rtg/gamma_pace default (1.0) reproduces the original combine exactly (away score)",
+          abs(default_away - explicit_away) < 1e-12)
+
+    # home_oRtg=118 is well ABOVE league_avg_rtg=110 (an "extreme" team) -- damping (gamma<1) must
+    # pull the projection back TOWARD league average relative to the undamped gamma=1 baseline.
+    _, damped_home, _ = project_game(**kwargs, gamma_rtg=0.9, gamma_pace=1.0)
+    check("gamma_rtg<1 damps an extreme team's projection TOWARD league average",
+          damped_home < default_home, f"damped={damped_home}, default={default_home}")
+
+    _, _, amplified_away_score = project_game(**{**kwargs, "away_pace": 105.0}, gamma_rtg=1.0, gamma_pace=1.1)
+    _, _, default_away_score_higher_pace = project_game(**{**kwargs, "away_pace": 105.0})
+    check("gamma_pace>1 amplifies an extreme (far-from-average) pace's projection AWAY from league average",
+          amplified_away_score > default_away_score_higher_pace,
+          f"amplified={amplified_away_score}, default={default_away_score_higher_pace}")
 
 
 def test_add_team_stat_ratings_oreb_excluded_from_uniform_cross_season_adoption():
@@ -1708,6 +1744,7 @@ if __name__ == "__main__":
     test_own_halflife_default_preserving_and_responsive()
     test_prop_distribution_variance_floor_is_player_scale_not_team_scale()
     test_add_team_ratings_new_prior_games_params_default_preserving()
+    test_project_game_gamma_defaults_preserve_original_combine_and_actually_damp()
     test_add_team_stat_ratings_oreb_excluded_from_uniform_cross_season_adoption()
     test_add_team_stat_ratings_oreb_excluded_from_uniform_own_halflife_adoption()
     test_matchup_delta_application_direction_suppresses_points_boosts_tov()

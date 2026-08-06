@@ -3318,3 +3318,35 @@ diagnostic did: compare its predicted attendance set against the REAL oracle att
 (not folded into the full lineup-adjustment MAE), before ever combining it with the (already-
 confirmed-adequate) share-redistribution step. This spent no holdout read and adopts nothing -- pure
 dev-only research informing where a future rebuild should actually focus.
+
+## 48. Combine log5-slope damping tested: gamma_rtg is a real tradeoff, gamma_pace has no real effect
+
+The first item from the "scoped but not tested" inventory. Re-derived the fitted slopes DEV-ONLY
+(seasons 2015-2023, n=21,474 team-game observations for rating, n=10,737 for pace -- the earlier
+diagnostic in Sec44.3 pooled the full dev+holdout range, not valid for an adoption-track test):
+rating slope_off=0.9070, slope_def=0.8682; pace slope_home=1.0383, slope_away=1.0974. Same direction
+as the pooled estimate, confirming this isn't a holdout-contaminated artifact.
+
+Added `gamma_rtg`/`gamma_pace` exponents to `team_strength.project_game` (default 1.0, reproduces
+the original bare-ratio combine byte-for-byte -- regression-tested, including that the exponent has
+the intended directional effect: gamma<1 measurably damps an extreme team's projection toward
+league average, gamma>1 measurably amplifies it away from league average).
+
+**Stage 1 (recent-dev slice), gamma_rtg swept 0.85-0.95 (gamma_pace held at 1.0)**: every single
+value shows the SAME clean tradeoff -- real IMPROVEMENT on total_mae, real REGRESSION on margin_mae
+(e.g. gamma_rtg=0.90: total_mae -0.0286 REAL IMPROVEMENT, margin_mae +0.0240 REAL REGRESSION). The
+magnitude of both effects shrinks monotonically as gamma approaches 1.0 (gamma=0.95: total_mae
+-0.0174, margin_mae +0.0093), consistent with a genuine structural tradeoff, not noise -- the exact
+same "one metric at the expense of the other" pattern Sec26's shrinkage-strength lever hit for this
+same still-open margin question. Fails the net-win bar (no regression on ANY key metric) at every
+value tested.
+
+**Stage 1, gamma_pace swept 1.03-1.15 (gamma_rtg held at 1.0)**: essentially NO effect at any value
+-- every metric is NOISE, with deltas on the order of 0.0001-0.0041. The pace term's contribution to
+total variance is simply too small for this parameter to matter, the same conclusion already reached
+for the home-court EWMA halflife (Sec8 of `TECHNICAL_REFERENCE.md`).
+
+**Decisive negative, no holdout read spent**: neither lever clears Stage 1 alone, and gamma_pace
+shows no real effect to combine with gamma_rtg the way Sec29's joint margin fix combined two
+individually-insufficient levers. Not pursued further. `gamma_rtg`/`gamma_pace` remain available,
+harmless-by-default (1.0) parameters on `project_game` for any future candidate that wants them.

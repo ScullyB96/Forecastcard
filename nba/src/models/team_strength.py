@@ -156,18 +156,33 @@ def add_team_ratings(log: pd.DataFrame, cross_season_weight: float = CROSS_SEASO
 
 def project_game(home_pace: float, away_pace: float, league_avg_pace: float,
                   home_oRtg: float, home_dRtg: float, away_oRtg: float, away_dRtg: float,
-                  league_avg_rtg: float, home_court_mult: float) -> tuple[float, float, float]:
+                  league_avg_rtg: float, home_court_mult: float,
+                  gamma_rtg: float = 1.0, gamma_pace: float = 1.0) -> tuple[float, float, float]:
     """The Phase 1 closed-form combine (see MODEL_DOCUMENTATION.md/the plan
     for the derivation): a multiplicative-ratio idiom, one home-court
     multiplier applied symmetrically (home's projected rating scaled up,
     away's scaled down by the same factor) rather than as an additive bonus,
     so it composes cleanly with the ratio structure of the rest of the
-    combine. Returns (projected_pace, projected_home_score, projected_away_score)."""
-    projected_pace = league_avg_pace * (home_pace / league_avg_pace) * (away_pace / league_avg_pace)
+    combine. Returns (projected_pace, projected_home_score, projected_away_score).
 
-    projected_home_rtg = (league_avg_rtg * (home_oRtg / league_avg_rtg) * (away_dRtg / league_avg_rtg)
+    `gamma_rtg`/`gamma_pace` (default 1.0, exactly reproducing the original combine
+    byte-for-byte): exponents on each deviation-from-league-average ratio term, e.g.
+    `(home_oRtg / league_avg_rtg) ** gamma_rtg` instead of the bare ratio. ADDED
+    2026-08-02 (external-review follow-up): regressing REALIZED log-rating deviation on the
+    walk-forward-PREDICTED log-deviation (dev-only, n=21,474 team-game observations) found the
+    implicit gamma=1.0 assumption is measurably wrong -- real outcomes regress toward league
+    average MORE than the combine assumes (rating: slope_off=0.907, slope_def=0.868, both real
+    overconfidence for teams far from average) while pace UNDER-extrapolates in the opposite
+    direction (slope_home=1.038, slope_away=1.097). A single shared gamma per axis is the
+    simplest testable hypothesis (not separate off/def or home/away exponents) -- see
+    `validate_combine_gamma.py` for the sweep and one-time holdout read. `1.0` preserves the
+    original, unscaled ratio for any caller that wants it (e.g. reproducing a pre-existing
+    historical result)."""
+    projected_pace = league_avg_pace * (home_pace / league_avg_pace) ** gamma_pace * (away_pace / league_avg_pace) ** gamma_pace
+
+    projected_home_rtg = (league_avg_rtg * (home_oRtg / league_avg_rtg) ** gamma_rtg * (away_dRtg / league_avg_rtg) ** gamma_rtg
                           * home_court_mult)
-    projected_away_rtg = (league_avg_rtg * (away_oRtg / league_avg_rtg) * (home_dRtg / league_avg_rtg)
+    projected_away_rtg = (league_avg_rtg * (away_oRtg / league_avg_rtg) ** gamma_rtg * (home_dRtg / league_avg_rtg) ** gamma_rtg
                           / home_court_mult)
 
     projected_home_score = projected_home_rtg * projected_pace / 100.0
