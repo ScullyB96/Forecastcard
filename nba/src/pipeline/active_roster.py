@@ -26,6 +26,22 @@ from src.utils.paths import DATA_RAW
 MINUTES_LOOKBACK_GAMES = 10
 
 
+# gameId's 3rd character encodes the game type in every NBA Stats API endpoint that returns one
+# (confirmed live 2026-08-02 via ScoreboardV3 on both a real regular-season date, "0022400561",
+# and a real playoff date, "0042400141", the latter also carrying a populated `gameLabel`/
+# `poRoundDesc` -- e.g. "West First Round" -- where the regular-season row's equivalent fields are
+# blank). Regular season is by far the common case; anything else just needs a clear flag, not an
+# exhaustive enum, since this project's own training data (`build_team_game_log`,
+# `build_team_stat_game_log`) is regular-season-only throughout -- the model has never seen a
+# playoff game's rotation/pace/HCA dynamics and has no validated basis for a playoff-specific
+# adjustment (see MODEL_DOCUMENTATION.md for the open item).
+_REGULAR_SEASON_GAME_ID_PREFIX = "0022"
+
+
+def _game_type_from_id(game_id: str) -> str:
+    return "regular_season" if game_id.startswith(_REGULAR_SEASON_GAME_ID_PREFIX) else "non_regular_season"
+
+
 def games_on_date(game_date: str) -> pd.DataFrame:
     """ScoreboardV3's team-rows dataset doesn't carry an explicit home/away
     column, but `gameCode` (e.g. "20260115/MEMORL") reliably encodes it --
@@ -33,7 +49,14 @@ def games_on_date(game_date: str) -> pd.DataFrame:
     the "/" are the AWAY team's 3-letter tricode followed by the HOME team's,
     matching each game's actual real-world home team. Parsed from
     `gameCode` directly rather than trusting team-row order (unconfirmed and
-    not worth relying on)."""
+    not worth relying on).
+
+    Adds `gameType` (`_game_type_from_id`) so callers can flag/warn when
+    asked to predict a non-regular-season game -- this model's team ratings,
+    pace, and home-court multiplier are all fit exclusively on regular-season
+    data (see `team_strength.build_team_game_log`'s own docstring), so a
+    playoff or play-in prediction is a genuinely different, unvalidated
+    regime, not just "the same model, later in the calendar"."""
     sb = scoreboardv3.ScoreboardV3(game_date=game_date, timeout=30)
     dfs = sb.get_data_frames()
     game_meta, team_rows = dfs[1], dfs[2]
@@ -45,7 +68,8 @@ def games_on_date(game_date: str) -> pd.DataFrame:
         away_id = ABBREV_TO_TEAM_ID.get(away_abbrev)
         home_id = ABBREV_TO_TEAM_ID.get(home_abbrev)
         games.append({"gameId": row.gameId, "homeTeamId": home_id, "awayTeamId": away_id,
-                      "homeAbbrev": home_abbrev, "awayAbbrev": away_abbrev})
+                      "homeAbbrev": home_abbrev, "awayAbbrev": away_abbrev,
+                      "gameType": _game_type_from_id(row.gameId)})
     return pd.DataFrame(games)
 
 

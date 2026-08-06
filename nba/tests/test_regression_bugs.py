@@ -15,7 +15,7 @@ import pandas as pd
 from src.ingest.build_stints import _get_starters, _normalize_name, _prep_pbp_timeline, _roster_lookup
 from src.ingest.fetch_schedule import season_for_date
 from src.ingest.player_name_crosswalk import _build_name_index
-from src.pipeline.active_roster import build_team_history, resolve_active_lineup
+from src.pipeline.active_roster import _game_type_from_id, build_team_history, resolve_active_lineup
 from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, block_bootstrap_compare, bootstrap_compare
 from src.models.rolling_window_backtest import rolling_window_report, summarize_rolling_report
 from src.models.garbage_time import add_garbage_time_weight
@@ -1324,6 +1324,21 @@ def test_block_bootstrap_still_detects_a_real_effect_with_no_block_correlation()
           "REAL IMPROVEMENT" in result["val"]["verdict"], f"got {result['val']['verdict']}")
 
 
+def test_game_type_from_id_classifies_regular_season_vs_playoff():
+    """`active_roster._game_type_from_id` (2026-08-02, external-review follow-up): every training
+    signal in this codebase is regular-season-only, but nothing previously flagged a
+    non-regular-season prediction as a different, unvalidated regime. Confirmed live against
+    ScoreboardV3 on both a real regular-season date (2025-01-15, gameId "0022400561", blank
+    gameLabel) and a real playoff date (2025-04-20, gameId "0042400141", gameLabel "West First
+    Round") that the 3rd character of gameId reliably distinguishes the two."""
+    check("a real regular-season gameId classifies as regular_season",
+          _game_type_from_id("0022400561") == "regular_season")
+    check("a real playoff gameId classifies as non_regular_season",
+          _game_type_from_id("0042400141") == "non_regular_season")
+    check("an unrecognized prefix defaults to non_regular_season (fail safe toward warning, not silence)",
+          _game_type_from_id("0052400001") == "non_regular_season")
+
+
 def test_generate_props_before_filter_excludes_on_and_after_date():
     """`generate_props._before` (2026-08-01) is the fix for the real bug
     found via a 2025-01-15 spot-check: a star player's trailing-minutes
@@ -1595,6 +1610,7 @@ if __name__ == "__main__":
     test_rolling_window_report_isolates_per_season_and_excludes_first_season_by_default()
     test_block_bootstrap_correctly_widens_ci_for_within_block_correlated_deltas()
     test_block_bootstrap_still_detects_a_real_effect_with_no_block_correlation()
+    test_game_type_from_id_classifies_regular_season_vs_playoff()
     test_generate_props_before_filter_excludes_on_and_after_date()
     test_team_history_season_filter_excludes_prior_season_games()
     test_team_stat_game_log_for_against_symmetry()

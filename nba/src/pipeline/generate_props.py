@@ -662,6 +662,11 @@ def run(game_date: str) -> pd.DataFrame:
                             or (stat_name == "ast" and ast_adjusted_flags.get(pid, False))
                             or (stat_name == "tov" and tov_adjusted_flags.get(pid, False))
                         ),
+                        # propagated straight from generate_predictions.py's own game_preds row --
+                        # every rate model here is fit on regular-season data only, so a playoff/
+                        # play-in game is an equally untested regime for props as it is for the
+                        # game-outcome pipeline (see active_roster._game_type_from_id).
+                        "regime_warning": getattr(row, "regime_warning", None),
                     })
 
     result_df = pd.DataFrame(all_rows)

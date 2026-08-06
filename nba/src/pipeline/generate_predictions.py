@@ -42,6 +42,17 @@ of its own noise. All the RAPM-lite/lineup-adjustment machinery
 tested, and available -- flip `INCLUDE_LINEUP_ADJUSTMENT` back on only
 after a genuinely improved minutes-projection mechanism is built and
 re-validated, not by reverting this decision on its own.
+
+**Non-regular-season games are flagged, not silently predicted as if equivalent (2026-08-02)**:
+every training signal in this codebase (`team_strength.build_team_game_log`,
+`team_stat_rates.build_team_stat_game_log`) is regular-season-only -- playoff rotations, pace, and
+home-court advantage are all documented to shift in the postseason, and this model has never been
+validated against that regime. `active_roster.games_on_date` now classifies each game's type from
+its `gameId` prefix; a non-regular-season game gets `regime_warning: "non_regular_season_untested_regime"`
+on its output row instead of being predicted as if it were an ordinary night. This does not change
+any regular-season prediction -- the ratings/combine/distribution math is completely unaffected --
+it only surfaces an honest caveat on the (currently rare, playoffs-only) games where the model's
+own training assumption doesn't hold.
 """
 
 import sys
@@ -265,10 +276,15 @@ def run(game_date: str) -> pd.DataFrame:
             league_avg_rtg=h["rtg_league_avg"], home_court_mult=home_court_mult,
         )
 
-        line = f"  {row.awayAbbrev} @ {row.homeAbbrev}: {pred_away:.1f} - {pred_home:.1f}  [{lineup_tag}]"
+        game_type = getattr(row, "gameType", "regular_season")
+        is_regular_season = game_type == "regular_season"
+        regime_note = "" if is_regular_season else "  [WARNING: non-regular-season game -- model trained on regular season only]"
+
+        line = f"  {row.awayAbbrev} @ {row.homeAbbrev}: {pred_away:.1f} - {pred_home:.1f}  [{lineup_tag}]{regime_note}"
         record = {"gameId": row.gameId, "homeAbbrev": row.homeAbbrev, "awayAbbrev": row.awayAbbrev,
                   "pred_home": pred_home, "pred_away": pred_away, "projected_pace": proj_pace,
-                  "lineup_source": lineup_tag}
+                  "lineup_source": lineup_tag, "gameType": game_type,
+                  "regime_warning": None if is_regular_season else "non_regular_season_untested_regime"}
 
         if have_distribution:
             var_home = predict_variance(home_var_model, np.array([proj_pace]))[0]
