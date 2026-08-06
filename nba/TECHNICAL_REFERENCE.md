@@ -725,6 +725,30 @@ future category that might genuinely need it.
    player poisons an entire evaluation set's mean log-score to `+∞`. Fixed with `MIN_COUNT_MEAN = 1e-3`
    as a floor — "a live projection can never be a certainty that something 'never happens'."
 
+**Both family-choice decisions re-run with the (now-fixed) `_t_scale` (2026-08-02, external
+review) — both hold up, one even more decisively than before**: the `_t_scale` bug predates its own
+fix by two documentation sections, so props' original continuous-vs-count comparison ran with a
+still-broken Student-t leg. Re-derived directly for `ft_made`/`points`: count families win EVEN MORE
+decisively than originally reported (`ft_made`: count log-score 1.52 vs. continuous's 5.98, and the
+correctly-scaled Student-t's OWN calibration max-deviation is 0.372 — worse than the originally-
+reported bug-contaminated 0.35, confirming the fix doesn't rescue continuous at all). The team-level
+score_distribution Normal-vs-t decision also re-confirmed as NOISE (unchanged) — sensible, since
+team-level residuals fit a very high df (~50+, "effectively Normal"), where the bug's distortion was
+always going to be small.
+
+**A real finding from checking overdispersion per projected-mean bucket instead of pooled — but
+backwards from the hypothesis that motivated it**: checked whether OREB/DREB/AST/TOV/STL/BLK's
+pooled Poisson-vs-NegBin overdispersion test (one decision per category across ALL players at once)
+might be masking real overdispersion in the high-usage tier. It is NOT the high-usage/star tier that
+the pooled test under-serves — every category's HIGH-mean bucket is consistently fine with Poisson.
+It's the NEAR-ZERO-mean buckets (deep-bench players) that show extreme overdispersion — OREB's
+near-zero bucket (mean≈0.00): variance/mean ratio = 42.6; BLK's two lowest buckets also flag NB
+needed. A zero-inflation-adjacent phenomenon (an occasional non-zero event against a near-zero mean
+is a huge standardized surprise), not a "stars need more variance" one. Whether this matters in
+practice depends on how much weight garbage-time/deep-bench props actually carry in the live
+product — a genuine open question, not resolved here; a mean-dependent family selection is a real
+design change that would need its own validation, not adopted on the strength of this diagnostic.
+
 ### 5.7 Two further real bugs found in the live wiring (`generate_props.py`)
 
 - **EWMA NaN-on-season-reset bug**: EWMA-based columns (minutes, 2PT/3PT attempt-rate, block-rate)

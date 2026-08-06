@@ -3198,3 +3198,64 @@ of a proper walk-forward-refit infrastructure addition. **Live impact today**: `
 already refits this model fresh on every call using all data available at call time, so it is not
 frozen at a stale historical snapshot -- but every DAY's fit is still the same "one static fit over
 everything seen so far" shape that produced this declining-coverage trend in the diagnostic above.
+
+## 46. Two more external-review items run down: family-choice re-runs, per-bucket overdispersion
+
+### 46.1 Re-ran both family-choice decisions with the (now-fixed) `_t_scale` -- both hold up, one even more decisively
+
+The `_t_scale` bug (Sec27) inflated every Student-t variance by `df/(df-2)` and was live during the
+ORIGINAL comparisons that picked Normal for team-level scores (Sec6) and count families for props
+(Sec25's MIN_VARIANCE fix predates Sec27's `_t_scale` fix, so props' continuous-vs-count comparison
+specifically ran with a still-broken Student-t leg). Both scripts already import the shared, now-
+fixed `log_score`/`predict_variance`/`fit_student_t_df`/`_t_scale`, so simply re-running them today
+uses the corrected math with no script changes needed.
+
+**Team-level scores** (`validate_score_distribution.py`, re-run in full): Student-t vs. Normal is
+still NOISE (delta -0.0007, CI includes zero) -- the original "adopt Normal for simplicity" decision
+holds. Sensible in hindsight: team-level score residuals fit a very high df (49.1 home / 57.6 away,
+"effectively Normal"), so `df/(df-2)` at that df is only a ~4% variance inflation -- the bug's
+distortion here was always going to be small.
+
+**Props (`ft_made`, `points`)**, re-derived directly via `validate_prop_distribution.py`'s own
+`_fit_and_score_continuous`/`_fit_and_score_count` helpers (re-added as a one-off, not left wired
+into `CATEGORY_SPECS`, which correctly stays `count`-only for all 10 categories in production): count
+families win EVEN MORE decisively than originally reported. `ft_made`: count log-score 1.52 vs.
+continuous's 5.98 (correctly-scaled Student-t, df=4.70) -- and the correctly-scaled Student-t's own
+calibration max-deviation is 0.372, actually WORSE than the originally-reported (bug-contaminated)
+0.35, confirming the fix didn't rescue continuous at all. `points`: count 2.85 vs. continuous's 3.64.
+Both re-derivations confirm the count-family decision was correct on its own merits, not an artifact
+of the (much larger, since props categories have much lower df / heavier tails) `_t_scale`
+distortion.
+
+### 46.2 Per-projected-mean-bucket overdispersion check: a real finding, but the OPPOSITE of what was hypothesized
+
+Checked whether `fit_count_family`'s pooled variance/mean overdispersion test (one Poisson-vs-NegBin
+decision per category, computed across ALL players at once) might be dominated by the mass of
+low-mean players, masking real overdispersion in the high-usage tier where props matter most.
+Bucketed OREB/DREB/AST/TOV/STL/BLK's fit-split residuals into projected-mean quartiles and recomputed
+the variance/mean ratio within each bucket:
+
+```
+oreb: pooled=0.678 (Poisson) -- bucket@mean=0.00: ratio=42.614 (NB needed!) -- buckets@0.41/0.94/2.34: all ~0.65-0.67 (Poisson OK)
+blk:  pooled=1.175 (Poisson, borderline) -- bucket@mean=0.04: ratio=4.695 (NB needed) -- bucket@mean=0.20: ratio=1.298 (NB needed) -- buckets@0.44/1.17: Poisson OK
+ast:  pooled=1.090 (Poisson) -- bucket@mean=0.47: ratio=1.380 (NB needed) -- buckets@1.23/2.15/4.89: Poisson OK
+tov:  pooled=0.979 (Poisson) -- bucket@mean=0.35: ratio=1.260 (NB needed) -- buckets@0.90/1.42/2.54: Poisson OK
+dreb, stl: every bucket Poisson OK, no real bucket-dependence found
+```
+
+**The finding is real, but backwards from the hypothesis**: it is NOT the high-usage/star tier that
+the pooled test under-serves -- across every category checked, the HIGH-mean buckets are consistently
+fine with Poisson (ratio close to or below 1). It's the NEAR-ZERO-mean buckets (deep-bench players
+projected essentially 0 for that category) that show extreme, sometimes very large overdispersion
+(OREB's near-zero bucket: ratio=42.6). This makes sense on reflection: a player with a true rate near
+0 is disproportionately exposed to occasional non-zero events looking like huge relative jumps (a
+single made block against a mean of 0.04 is a massive standardized surprise) -- a zero-inflation-
+adjacent phenomenon, not a "stars need more variance" one.
+
+**Practical significance, honestly assessed, not yet acted on**: whether this matters depends on how
+much weight low-mean players carry in the live product (garbage-time bench props are a real category
+users might bet on, not a negligible edge case) -- a genuine open question, not resolved here. Not
+built into a fix: a mean-dependent or per-bucket family selection would be a real design change
+needing its own validation (does it actually improve log-score/calibration specifically for the
+low-minutes population, checked properly, not assumed) -- queued as a candidate refinement, not
+adopted on the strength of this diagnostic alone.
