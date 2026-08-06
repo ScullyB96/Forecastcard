@@ -43,6 +43,14 @@
 
 [build]
 builder = "NIXPACKS"
+# 2026-08-06: scope rebuilds to this sport's own directory. Without this,
+# Railway rebuilds+redeploys EVERY service in the monorepo on ANY push to
+# main, regardless of which sport's files changed -- confirmed the direct
+# cause of a real incident: an unrelated NFL push landed 9 minutes after
+# the 01:00 UTC MLB cron fired and killed the in-flight job mid-run before
+# it could save props/export/notify. See MODEL_DOCUMENTATION.md for the
+# full incident writeup.
+watchPatterns = ["mlb/**"]
 
 [deploy]
 # Slack daily-picks digest (2026-08-04): the trailing curl calls the site

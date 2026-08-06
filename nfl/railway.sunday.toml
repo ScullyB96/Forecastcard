@@ -17,6 +17,12 @@
 [build]
 builder = "NIXPACKS"
 buildCommand = "pip install --no-deps nfl_data_py==0.3.3 && pip install -r requirements.txt"
+# 2026-08-06: scope rebuilds to this sport's own directory -- see
+# mlb/railway.toml's own comment for why (a real incident: an unrelated
+# push elsewhere in the monorepo redeployed and killed an in-flight cron
+# job for a different sport, since every service previously rebuilt on
+# every push regardless of which sport's files changed).
+watchPatterns = ["nfl/**"]
 
 [deploy]
 # Slack daily-picks digest (2026-08-04) -- see mlb/railway.toml's own

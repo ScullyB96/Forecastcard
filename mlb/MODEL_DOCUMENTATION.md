@@ -5029,6 +5029,52 @@ holdout has NOT yet been re-run against this fix — still predates it.
 
 ---
 
+## 11.49 Production incident (2026-08-05/06): an unrelated push killed the
+night-before MLB cron run — root cause was repo-wide, not MLB-specific, fixed via `watchPatterns`
+
+While shipping §11.48's fix, the 01:00 UTC (9pm ET) full-rebuild cron for the 2026-08-06 slate
+was confirmed (via `railway logs` against the specific deployment ID active at firing time) to
+have started correctly — refreshed the prior day's real games, rebuilt the PA table, and even
+successfully cached `pregame_context_cache_2026-08-06.pkl` — but died mid-way through matching
+RotoWire lineups for the day's 11 games, before saving any props, exporting to the site DB, or
+calling the Discord notify webhook.
+
+**Root cause, confirmed directly from Railway's own deployment history**: this repo is a
+monorepo (mlb/, nba/, nfl/, nhl/, site/ all in one `git` history), and every one of the 6
+Railway services had `watchPatterns` unset (empty) in its `railway.toml` — meaning Railway
+rebuilds and redeploys **every service on any push to `main`**, regardless of which sport's
+directory the push actually touched. `mlb-worker`'s own deployment list showed a new build
+fired for every commit that landed that evening — including several NFL and NBA commits from
+concurrent, unrelated work. One NFL push landed ~9 minutes after the MLB cron fired; the
+resulting redeploy tore down the in-flight MLB job's container before it could finish. This is
+a repo-wide architectural gap, not something specific to MLB's own code or cron schedule — any
+sport's job was equally exposed to any other sport's push, and the existing "no pushes during
+cron windows" discipline only protected against *self-inflicted* collisions, not this class.
+
+**Recovery (same night)**: re-ran the pipeline manually against production — `generate_daily_props`
+locally (full mode, reusing the same real external data sources the cron would have hit),
+`export_to_site_db` over a temporary `railway connect --tunnel-only` SSH tunnel to Postgres
+(the injected `DATABASE_URL` from `railway run` pointed at Railway's *internal* hostname
+`postgres.railway.internal`, unreachable from outside Railway's network — the tunnel gives a
+real `127.0.0.1`-bound proxy instead), then the Discord notify curl — confirmed both the
+game-picks and top-10-HR-picks embeds posted successfully (HTTP 200, real Discord message
+IDs) for the 2026-08-06 slate.
+
+**Fix, shipped same session**: added `watchPatterns` to all 6 `railway.toml` files
+(`mlb/railway.toml` → `["mlb/**"]`, same pattern for `nba/`, `nfl/railway.sunday.toml` +
+`railway.tuesday.toml` → `["nfl/**"]`, `nhl/`, and `site/railway.toml` → `["site/**"]`), so a
+push only rebuilds the service(s) whose own directory it actually touched. This directly closes
+the collision (an MLB push can no longer disturb NFL/NBA/NHL/site and vice versa) and, as a
+bonus, stops the always-on `site` web service from restarting on every unrelated sport's push
+too (it previously rebuilt on every commit in the repo despite reading everything from Postgres
+at request time, needing a rebuild only when its own code changes).
+
+**Note for a future session**: `watchPatterns` scoping has NOT yet been verified against a real
+push in production (i.e., confirming an NBA-only commit no longer triggers an `mlb-worker`
+rebuild) — worth a quick spot-check the next time any sport's code is pushed.
+
+---
+
 ## 12. Suggested next steps for a future session
 
 **Status as of 2026-08-04**: the Phase 0-4 roadmap that used to occupy this section (written

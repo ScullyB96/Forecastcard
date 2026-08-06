@@ -6,6 +6,13 @@
 
 [build]
 builder = "NIXPACKS"
+# 2026-08-06: scope rebuilds to this directory only -- without this, every
+# sport's push redeploys (and briefly restarts) the live web service too,
+# even when nothing site-facing changed. See mlb/railway.toml's own
+# comment for the fuller incident writeup (an unrelated push elsewhere in
+# the monorepo killed an in-flight MLB cron job, since every service
+# previously rebuilt on every push regardless of which sport changed).
+watchPatterns = ["site/**"]
 
 [deploy]
 startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
