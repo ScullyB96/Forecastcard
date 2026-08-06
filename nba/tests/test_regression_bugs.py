@@ -19,7 +19,8 @@ from src.pipeline.active_roster import _game_type_from_id, build_team_history, r
 from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, block_bootstrap_compare, bootstrap_compare
 from src.models.rolling_window_backtest import rolling_window_report, summarize_rolling_report
 from src.models.garbage_time import add_garbage_time_weight
-from src.models.home_court import _baseline_log_ratios
+from src.models.home_court import _baseline_log_ratios, fit_team_home_court_walk_forward
+from src.models.oreb_decomposition import add_walk_forward_exposure_rate, project_oreb_share, project_team_oreb
 from src.models.player_rate_shrinkage import (
     _trailing_league_rate_ewma, add_era_adjusted_player_rate, add_walk_forward_player_mean_ewm,
     add_walk_forward_player_rate,
@@ -164,6 +165,127 @@ def test_home_court_uses_walkforward_columns_not_raw_realized_columns():
         ok = False
         print(f"  KeyError: {e}")
     check("_baseline_log_ratios works from walk-forward columns alone", ok)
+
+
+def test_team_home_court_walk_forward_has_no_leak_on_a_teams_first_ever_home_game():
+    """Task #54 (Fable 5 critique item 1f): `fit_team_home_court_walk_forward`
+    must fall back to PURE league-wide shrinkage (zero team-specific weight)
+    on a team's first-ever home appearance in `games` -- `team_games_before`
+    is 0 there, so the blend must equal the trailing league-wide log-mult
+    exactly, regardless of how extreme that single game's own realized
+    score is. Builds 35 warm-up games (clears `min_periods=30` for the
+    league-wide trailing EWMA) between other teams, then a 36th game where
+    a brand-new team "NEW" hosts for the first time with a deliberately
+    extreme score (130) that would visibly shift the result if it leaked
+    into its own not-yet-computed team-specific estimate."""
+    dates = pd.date_range("2020-10-01", periods=36, freq="D")
+    rows = []
+    for i in range(35):
+        home, away = ("A", "B") if i % 2 == 0 else ("B", "A")
+        rows.append({
+            "gameId": f"g{i}", "gameDate": dates[i], "season": 2020,
+            "team_home": home, "team_away": away,
+            "league_avg_pace": 100.0, "pace_shrunk_mean_home": 100.0, "pace_shrunk_mean_away": 100.0,
+            "league_avg_rtg": 110.0, "rtg_attack_rate_home": 110.0, "rtg_defense_rate_home": 110.0,
+            "rtg_attack_rate_away": 110.0, "rtg_defense_rate_away": 110.0,
+            "actual_home_score": 112, "actual_away_score": 108,
+        })
+    rows.append({
+        "gameId": "g35", "gameDate": dates[35], "season": 2020,
+        "team_home": "NEW", "team_away": "A",
+        "league_avg_pace": 100.0, "pace_shrunk_mean_home": 100.0, "pace_shrunk_mean_away": 100.0,
+        "league_avg_rtg": 110.0, "rtg_attack_rate_home": 110.0, "rtg_defense_rate_home": 110.0,
+        "rtg_attack_rate_away": 110.0, "rtg_defense_rate_away": 110.0,
+        "actual_home_score": 130, "actual_away_score": 108,
+    })
+    games = pd.DataFrame(rows)
+
+    from src.models.home_court import _baseline_log_ratios
+    g = _baseline_log_ratios(games.sort_values(["gameDate", "gameId"]).reset_index(drop=True))
+    league_combined = (g["home_log_ratio"] - g["away_log_ratio"]) / 2.0
+    expected_league_trailing = float(
+        league_combined.shift(1).ewm(halflife=400.0, min_periods=30).mean().iloc[35])
+
+    result = fit_team_home_court_walk_forward(games, prior_games=200.0, halflife_games=400.0)
+    got = float(result.iloc[35])
+    expected = float(np.exp(expected_league_trailing))
+    check("NEW team's first home game gets pure league-wide shrinkage (no self-leak)",
+          abs(got - expected) < 1e-9, f"got {got}, expected {expected}")
+
+
+def test_add_walk_forward_exposure_rate_has_no_leak_on_a_teams_first_ever_game():
+    """Task #55 (OREB miss-decomposition): `add_walk_forward_exposure_rate`
+    is a NEW numerator/exposure walk-forward primitive (team-grain, e.g.
+    oreb_for/misses_for) -- must fall back to PURE league-wide shrinkage
+    (zero team-specific weight) on a team's first-ever game in `log`, same
+    zero-leak requirement as every other walk-forward primitive in this
+    project. Builds 10 warm-up games (2 teams alternating) then a game
+    where a brand-new team "NEW" appears for the first time with a
+    deliberately extreme numerator/exposure pair that would visibly shift
+    the result if it leaked into its own not-yet-computed rate."""
+    dates = pd.date_range("2020-10-01", periods=11, freq="D")
+    rows = []
+    for i in range(10):
+        team, opp = ("A", "B") if i % 2 == 0 else ("B", "A")
+        rows.append({"gameId": f"g{i}", "gameDate": dates[i], "season": 2020, "team": team,
+                      "num": 10, "exp": 40})
+    rows.append({"gameId": "g10", "gameDate": dates[10], "season": 2020, "team": "NEW",
+                  "num": 39, "exp": 40})  # extreme 97.5% rate -- would visibly shift the result if leaked
+    log = pd.DataFrame(rows)
+
+    result = add_walk_forward_exposure_rate(log, "num", "exp", prior_exposure=200.0, prefix="x")
+    league_avg_at_row10 = float(result["x_league_avg_rate"].iloc[10])
+    got = float(result["x_shrunk_rate"].iloc[10])
+    check("NEW team's first game gets pure league-wide shrinkage (no self-leak)",
+          abs(got - league_avg_at_row10) < 1e-9, f"got {got}, expected {league_avg_at_row10}")
+    check("league-wide trailing rate itself doesn't leak the extreme row's own num/exp",
+          abs(league_avg_at_row10 - 0.25) < 1e-9, f"got {league_avg_at_row10}, expected 0.25 (10/40, the warm-up rate)")
+
+
+def test_project_oreb_share_returns_exact_league_average_at_league_average_inputs():
+    """Task #55: `project_oreb_share` must reduce to the shared league
+    baseline when every team's own rate exactly equals its own league
+    average -- the same "no real deviation, no adjustment" sanity check
+    every other ratio-idiom combine in this project satisfies (mirrors
+    `project_game`'s/`project_team_stat`'s own at-average behavior)."""
+    home_share, away_share = project_oreb_share(
+        home_oreb_rate=0.28, home_dreb_rate=0.72, away_oreb_rate=0.28, away_dreb_rate=0.72,
+        league_avg_oreb_rate=0.28, league_avg_dreb_rate=0.72)
+    check("home_share == league_avg_oreb_rate when every input is exactly at its own league average",
+          abs(home_share - 0.28) < 1e-9, f"got {home_share}")
+    check("away_share == league_avg_oreb_rate when every input is exactly at its own league average",
+          abs(away_share - 0.28) < 1e-9, f"got {away_share}")
+
+
+def test_project_team_oreb_gives_exact_game_level_coherence_with_projected_misses():
+    """Task #55's central design claim: a team's projected OREB is EXACTLY
+    `oreb_share * that team's own projected misses` -- so the opponent's
+    implied DREB on that same miss set (`projected_misses - projected_OREB`,
+    never independently estimated) reconciles EXACTLY, not approximately.
+    Verifies `project_team_oreb`'s home output actually equals
+    `project_oreb_share`'s home_share times `project_team_stat`'s
+    independently-computed home misses total, confirming the composition
+    wires the share and the volume together correctly (not e.g. accidentally
+    multiplying by the wrong side's misses)."""
+    from src.models.team_stat_rates import project_team_stat
+    home_misses, away_misses = project_team_stat(
+        home_attack=45.0, home_defense=43.0, away_attack=44.0, away_defense=46.0, league_avg=44.5)
+    home_share, away_share = project_oreb_share(
+        home_oreb_rate=0.30, home_dreb_rate=0.70, away_oreb_rate=0.25, away_dreb_rate=0.75,
+        league_avg_oreb_rate=0.28, league_avg_dreb_rate=0.72)
+
+    home_oreb, away_oreb = project_team_oreb(
+        home_misses_attack=45.0, home_misses_defense=43.0, away_misses_attack=44.0, away_misses_defense=46.0,
+        league_avg_misses=44.5,
+        home_oreb_rate=0.30, home_dreb_rate=0.70, away_oreb_rate=0.25, away_dreb_rate=0.75,
+        league_avg_oreb_rate=0.28, league_avg_dreb_rate=0.72)
+
+    check("home_oreb == home_share * home_misses exactly",
+          abs(home_oreb - home_share * home_misses) < 1e-9, f"got {home_oreb}, expected {home_share * home_misses}")
+    check("away_oreb == away_share * away_misses exactly",
+          abs(away_oreb - away_share * away_misses) < 1e-9, f"got {away_oreb}, expected {away_share * away_misses}")
+    check("the opponent's implied DREB on home's own misses reconciles exactly to home's projected misses",
+          abs((home_oreb + (home_misses - home_oreb)) - home_misses) < 1e-9)
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -1698,6 +1820,10 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_add_walk_forward_exposure_rate_has_no_leak_on_a_teams_first_ever_game()
+    test_project_oreb_share_returns_exact_league_average_at_league_average_inputs()
+    test_project_team_oreb_gives_exact_game_level_coherence_with_projected_misses()
+    test_team_home_court_walk_forward_has_no_leak_on_a_teams_first_ever_home_game()
     test_possession_counter_uses_teamid_not_cumulative_description()
     test_score_forward_fill_ignores_placeholder_zero_on_non_scoring_rows()
     test_starters_use_row_order_not_position_field()

@@ -1236,20 +1236,20 @@ fix.
    the three shrinkage-primitive levers already tried; (c) only pursue a dedicated era/quality-spread
    regressor if (a) and (b) don't close the gap — don't jump straight to new-mechanism-building without
    re-checking the metric itself first.
-6. **OREB team-level anchoring is closed, not open** — four independent mechanisms converged to the
-   exact same "statistical tie with naive" ceiling. Don't re-open this with a fifth parameter sweep
-   on `add_walk_forward_rate`'s existing knobs. **One concrete structurally-different primitive worth
-   trying, from external review**: the current approach fits team OREB and opponent DREB as
-   independent FOR/AGAINST count rates, conflating shot volume, shot accuracy, and rebounding skill
-   — the first two of which this system already projects separately and better via the pace×rating
-   and scoring-rate machinery. Try instead: `projected_team_OREB = projected_misses ×
-   projected_OREB_share`, where `projected_misses` comes directly from the existing attempt/make-rate
-   projections (already validated), and `OREB_share` is a walk-forward FOR/AGAINST rate (own OREB%
-   vs. opponent's DREB%-allowed, combined via the same log5-style ratio idiom as everything else) —
-   removing miss-VOLUME noise from the rebounding signal specifically, and enforcing game-level
-   coherence (home OREB + away DREB should reconcile to home's own projected misses) that the current
-   independent-fit approach doesn't guarantee. A genuinely different primitive, not a parameter
-   choice — worth the two-stage-then-holdout protocol if pursued.
+6. **OREB team-level anchoring is closed, not open — NOW FIVE independent mechanisms, not four
+   (2026-08-06).** The external review's own concrete suggestion — `projected_team_OREB =
+   projected_misses × projected_OREB_share` (misses from a new walk-forward FGA−FGM for/against
+   model; OREB_share from a new numerator/exposure walk-forward rate, own OREB% per own miss vs.
+   own DREB% per opponent's miss, combined via the same ratio-deviation idiom as everything else,
+   adapted to two distinct baselines since OREB%≈0.28 and DREB%-allowed≈0.72 aren't one shared
+   scale) — was built (`src/models/oreb_decomposition.py`) and swept across a 32× range of
+   shrinkage strength (exposure prior 50–1600, misses-volume prior 10–80). Every configuration was
+   either a statistical tie with naive or a real regression vs. it — never a real improvement
+   anywhere. This is a STRUCTURALLY DIFFERENT primitive (not a parameter variant of the original
+   count-based family), and it still hit the exact same wall. Don't re-open this category again
+   without a genuinely new DATA source (e.g. shot-location/contest data distinguishing long
+   rebounds off missed threes from short rebounds off missed layups — not in any currently-ingested
+   source) — every modeling-side idea on the table has now been tried and confirmed not to help.
 7. **Phase 2 (RAPM-lite lineup adjustment) is disabled and should stay disabled — but the fix is
    now precisely scoped (§6.4), not an open-ended rebuild.** A semi-oracle decomposition proved the
    ENTIRE predictive-mode gap is attendance-prediction error (real, −0.0424 margin_mae) — the
@@ -1290,6 +1290,14 @@ fix.
 9. Home-court EWMA halflife (`fit_home_court_walk_forward`'s default 400.0): swept 100–1600, no
    detectable difference at any value. Leave as-is; the effect itself is too small for this
    parameter to matter.
+9b. Team-specific home-court advantage (2026-08-06, Fable 5 critique item 1f):
+    `home_court.fit_team_home_court_walk_forward` built (per-team trailing home_log_ratio, games-
+    count-weighted-shrunk toward the league-wide fit, NOT season-reset — venue properties like
+    altitude don't reset with a roster) and leak-guard tested. Stage 1 (recent-dev slice, `prior_games`
+    swept 50–800) was pure noise on every metric at every value — doesn't even show a real effect in
+    either direction, unlike gamma_rtg's real-but-rejected tradeoff (§2.4). No holdout read spent.
+    Consistent with item 9's home-court-halflife conclusion: home-court hyperparameters generally
+    show no real sensitivity at this sample size. Function left in place, unused by any live path.
 10. Garbage-time downweight factor (`DOWNWEIGHT_FACTOR = 0.25`) and the margin-threshold shape
     (`25.0 − 15.0×elapsed_fraction`): both un-calibrated placeholders, but currently moot — they only
     affect the RAPM-lite fit, and Phase 2 is disabled. Revisit only alongside item 7.

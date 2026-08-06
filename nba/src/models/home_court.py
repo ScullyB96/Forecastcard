@@ -83,6 +83,48 @@ def fit_home_court_by_season(games: pd.DataFrame) -> pd.Series:
     return per_season
 
 
+def fit_team_home_court_walk_forward(games: pd.DataFrame, prior_games: float = 200.0,
+                                      halflife_games: float = 400.0) -> pd.Series:
+    """Aligned-to-`games`-index Series: for each game (sorted by date), a
+    PER-TEAM (not league-wide) trailing home-court multiplier for that
+    game's home team -- shrunk toward the trailing LEAGUE-WIDE walk-forward
+    multiplier (`fit_home_court_walk_forward`'s own log-mult computation) at
+    `prior_games` strength, same games-count-weighted blend shape as
+    `shrinkage.add_walk_forward_mean`.
+
+    Deliberately NOT season-reset (unlike every team-rating lever in
+    `shrinkage.py`): home-court advantage is hypothesized to be a property
+    of the VENUE (crowd noise, altitude -- e.g. Denver's documented
+    altitude edge, travel fatigue imposed on visitors) rather than of a
+    given season's roster, so a team's own `home_log_ratio` history
+    accumulates across ALL its games in `games` regardless of season -- a
+    stadium's altitude doesn't reset every October the way a roster does.
+    Only that team's own HOME-side rows inform its own estimate: an away
+    game's `away_log_ratio` is evidence about the extent of the HOST's home
+    boost that night, not this (visiting) team's own home-court property
+    (see `_baseline_log_ratios` -- home_log_ratio/away_log_ratio are two
+    sides of the SAME single per-game home-boost estimate).
+
+    MOTIVATION (2026-08-06, Fable 5 critique item 1f): tests whether
+    home-court advantage varies meaningfully by team -- never previously
+    tested, unlike the home-court EWMA `halflife_games` itself (tested
+    earlier this session and found not to matter). See
+    MODEL_DOCUMENTATION.md for the holdout result once read."""
+    g = games.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
+    g = _baseline_log_ratios(g)
+
+    league_combined = (g["home_log_ratio"] - g["away_log_ratio"]) / 2.0
+    league_trailing_log_mult = league_combined.shift(1).ewm(halflife=halflife_games, min_periods=30).mean()
+
+    team_games_before = g.groupby("team_home").cumcount()
+    team_home_ewma = g.groupby("team_home")["home_log_ratio"].transform(
+        lambda s: s.shift(1).ewm(halflife=halflife_games, min_periods=1).mean()).fillna(0.0)
+
+    shrunk_log_mult = ((team_games_before * team_home_ewma + prior_games * league_trailing_log_mult)
+                        / (team_games_before + prior_games))
+    return np.exp(shrunk_log_mult)
+
+
 def fit_home_court_walk_forward(games: pd.DataFrame, halflife_games: float = 400.0) -> pd.Series:
     """Aligned-to-`games`-index Series: for each game (sorted by date), the
     trailing EWMA-fit home-court multiplier using ONLY strictly-prior games

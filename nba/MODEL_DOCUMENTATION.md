@@ -3350,3 +3350,83 @@ for the home-court EWMA halflife (Sec8 of `TECHNICAL_REFERENCE.md`).
 shows no real effect to combine with gamma_rtg the way Sec29's joint margin fix combined two
 individually-insufficient levers. Not pursued further. `gamma_rtg`/`gamma_pace` remain available,
 harmless-by-default (1.0) parameters on `project_game` for any future candidate that wants them.
+
+## 49. Team-specific home-court advantage tested: decisive negative, no holdout read spent (2026-08-06)
+
+Second item from the "scoped but not tested" inventory (Fable 5 critique item 1f) -- never
+previously tested, unlike the home-court EWMA `halflife_games` itself (tested earlier this session,
+found not to matter). Physically-motivated hypothesis: home-court edge could vary by team (crowd
+noise, Denver's documented altitude edge, travel fatigue imposed on visitors), so a single
+league-wide multiplier could be under-fitting real team-level variation.
+
+Built `home_court.fit_team_home_court_walk_forward(games, prior_games, halflife_games=400.0)`: a
+per-team trailing EWMA of that team's own `home_log_ratio` (its own HOME-side games only -- an away
+game's `away_log_ratio` is evidence about the HOST's home boost, not this team's own), games-count-
+weighted-shrunk toward the existing trailing league-wide multiplier
+(`fit_home_court_walk_forward`'s own log-mult), same blend shape as `shrinkage.add_walk_forward_mean`.
+Deliberately NOT season-reset (unlike every team-rating lever in `shrinkage.py`) -- venue properties
+don't reset with a new roster the way scoring rates do. Leak-guard regression test added
+(`test_team_home_court_walk_forward_has_no_leak_on_a_teams_first_ever_home_game`): a brand-new
+team's first-ever home appearance must get PURE league-wide shrinkage (team weight = 0 games), even
+with a deliberately extreme (130-point) score on that first game.
+
+**Stage 1 (recent-dev slice, seasons 2021-2023, n=3,679 games), `prior_games` swept 50/100/200/400/800
+(wide range from "trust team history heavily" to "barely deviate from league-wide")**: every single
+value is NOISE on every metric (total_mae, margin_mae, su) vs. the current league-wide-only config --
+deltas as small as -0.0003 to +0.0318, every 95% CI comfortably includes zero. No candidate shows a
+real improvement anywhere in the swept range, so none clears the Stage 1 bar.
+
+**Decisive negative, no holdout read spent**: unlike gamma_rtg (Sec48, a real but rejected tradeoff),
+team-specific HCA doesn't even show a real EFFECT in either direction at this sample size -- pure
+noise across a 16x range of shrinkage strength. Consistent with the home-court halflife finding
+(no real sensitivity to home-court hyperparameters generally) rather than a contradiction. Not
+adopted; `fit_team_home_court_walk_forward` remains available in `home_court.py` (unused by any
+live path) for a future candidate with a different design (e.g. a genuinely altitude-specific
+feature for the ~1 known outlier team, rather than a general per-team shrinkage fit) if one is ever
+proposed.
+
+## 50. OREB miss-decomposition tested: a fifth mechanism, a fifth confirmation of the same structural ceiling (2026-08-06)
+
+Third item from the "scoped but not tested" inventory, and the external review's own concrete
+suggestion for OREB specifically (item 6): the current `team_stat_rates.py` approach fits raw OREB
+COUNT as an independent FOR/AGAINST rate, conflating shot-VOLUME (how many misses a game generates
+-- already well-modeled by the scoring machinery) with offensive-rebounding SKILL (of the misses
+that happen, what share this team grabs). Four prior mechanisms (shrinkage strength Sec30, adaptive
+league average, cross_season_weight Sec34, own_halflife_games Sec37) all converged to the exact same
+"statistical tie with naive" ceiling using that SAME count-based family -- this is the first
+STRUCTURALLY DIFFERENT primitive tried.
+
+Built `src/models/oreb_decomposition.py`: (1) `misses_for`/`misses_against`
+(`fieldGoalsAttempted - fieldGoalsMade`, summed per team per game) walk-forward shrunk via the
+existing `shrinkage.add_walk_forward_rate` and combined via the existing
+`team_stat_rates.project_team_stat` ratio idiom -> `projected_team_misses`; (2) a NEW
+`add_walk_forward_exposure_rate` primitive (numerator/exposure walk-forward shrinkage at team grain,
+reimplemented rather than cross-imported from `player_rate_shrinkage.py`, per this project's
+separate-but-similar-files convention) for `own_oreb_rate` (`oreb_for/misses_for`) and
+`own_dreb_rate` (`dreb_for/misses_against`); (3) `project_oreb_share`, the same multiplicative-
+ratio-deviation idiom adapted to two distinct league baselines (OREB% ~0.28 and DREB%-allowed ~0.72
+are complementary but numerically different, unlike oRtg/dRtg which legitimately share one scale).
+`projected_team_OREB = projected_oreb_share * projected_team_misses` gives an EXACT accounting
+identity for free (the opponent's DREB share on that same miss set is `1 - this team's share`, never
+independently re-estimated) -- regression-tested (`test_project_team_oreb_gives_exact_game_level_coherence_with_projected_misses`),
+along with a zero-leak guard for the new exposure-rate primitive.
+
+**Stage 1 (recent-dev slice, n=7,380 team-sides), swept the exposure-shrinkage prior (50/100/200/400/
+800/1600 misses) and the misses-volume prior (10/20/40/80 games)**: EVERY configuration is either
+NOISE or a REAL REGRESSION vs. naive -- never a real improvement anywhere in the swept range. The
+best case (exposure prior 400-800) is a statistical tie with both naive and the current independent
+count-based fit (deltas +0.001 to +0.006 MAE, CIs including zero); tighter (50-100) or looser (1600)
+exposure priors, and the misses-prior sweep (10/40/80), all show a REAL REGRESSION vs. naive
+specifically (current-fit comparison stays NOISE throughout -- the new approach never beats OR
+meaningfully loses to the existing fit, it just never clears naive either).
+
+**Decisive negative, no holdout read spent**: a genuinely different modeling primitive -- separating
+volume from skill, enforcing exact game-level coherence -- still cannot beat the naive floor for
+OREB, across a 32x range of shrinkage strength. This is the FIFTH independent mechanism to hit the
+exact same wall (Sec30/34/37 plus this one), now including one that isn't just a parameter variant of
+the original family. Strengthens the conclusion considerably: OREB's ceiling looks like a genuine
+property of the category itself (an unusually chaotic, low-information stat at the team level with
+this project's available features) rather than a missing lever or a wrong functional form. Not
+pursued further without a genuinely new data source (e.g. shot-location/contest data distinguishing
+"long rebounds off missed threes" from "short rebounds off missed layups," which isn't in any
+currently-ingested source). `oreb_decomposition.py` remains available, unused by any live path.
