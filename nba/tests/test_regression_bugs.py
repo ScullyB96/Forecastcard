@@ -35,6 +35,7 @@ from src.models.player_playmaking_rates import PRIOR_TOUCHES_AST, PRIOR_TOUCHES_
 from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FTA, add_scoring_rates
 from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_family, log_score, over_under_prob, predict_variance
 from src.models.prop_distribution import family_for_mean, fit_count_family_mean_dependent
+from src.models.attendance_model import attendance_features_for_game, predict_attendance_probability
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
@@ -378,6 +379,62 @@ def test_fit_count_family_mean_dependent_isolates_the_near_zero_overdispersion()
         f = family_for_mean(model, query_mean)
         check(f"mean={query_mean} bucket stays Poisson (genuinely Poisson-distributed by construction)",
               f["family"] == "poisson", f"got {f}")
+
+
+def test_attendance_features_counts_dnp_streak_from_the_most_recent_game_backward():
+    """Task #58: `attendance_features_for_game`'s `dnp_streak` must count
+    consecutive MISSES starting from the game right before tonight and
+    working BACKWARD, stopping at the first appearance -- not a flat count
+    of total misses in the window (which would conflate "missed the last 3
+    in a row" with "missed 3 games scattered throughout the window", two
+    very different real situations). Builds a 6-game window where player A
+    played games 1-3, then missed games 4-6 (streak=3, fraction=0.5) and
+    player B missed game 1, played 2-4, then missed 5-6 (streak=2,
+    fraction=0.5 -- SAME fraction as A, but a shorter, more recent streak,
+    since B's most recent miss-run is only 2 long)."""
+    games = [f"g{i}" for i in range(1, 7)]
+    team_side_by_game = {g: "home" for g in games}
+    rows = []
+    # player A: attended g1,g2,g3; missed g4,g5,g6
+    for g in games[:3]:
+        rows.append({"gameId": g, "team_side": "home", "playerId": "A", "minutes": 20.0})
+    # player B: missed g1; attended g2,g3,g4; missed g5,g6
+    for g in games[1:4]:
+        rows.append({"gameId": g, "team_side": "home", "playerId": "B", "minutes": 20.0})
+    player_minutes = pd.DataFrame(rows)
+
+    features = attendance_features_for_game(player_minutes, games, team_side_by_game, lookback_games=6)
+    features = features.set_index("playerId")
+    check("player A's games_played_fraction is 0.5 (3 of 6)",
+          abs(features.loc["A", "games_played_fraction"] - 0.5) < 1e-9)
+    check("player A's dnp_streak is 3 (missed the last 3 in a row)",
+          features.loc["A", "dnp_streak"] == 3, f"got {features.loc['A', 'dnp_streak']}")
+    check("player B's games_played_fraction is ALSO 0.5 (3 of 6) -- same as A",
+          abs(features.loc["B", "games_played_fraction"] - 0.5) < 1e-9)
+    check("player B's dnp_streak is only 2 (missed the last 2, not 3 -- a SHORTER, more recent gap "
+          "despite an identical games_played_fraction to player A)",
+          features.loc["B", "dnp_streak"] == 2, f"got {features.loc['B', 'dnp_streak']}")
+
+
+def test_predict_attendance_probability_decays_with_streak_and_matches_fraction_at_streak_zero():
+    """Task #58: at `dnp_streak=0` (played last game), the predicted
+    probability must equal the raw `games_played_fraction` UNCHANGED
+    (streak_decay^0 == 1) -- confirms the streak term is a pure REFINEMENT
+    on top of the base rate, not a separate, disconnected estimate. A
+    nonzero streak must strictly DECREASE the probability relative to the
+    same fraction with streak=0, and a longer streak must decrease it
+    further (monotonically), for a fixed `games_played_fraction`."""
+    features = pd.DataFrame({
+        "games_played_fraction": [0.8, 0.8, 0.8],
+        "dnp_streak": [0, 1, 3],
+    })
+    probs = predict_attendance_probability(features, streak_decay=0.6)
+    check("streak=0 leaves the raw fraction exactly unchanged",
+          abs(probs.iloc[0] - 0.8) < 1e-9, f"got {probs.iloc[0]}")
+    check("streak=1 strictly decreases the probability below the raw fraction",
+          probs.iloc[1] < 0.8, f"got {probs.iloc[1]}")
+    check("streak=3 decreases the probability further than streak=1 (monotonic decay)",
+          probs.iloc[2] < probs.iloc[1], f"got streak=1:{probs.iloc[1]}, streak=3:{probs.iloc[2]}")
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -1912,6 +1969,8 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_attendance_features_counts_dnp_streak_from_the_most_recent_game_backward()
+    test_predict_attendance_probability_decays_with_streak_and_matches_fraction_at_streak_zero()
     test_fit_count_family_mean_dependent_isolates_the_near_zero_overdispersion()
     test_compute_walkforward_variance_model_has_no_leak_across_a_checkpoint()
     test_predict_variance_walk_forward_picks_the_latest_prior_checkpoint()

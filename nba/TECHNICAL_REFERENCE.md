@@ -929,12 +929,25 @@ And attendance prediction has a hard, already-known ceiling — no historical in
 (§1.3), so a backtest can only ever validate an attendance model against "recent pattern, no injury
 info," while the live system's real RotoWire feed is strictly better than anything backtestable
 (the same asymmetry Sec28.2 already flagged, now precisely bounded rather than just noted). A
-narrower, more tractable next step than a full two-stage rebuild: replace the current binary
-trailing-window union (in-or-out) with a probabilistic attendance signal using already-backtestable
-features (games-played fraction, DNP streak length, rest days) — validated by comparing its
-predicted attendance set directly against real oracle attendance, before ever combining it with the
-(already-confirmed-adequate) share step. Mechanically, re-enabling remains a one-line flag flip in
-two files once a new mechanism clears validation.
+narrower, more tractable next step than a full two-stage rebuild was scoped: replace the current
+binary trailing-window union (in-or-out) with a probabilistic attendance signal using already-
+backtestable features (games-played fraction, DNP streak length, rest days), validated by comparing
+its predicted attendance set directly against real oracle attendance, before ever combining it with
+the (already-confirmed-adequate) share step.
+
+**BUILT AND VALIDATED (2026-08-06)**: `src/models/attendance_model.py` implements exactly this --
+`P(attend) = games_played_fraction × streak_decay^dnp_streak` (games-played fraction and consecutive-
+DNP-streak length, both walk-forward-safe from already-cached data). Validated directly against real
+oracle attendance via paired-bootstrap Brier score vs. the current union rule's implicit P=1.0.
+**Every `streak_decay` value swept (0.3-1.0) is a decisive real improvement**, roughly HALVING the
+current rule's Brier score at the best value (`streak_decay=0.7`: 0.1396 vs. 0.3099, full dev range
+n=292,954). Not a borderline result like most levers this session -- the current rule is
+fundamentally miscalibrated by construction (asserts certainty for a population that only actually
+attends ~69% of the time). Per Sec47's own scoping, no holdout read spent and nothing wired into a
+live path yet -- standalone Stage-1 infrastructure, confirming the path to a working Phase 2
+re-enable is concretely unblocked. Mechanically, re-enabling Phase 2 itself remains a one-line flag
+flip in two files once this signal (or a successor) is composed with the share step and cleared
+through the normal two-stage-then-holdout adoption gate.
 
 ### 6.5 Rest/back-to-back (`rest_schedule.py`) — a related, separately-tested, NOT-adopted signal
 
@@ -1278,14 +1291,17 @@ fix.
    without a genuinely new DATA source (e.g. shot-location/contest data distinguishing long
    rebounds off missed threes from short rebounds off missed layups — not in any currently-ingested
    source) — every modeling-side idea on the table has now been tried and confirmed not to help.
-7. **Phase 2 (RAPM-lite lineup adjustment) is disabled and should stay disabled — but the fix is
-   now precisely scoped (§6.4), not an open-ended rebuild.** A semi-oracle decomposition proved the
-   ENTIRE predictive-mode gap is attendance-prediction error (real, −0.0424 margin_mae) — the
-   share-redistribution half is already statistically indistinguishable from oracle (NOISE). Don't
-   build a full two-stage minutes model; build a smarter attendance-probability signal alone (using
-   games-played fraction / DNP streaks / rest days, all already backtestable) and validate it
-   directly against real attendance before combining with the unchanged share step. Real work, but
-   narrower and cheaper than originally scoped.
+7. **Phase 2 (RAPM-lite lineup adjustment) is disabled and should stay disabled for now — but the
+   Stage-1 attendance signal that blocked re-enabling is BUILT AND VALIDATED (§6.4, 2026-08-06).**
+   A semi-oracle decomposition proved the ENTIRE predictive-mode gap is attendance-prediction error
+   (real, −0.0424 margin_mae) — the share-redistribution half is already statistically
+   indistinguishable from oracle (NOISE). `attendance_model.py`'s probabilistic signal
+   (games-played fraction decayed by DNP-streak length) is a decisive real improvement over the
+   current binary union rule (Brier score roughly halved, validated directly against real
+   attendance). Still not wired into a live path — composing it with the share step and clearing a
+   proper two-stage-then-holdout adoption gate for actually re-enabling Phase 2 is the remaining
+   real work, but the previously-open research question (does a better Stage-1 signal even exist)
+   is now settled, not speculative.
 8. **`cross_season_weight`'s stl/blk results for team_stat_rates are the least statistically robust
    adopted change this session** (§7.5) — they don't survive a conservative Bonferroni correction,
    though they're not reversed to a regression either. As next season's real games accumulate, this

@@ -3534,3 +3534,69 @@ fitting (a separate, larger, out-of-scope concern flagged for a future look, not
 into here). Re-verified on the same real slate: oreb now correctly shows 21/262 negbin rows
 (all at genuinely low, nonzero projected means), blk 131/262, ast 89/262, tov still 0 (unchanged,
 as designed).
+
+## 53. Stage-1 attendance-probability model: built and validated, a decisive real win (2026-08-06)
+
+The last item from the "scoped but not tested" inventory, and Sec47's own "narrowed recommendation":
+Sec47 proved the ENTIRE Phase 2 predictive-mode gap is attendance-prediction error, not share-
+redistribution (semi-oracle -- real attendance + trailing-average shares -- is statistically
+indistinguishable from full oracle), and that the live system's current active-player SET
+(`lineup_rating.predictive_minutes_shares`) is a crude binary rule: anyone who appeared at least
+once in the trailing 10-game window is treated as CERTAIN to play tonight (implicit P=1.0),
+otherwise fully excluded (implicit P=0.0). Sec47 explicitly recommended building a genuinely
+probabilistic alternative using games-played fraction, DNP-streak length, and rest days -- all
+already available, walk-forward-safe, no new ingest -- and validating it DIRECTLY against real
+oracle attendance, standalone, before ever combining it with the (already-confirmed-adequate)
+share-redistribution step.
+
+Built `src/models/attendance_model.py`: `attendance_features_for_game` computes, for every player in
+the SAME trailing-10-game candidate pool `predictive_minutes_shares` already uses,
+`games_played_fraction` (fraction of the window attended) and `dnp_streak` (consecutive most-recent
+misses, counted backward from the game right before tonight -- distinguishes "missed the last 3 in a
+row" from "missed 3 games scattered through the window", which an equal fraction alone can't).
+`predict_attendance_probability` combines them as `games_played_fraction * streak_decay^dnp_streak` --
+the same multiplicative-decay idiom `own_halflife_games` uses elsewhere in this project, applied to a
+binary presence signal. Regression-tested (streak-counting direction, decay monotonicity/identity at
+streak=0).
+
+**Validated directly against real oracle attendance (Brier score, paired bootstrap vs. the current
+union rule's implicit P=1.0), `streak_decay` swept 0.3-1.0, full dev range (n=292,954 candidate
+player-games, base attendance rate 0.69)**:
+
+```
+streak_decay=0.3:  brier=0.1494  (current rule: 0.3099)  REAL IMPROVEMENT
+streak_decay=0.5:  brier=0.1431                          REAL IMPROVEMENT
+streak_decay=0.6:  brier=0.1409                          REAL IMPROVEMENT
+streak_decay=0.7:  brier=0.1396  <- best                 REAL IMPROVEMENT
+streak_decay=0.85: brier=0.1410                          REAL IMPROVEMENT
+streak_decay=1.0:  brier=0.1518  (fraction alone, no streak term)  REAL IMPROVEMENT
+```
+
+**Every single value tested is a decisive real improvement** -- roughly HALVING the current rule's
+Brier score at the best value (0.7). This isn't a borderline/CI-hugging result like most of this
+session's marginal levers: the current union rule is fundamentally miscalibrated by construction (it
+asserts certainty for a population that only actually attends 69% of the time), so ANY real
+probability estimate beats it decisively. `streak_decay=0.7` adopted as the new default (was an
+initial placeholder guess of 0.6, itself already a real improvement -- 0.7 is marginally better
+still). Stage 1 (recent-dev slice, n=103,569) and Stage 2 (full dev range) gave the same ranking and
+nearly identical Brier scores, confirming this isn't a small-sample artifact.
+
+**Calibration check (streak_decay=0.6, full dev range)**: the model is systematically CONSERVATIVE --
+every predicted-probability decile's empirical attendance rate runs somewhat higher than the mean
+prediction (e.g. the top decile predicts 1.000 but empirically attends 94.2% of the time; the bottom
+decile predicts 0.012 but empirically attends 13.2% of the time). Real, structurally-expected
+miscalibration (even a player with a perfect recent record can get a surprise rest night; even a
+long-DNP player can return without warning in this backtest's no-injury-data setting) -- but still a
+FAR smaller miscalibration than the current rule's, which is uniformly wrong for the entire 31% of
+its own population that doesn't actually attend.
+
+**Per Sec47's own scoping, no holdout read spent and nothing is adopted into a live prediction path
+here** -- this is the same "pure dev-only research informing where a future rebuild should focus"
+posture Sec47 itself used, now with a concrete, validated Stage-1 signal in hand.
+`attendance_model.py` is standalone infrastructure, not yet wired into `lineup_rating.py`'s live
+share-redistribution step (that composition, and any accompanying holdout-gated adoption decision for
+actually re-enabling Phase 2 in production, is real follow-up work if pursued, not done here) -- but
+the central question this task set out to answer is now settled: a probabilistic Stage-1 signal
+built purely from already-available features is a real, decisive improvement over the current crude
+rule, and the path to a working Phase 2 re-enable is concretely unblocked rather than an open research
+question.
