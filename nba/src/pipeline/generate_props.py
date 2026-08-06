@@ -91,7 +91,10 @@ from src.models.player_playmaking_rates import add_playmaking_rates
 from src.models.player_rate_shrinkage import add_walk_forward_player_rate
 from src.models.player_rebounding_rates import add_rebounding_rates
 from src.models.player_scoring_rates import add_scoring_rates
-from src.models.prop_distribution import CATEGORY_FAMILY, fit_continuous_family, fit_count_family
+from src.models.prop_distribution import (
+    CATEGORY_FAMILY, MEAN_DEPENDENT_CATEGORIES, family_for_mean, fit_continuous_family, fit_count_family,
+    fit_count_family_mean_dependent,
+)
 from src.models.team_stat_rates import ADOPTED_CATEGORIES, add_team_stat_ratings, build_team_stat_game_log, project_team_stat
 from src.models.team_strength import add_team_ratings, build_team_game_log
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta, raw_projected_points
@@ -478,16 +481,36 @@ def _fit_prop_distributions(scoring_log: pd.DataFrame, rebounding_log: pd.DataFr
         spec = CATEGORY_FAMILY[name]
         log = logs_by_name[name]
         proj = points_proj if name == "points" else log[proj_col]
-        rows = pd.DataFrame({"_actual": log[actual_col], "_proj": proj})
+        rows = pd.DataFrame({"_actual": log[actual_col], "_proj": proj, "_minutes": log["minutes"]})
         if spec["family_type"] == "continuous":
             rows["_exposure"] = log[spec["exposure_col"]]
         rows = rows.dropna()
+        # REAL BUG FOUND AND FIXED (2026-08-06, while validating task #57 against a real live
+        # slate): unlike `validate_prop_distribution.py._build_logs`, which explicitly filters
+        # `minutes > 0` before ANY family fit (matching the population live predictions are
+        # actually made for -- `resolve_active_lineup` only ever emits a props row for a player
+        # WHO IS PLAYING), this function fit every count family (both the original pooled choice
+        # AND the new mean-dependent one) on the FULL historical log including DNP rows. Confirmed
+        # real on cached data: 37.8% of oreb's historical rows have `minutes == 0`, dragging the
+        # mean-dependent selector's near-zero quantile bucket edge down to exactly 0.0 and merging
+        # the genuinely-low-but-real-exposure population (the one Sec52's validation targeted) into
+        # a much wider, differently-calibrated bucket. Filtering to the SAME population the
+        # validation script used fixes both the pre-existing pooled-choice staleness and the new
+        # mean-dependent bucketing.
+        rows = rows[rows["_minutes"] > 0]
         if rows.empty:
             continue
 
         if spec["family_type"] == "count":
-            count_fit = fit_count_family(rows["_actual"].to_numpy(), rows["_proj"].to_numpy())
-            fitted[name] = {"r": count_fit["r"]} if count_fit["family"] == "negbin" else {}
+            if name in MEAN_DEPENDENT_CATEGORIES:
+                # Task #57/Sec52: a single pooled family choice hides real, bootstrap-confirmed
+                # near-zero-mean overdispersion for these 3 categories specifically -- see
+                # `prop_distribution.MEAN_DEPENDENT_CATEGORIES`'s own docstring.
+                fitted[name] = {"mean_dependent_model": fit_count_family_mean_dependent(
+                    rows["_actual"].to_numpy(), rows["_proj"].to_numpy())}
+            else:
+                count_fit = fit_count_family(rows["_actual"].to_numpy(), rows["_proj"].to_numpy())
+                fitted[name] = {"r": count_fit["r"]} if count_fit["family"] == "negbin" else {}
         else:
             resid = (rows["_actual"] - rows["_proj"]).to_numpy()
             fitted[name] = fit_continuous_family(resid, rows["_exposure"].to_numpy())
@@ -507,6 +530,14 @@ def _distribution_fields(stat_name: str, mean: float, distribution_fits: dict) -
     if stat_name not in distribution_fits:
         return None, spec["family"], {}
     fit = distribution_fits[stat_name]
+    if stat_name in MEAN_DEPENDENT_CATEGORIES:
+        # Task #57/Sec52: family/params picked from THIS player's own projected mean (which
+        # quantile bucket it falls into), not one static category-wide choice.
+        row_family = family_for_mean(fit["mean_dependent_model"], mean)
+        if row_family["family"] == "poisson":
+            return mean, "poisson", {}
+        r = row_family["r"]
+        return mean + mean ** 2 / r, "negbin", {"r": r}
     if spec["family"] == "poisson":
         return mean, "poisson", {}
     if spec["family"] == "negbin":

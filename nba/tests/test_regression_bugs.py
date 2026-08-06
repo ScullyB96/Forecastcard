@@ -34,6 +34,7 @@ from src.models.player_defensive_event_rates import add_defensive_event_rates
 from src.models.player_playmaking_rates import PRIOR_TOUCHES_AST, PRIOR_TOUCHES_TOV
 from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FTA, add_scoring_rates
 from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_family, log_score, over_under_prob, predict_variance
+from src.models.prop_distribution import family_for_mean, fit_count_family_mean_dependent
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
@@ -336,6 +337,47 @@ def test_predict_variance_walk_forward_picks_the_latest_prior_checkpoint():
           abs(result[2] - 20.0) < 1e-9, f"got {result[2]}")
     check("a query date after every checkpoint uses the LATEST (checkpoint 3)",
           abs(result[3] - 30.0) < 1e-9, f"got {result[3]}")
+
+
+def test_fit_count_family_mean_dependent_isolates_the_near_zero_overdispersion():
+    """Task #57 (Sec46.2's finding): overdispersion needing Negative-
+    Binomial is concentrated in the NEAR-ZERO-projected-mean bucket
+    specifically, not the high-mean/star tier -- a single POOLED family
+    choice for a whole category can hide this. Builds synthetic data with
+    that EXACT shape: 1,000 near-zero-mean (0.02) rows with a deliberately
+    overdispersed actual-outcome rate (15% ones -- ~7.5x the ~2% a true
+    Poisson(0.02) would produce), plus 3,000 rows at means 1/2/3 with
+    genuinely Poisson-distributed actuals (variance == mean by
+    construction). Confirms the mean-dependent fit picks NegBin for the
+    near-zero bucket specifically, Poisson for every higher-mean bucket --
+    and that a real single POOLED fit_count_family call over the same data
+    would have missed the near-zero-specific effect (masked by the 3x
+    larger well-behaved population)."""
+    rng = np.random.default_rng(42)
+    means = np.concatenate([
+        np.full(1000, 0.02),
+        np.full(1000, 1.0), np.full(1000, 2.0), np.full(1000, 3.0),
+    ])
+    actuals = np.concatenate([
+        rng.choice([0, 1], size=1000, p=[0.85, 0.15]),  # ~7.5x a true Poisson(0.02) rate -- overdispersed
+        rng.poisson(1.0, size=1000), rng.poisson(2.0, size=1000), rng.poisson(3.0, size=1000),
+    ]).astype(float)
+
+    from src.models.prop_distribution import fit_count_family
+    pooled = fit_count_family(actuals, means)
+    check("a single POOLED fit over the whole mix does NOT trigger NegBin (masked by the 3x larger "
+          "well-behaved population) -- confirms the mean-dependent split finds something the pooled "
+          "check itself would miss, not a tautology",
+          pooled["family"] == "poisson", f"got {pooled}")
+
+    model = fit_count_family_mean_dependent(actuals, means, n_buckets=4)
+    near_zero_family = family_for_mean(model, 0.02)
+    check("the near-zero-mean bucket gets NegBin (the real overdispersion isolated)",
+          near_zero_family["family"] == "negbin", f"got {near_zero_family}")
+    for query_mean in (1.0, 2.0, 3.0):
+        f = family_for_mean(model, query_mean)
+        check(f"mean={query_mean} bucket stays Poisson (genuinely Poisson-distributed by construction)",
+              f["family"] == "poisson", f"got {f}")
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -1870,6 +1912,7 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_fit_count_family_mean_dependent_isolates_the_near_zero_overdispersion()
     test_compute_walkforward_variance_model_has_no_leak_across_a_checkpoint()
     test_predict_variance_walk_forward_picks_the_latest_prior_checkpoint()
     test_add_walk_forward_exposure_rate_has_no_leak_on_a_teams_first_ever_game()

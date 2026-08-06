@@ -750,12 +750,21 @@ the pooled test under-serves — every category's HIGH-mean bucket is consistent
 It's the NEAR-ZERO-mean buckets (deep-bench players) that show extreme overdispersion — OREB's
 near-zero bucket (mean≈0.00): variance/mean ratio = 42.6; BLK's two lowest buckets also flag NB
 needed. A zero-inflation-adjacent phenomenon (an occasional non-zero event against a near-zero mean
-is a huge standardized surprise), not a "stars need more variance" one. Whether this matters in
-practice depends on how much weight garbage-time/deep-bench props actually carry in the live
-product — a genuine open question, not resolved here; a mean-dependent family selection is a real
-design change that would need its own validation, not adopted on the strength of this diagnostic.
+is a huge standardized surprise), not a "stars need more variance" one.
 
-### 5.7 Two further real bugs found in the live wiring (`generate_props.py`)
+**BUILT, VALIDATED, AND WIRED LIVE for 3/4 flagged categories (2026-08-06).**
+`prop_distribution.fit_count_family_mean_dependent`/`family_for_mean`: quantile-buckets players by
+their own projected mean (same 4-bucket granularity as the diagnostic above), fits the unmodified
+`fit_count_family` separately per bucket. Paired-bootstrap validated on a real chronological fit/eval
+split, split by low-mean subset (the population this should help) vs. high-mean subset (must not
+regress): **oreb/blk/ast all show a REAL log-score improvement for the low-mean subset with NO
+regression for the high-mean subset** (net win). **tov does NOT clear this bar** (NOISE for both
+subsets) — consistent with tov having the WEAKEST overdispersion ratio of the four in the original
+diagnostic (1.260, barely above the 1.2 threshold, vs. oreb 42.6/blk 4.7/ast 1.38), so this isn't
+arbitrary exclusion. `MEAN_DEPENDENT_CATEGORIES = {"oreb", "blk", "ast"}` is the adopted set; tov and
+every other category are completely unchanged.
+
+### 5.7 Three further real bugs found in the live wiring (`generate_props.py`)
 
 - **EWMA NaN-on-season-reset bug**: EWMA-based columns (minutes, 2PT/3PT attempt-rate, block-rate)
   correctly reset to NaN on a player's first game of every new season (a deliberate season-boundary
@@ -769,6 +778,18 @@ design change that would need its own validation, not adopted on the strength of
   genuinely missing player (e.g. a two-way/call-up with no cached rebounding/playmaking/defensive
   history) indistinguishable from a real, data-backed near-zero projection. Fixed with a helper that
   preserves the missing/NaN distinction explicitly.
+- **DNP-row population-mismatch bug (2026-08-06, found verifying §5.6's mean-dependent family
+  selector against a real slate)**: `_fit_prop_distributions` fit every count family (both the
+  pre-existing pooled choice AND the new mean-dependent one) on the FULL historical log including
+  DNP (`minutes == 0`) rows, unlike `validate_prop_distribution.py._build_logs`'s explicit
+  `minutes > 0` filter (matching the population real predictions are actually made for). 37.8% of
+  oreb's historical rows had `minutes == 0` — enough mass to drag the mean-dependent selector's
+  bottom quantile edge down to exactly 0.0, merging the genuinely-low-but-real-exposure population
+  §5.6 targeted into a much wider bucket that fit as Poisson. Symptom was stark: the first live
+  verification run showed 0/262 oreb rows as negbin, even at a projected mean of 0.061. Fixed by
+  filtering to `minutes > 0` inside `_fit_prop_distributions`, matching the validation script — NOT
+  by touching the underlying rate models' own walk-forward fitting (a separate, larger concern).
+  Re-verified: 21/262 oreb rows now correctly negbin, all at genuinely low nonzero means.
 
 ### 5.8 A separate, related RAPM-adjacent primitive: `player_priors.py`
 

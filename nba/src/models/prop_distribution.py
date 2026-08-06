@@ -104,6 +104,19 @@ CATEGORY_FAMILY = {
     "blk": {"family_type": "count", "family": "poisson", "exposure_col": None},
 }
 
+# Categories where `fit_count_family_mean_dependent` (task #57, Sec52) showed a REAL log-score
+# improvement for the near-zero-mean population with NO regression for the high-mean population,
+# confirmed via paired bootstrap on a real chronological eval split (not assumed from the Sec46.2
+# diagnostic alone): oreb, blk, ast. `tov` was ALSO diagnosed with a bucket-dependent pattern in
+# Sec46.2 but did NOT clear a real improvement on this same validation (NOISE both for its low-mean
+# subset and overall) -- deliberately excluded here despite sharing the diagnostic, per this
+# project's per-category "never assume a related category transfers" discipline. dreb/stl showed no
+# bucket-dependence at all in Sec46.2 and were never tested here. A category in this set still keeps
+# its normal single-family entry in `CATEGORY_FAMILY` above (used as the fallback/description), but
+# `generate_props.py._fit_prop_distributions`/`_distribution_fields` route it through
+# `fit_count_family_mean_dependent`/`family_for_mean` instead of the pooled single-family fit.
+MEAN_DEPENDENT_CATEGORIES = {"oreb", "blk", "ast"}
+
 # Floor on a count family's mean (mu) before evaluating pmf/logpmf. BUG FOUND (2026-08-01,
 # validate_prop_distribution.py's real run on 66,937 blocks eval rows): a player with an
 # expanding-shrunk `blk_rate_per_min` of exactly 0.0 (real -- a perimeter player who has simply
@@ -147,6 +160,63 @@ def fit_count_family(actuals: np.ndarray, means: np.ndarray) -> dict:
         return {"family": "poisson"}
     r = mean_of_means ** 2 / (empirical_variance - mean_of_means)
     return {"family": "negbin", "r": max(r, MIN_NB_DISPERSION)}
+
+
+MEAN_DEPENDENT_N_BUCKETS = 4  # quantile buckets, matching the diagnostic (MODEL_DOCUMENTATION.md
+# Sec46.2) that motivated this -- not re-tuned here, just reused as the same granularity that
+# revealed the effect in the first place.
+MIN_BUCKET_SIZE = 500  # don't attempt a separate overdispersion fit on a tiny bucket -- same role
+# as `rapm_lite.MIN_STINTS_TO_FIT`, sized for this project's typical multi-season eval-set counts.
+
+
+def fit_count_family_mean_dependent(actuals: np.ndarray, means: np.ndarray,
+                                     n_buckets: int = MEAN_DEPENDENT_N_BUCKETS) -> dict:
+    """Mean-DEPENDENT generalization of `fit_count_family` (task #57,
+    Sec46.2's finding): a single POOLED family choice for a whole category
+    hides that overdispersion needing Negative-Binomial is concentrated in
+    the NEAR-ZERO-projected-mean bucket specifically (deep-bench players
+    projected essentially 0 for that category) -- NOT spread evenly, and
+    NOT concentrated in the high-mean/star tier the original hypothesis
+    expected. High-mean buckets are consistently fine with Poisson.
+
+    Splits players into `n_buckets` quantile buckets of their own
+    projected `means` (same quantile-bucketing Sec46.2's diagnostic used),
+    fits `fit_count_family` (UNMODIFIED -- reuses the exact already-
+    validated overdispersion math) separately within each bucket. A
+    bucket with fewer than `MIN_BUCKET_SIZE` rows falls back to Poisson
+    rather than fitting an unstable NB on too little data.
+
+    Returns `{"bucket_edges": [...], "bucket_fits": [...]}` --
+    `bucket_edges` has `n_buckets - 1` interior cutpoints (quantiles of
+    `means` from the FIT set); `family_for_mean` below is the prediction-
+    time lookup counterpart, keyed by a player's own projected mean (not
+    by which bucket they happened to fall in historically -- the cutpoints
+    generalize prospectively, the same way any other trained threshold
+    does)."""
+    means = np.asarray(means)
+    actuals = np.asarray(actuals)
+    quantiles = np.linspace(0, 1, n_buckets + 1)[1:-1]
+    bucket_edges = np.quantile(means, quantiles).tolist()
+    bucket_ids = np.searchsorted(bucket_edges, means)
+
+    bucket_fits = []
+    for b in range(n_buckets):
+        mask = bucket_ids == b
+        if mask.sum() < MIN_BUCKET_SIZE:
+            bucket_fits.append({"family": "poisson"})
+        else:
+            bucket_fits.append(fit_count_family(actuals[mask], means[mask]))
+    return {"bucket_edges": bucket_edges, "bucket_fits": bucket_fits}
+
+
+def family_for_mean(model: dict, mean: float) -> dict:
+    """Prediction-time counterpart to `fit_count_family_mean_dependent`:
+    looks up which bucket a projected `mean` falls into (via that model's
+    own quantile `bucket_edges`) and returns that bucket's fitted family
+    params -- exactly the shape `over_under_prob`/`log_score` already
+    expect from `fit_count_family`'s single-bucket output."""
+    bucket_id = int(np.searchsorted(model["bucket_edges"], mean))
+    return model["bucket_fits"][bucket_id]
 
 
 def over_under_prob(line: float, mean: float, family: str, params: dict) -> float:

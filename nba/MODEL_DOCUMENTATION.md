@@ -3474,3 +3474,63 @@ shape to the home-court hardcode fixed earlier this project, Sec28-era) -- a str
 both the trend-significance axis AND the live-data-freshness axis, not a tradeoff. Verified end-to-end
 against a real historical slate (2025-01-15): win probabilities and 80% spread intervals compute
 correctly under the new checkpoint-based path.
+
+## 52. Mean-dependent Poisson/NegBin family selection for props: built, validated, wired live for 3/4 flagged categories (2026-08-06)
+
+Fifth item from the "scoped but not tested" inventory: Sec46.2 found `fit_count_family`'s pooled,
+category-wide overdispersion check hides a real effect concentrated in the NEAR-ZERO-projected-mean
+population specifically (oreb/blk/ast/tov all showed extreme overdispersion in their bottom
+projected-mean quartile bucket, but Poisson was fine everywhere else) -- explicitly flagged as
+"queued as a candidate refinement, not adopted on the strength of this diagnostic alone... needing
+its own validation."
+
+Built `prop_distribution.fit_count_family_mean_dependent`/`family_for_mean`: splits players into 4
+quantile buckets of their own projected mean (same granularity as Sec46.2's diagnostic), fits the
+UNMODIFIED, already-validated `fit_count_family` separately within each bucket, with a
+`MIN_BUCKET_SIZE` floor falling back to Poisson if a bucket is too small to fit safely. A player's
+own projected mean at prediction time picks which bucket's family/params apply. Regression-tested
+with synthetic data reproducing Sec46.2's exact empirical shape (a 3x-larger well-behaved population
+masking a real near-zero-specific effect from the pooled check).
+
+**Validated on the actual dev range (fit/eval chronological split, same convention as
+`validate_prop_distribution.py`), for exactly the 4 categories Sec46.2 flagged**, paired bootstrap
+comparing mean-dependent vs. the current pooled single-family log-score, split by low-mean subset
+(the population this is supposed to help) and high-mean subset (must not regress):
+
+```
+oreb: low-mean REAL IMPROVEMENT (-0.0121 log-score)  high-mean NOISE (no harm)  overall REAL IMPROVEMENT
+blk:  low-mean REAL IMPROVEMENT (-0.0086)            high-mean NOISE            overall REAL IMPROVEMENT
+ast:  low-mean REAL IMPROVEMENT (-0.0331)            high-mean NOISE            overall REAL IMPROVEMENT
+tov:  low-mean NOISE (+0.0027, not a real gain)       high-mean NOISE            overall NOISE
+```
+
+**3 of 4 clear the net-win bar cleanly (oreb/blk/ast) -- tov does not**, consistent with Sec46.2's own
+numbers (tov's near-zero-bucket overdispersion ratio was the weakest of the four, 1.260, barely above
+the 1.2 threshold, vs. oreb's 42.6/blk's 4.7/ast's 1.38) -- a real effect size difference, not
+arbitrary. Per this project's per-category "never assume a related category transfers" discipline,
+`prop_distribution.MEAN_DEPENDENT_CATEGORIES = {"oreb", "blk", "ast"}` deliberately excludes tov
+despite sharing the original diagnostic. Wired into `generate_props.py`'s `_fit_prop_distributions`/
+`_distribution_fields` (routes these 3 categories through the mean-dependent fit/lookup instead of
+the pooled one; every other category, including tov, is completely unchanged). Verified end-to-end
+against a real historical slate (2025-01-15).
+
+**A real, separate bug found and fixed while doing that live verification**: the first end-to-end
+run showed EVERY oreb row as "poisson" (0 negbin), even players with a projected mean as low as
+0.061 -- squarely inside the near-zero bucket the whole feature targets. Root cause:
+`_fit_prop_distributions` (both the pre-existing pooled `fit_count_family` call AND the new
+mean-dependent one) fit on the FULL historical log, including DNP (`minutes == 0`) rows --
+`validate_prop_distribution.py._build_logs` explicitly filters `minutes > 0` before fitting
+(matching the population real predictions are made for, since `resolve_active_lineup` only ever
+emits a props row for a player who is actually playing), but `generate_props.py._build_rate_logs`
+never applied that same filter. Confirmed real: 37.8% of oreb's historical rows had `minutes == 0`,
+which alone was enough mass to drag the mean-dependent selector's bottom quantile edge down to
+EXACTLY 0.0 -- merging the genuinely-low-but-real-exposure population Sec52's own validation
+targeted into a much wider, differently-calibrated bucket that happened to fit as Poisson. This
+predates task #57 (the original pooled family choice was fit on this same un-filtered population
+too, just less visibly affected by it), but was only surfaced by the more granular per-bucket
+selector. Fixed by filtering `rows` to `minutes > 0` inside `_fit_prop_distributions`, matching the
+validation script's population, WITHOUT touching the underlying rate models' own walk-forward
+fitting (a separate, larger, out-of-scope concern flagged for a future look, not silently expanded
+into here). Re-verified on the same real slate: oreb now correctly shows 21/262 negbin rows
+(all at genuinely low, nonzero projected means), blk 131/262, ast 89/262, tov still 0 (unchanged,
+as designed).
