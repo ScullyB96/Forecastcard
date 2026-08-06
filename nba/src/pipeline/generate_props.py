@@ -250,6 +250,26 @@ def _team_stat_totals(latest_team_stat: pd.DataFrame, home_id: int, away_id: int
     return totals
 
 
+def _component_scale_factors(raw_points: pd.Series, final_points: pd.Series) -> dict:
+    """REAL BUG FOUND AND FIXED (2026-08-02, external technical review): `final_points` (the
+    matchup-adjusted, team-total-anchored points prop) and the shooting-component props
+    (2pt_made/3pt_made/ft_made, served straight from the raw rate models) used to have no
+    relationship to each other at all -- confirmed on a real 2025-01-15 slate before this fix:
+    150/262 players (57%) showed a >1-point gap between `points` and what
+    `2*2pt_made + 3*3pt_made + ft_made` implied, several exceeding 8 points. Returns, per player,
+    the ratio their TOTAL points projection underwent (matchup adjustment + team-total anchoring
+    combined) so a caller can rescale each shooting component by the same factor -- this preserves
+    a player's own shot-mix (2PT vs 3PT vs FT share, the best available proxy since matchup
+    difficulty isn't modeled separately per shot type) while guaranteeing the components always
+    reconcile exactly with the final points prop. Falls back to a scale of 1.0 (no rescaling) for
+    a player whose raw points projection is ~0 -- dividing by a near-zero raw total would blow up
+    into a meaningless factor rather than a real correction."""
+    return {
+        pid: (final_points.get(pid, 0.0) / raw) if raw > 1e-6 else 1.0
+        for pid, raw in raw_points.items()
+    }
+
+
 def _anchor_preserving_missing(raw_with_nan: pd.Series, side_total: float | None) -> pd.Series:
     """Anchors `raw_with_nan` (a per-player raw category projection, which
     may contain NaN for a player missing that category's rate-model
@@ -618,6 +638,7 @@ def run(game_date: str) -> pd.DataFrame:
 
             usage_shares = compute_usage_shares(adjusted_points)
             final_points = allocate_team_total(usage_shares, team_total)
+            points_scale_factor = _component_scale_factors(raw_points, final_points)
 
             # DREB/AST/TOV/STL/BLK (Task #24): same macro-anchor + micro-reallocation rule as
             # points, using team_stat_rates' team-level total in place of RAPM's. Each category's
@@ -635,9 +656,10 @@ def run(game_date: str) -> pd.DataFrame:
                 anchored_flags[label] = side_total is not None
 
             for pid in proj.index:
+                scale = points_scale_factor.get(pid, 1.0)
                 stat_values = {
-                    "points": final_points.get(pid), "2pt_made": proj.loc[pid].get("2pt_proj_made"),
-                    "3pt_made": proj.loc[pid].get("3pt_proj_made"), "ft_made": proj.loc[pid].get("ft_proj_made"),
+                    "points": final_points.get(pid), "2pt_made": proj.loc[pid].get("2pt_proj_made") * scale,
+                    "3pt_made": proj.loc[pid].get("3pt_proj_made") * scale, "ft_made": proj.loc[pid].get("ft_proj_made") * scale,
                     "oreb": proj.loc[pid].get("oreb_proj"),
                     "dreb": final_by_category["dreb"].get(pid) if "dreb" in final_by_category else proj.loc[pid].get("dreb_proj"),
                     "ast": final_by_category["ast"].get(pid) if "ast" in final_by_category else proj.loc[pid].get("ast_proj"),

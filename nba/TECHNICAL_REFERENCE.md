@@ -506,7 +506,28 @@ today, since every adopted category ended up using `family='normal'` anyway, whi
 path). Fixed via a shared `_t_scale(var, df)` helper, applied everywhere a t-family scale is
 computed, in both `score_distribution.py` and `prop_distribution.py`.
 
-**Calibration result**: 95% nominal interval → ~94–95% empirical coverage — well-calibrated.
+**Calibration result (pooled)**: 95% nominal interval → ~94–95% empirical coverage — well-calibrated
+on the FULL-range aggregate.
+
+**A real, statistically significant per-season calibration finding (2026-08-02, external review)**:
+the pooled number above hides a genuine trend. The variance model is a single static OLS fit over
+the ENTIRE historical range — structurally different from every other component in this codebase
+(all properly walk-forward, refit using only strictly-prior data). Checked per-season coverage of
+the nominal 80%/95% MARGIN interval: **a real, significant declining trend** (margin_cov80 vs.
+season: r=−0.749, p=0.0080; margin_cov95: r=−0.782, p=0.0044) — by 2024-2025 the nominal-80% margin
+interval only actually covers ~78–79% of real outcomes, a genuine, CURRENT overconfidence in live
+win-probability/spread output. **Total coverage shows no comparable trend** (r=−0.429/p=0.19 and
+r=+0.128/p=0.71) — this is specifically a margin problem, the same "difference metric more exposed
+than sum metric" pattern found everywhere else in this project.
+
+**Tested one candidate fix, found it does not resolve the trend**: a recency-weighted (WLS) version
+of the same OLS fit, at three halflives — pooled coverage shifts slightly toward nominal, but the
+season-level declining TREND gets mildly worse, not better. A single global reweighted fit applied
+retroactively to every season (including old ones) isn't the right mechanism. **The correct next
+step, queued but not built**: a genuine walk-forward refit of the variance model (recomputed
+periodically using only residuals available as of that point in time, mirroring `rapm_lite.py`'s
+biweekly-refit cadence), not another single-fit weighting scheme. See `MODEL_DOCUMENTATION.md`
+Sec45.3 for the full numbers.
 
 ---
 
@@ -641,6 +662,26 @@ totals (§3) instead of RAPM's points total — 5 of the 6 team-stat categories 
 anchored this way; **OREB is deliberately left unanchored** (bottom-up per-player rate-model sum,
 no team-level rescaling at all), the direct consequence of OREB's team-level model genuinely losing
 to naive on holdout (§3) — "honestly unanchored, not silently gold-plated."
+
+**A real, substantial coherence bug found and fixed (2026-08-02, external review)**: `points` goes
+through matchup adjustment AND macro-anchoring, but the served `2pt_made`/`3pt_made`/`ft_made`
+component props were raw, untouched rate-model values — the two had no guaranteed relationship.
+Confirmed on a real 2025-01-15 slate (262 players) BEFORE the fix: **150 players (57%) showed a
+>1-point gap** between `points` and what `2×2pt_made + 3×3pt_made + ft_made` implied, 93 (35%)
+exceeded 2 points, worst case 8.36 points — a bettor comparing a player's points prop to their own
+shooting-component props would see numbers that visibly didn't add up for over half of any slate.
+Fixed with `_component_scale_factors`: each player's shooting components are rescaled by the exact
+ratio their total points underwent (matchup adjustment + anchoring combined), preserving their own
+shot-mix while guaranteeing exact reconciliation. Confirmed on the same slate post-fix: max gap
+across all 262 players is 1.07e-14 (floating-point noise only).
+
+**Clip-then-renormalize bias, quantified but not changed**: `compute_usage_shares` clips a
+matchup-suppressed player's adjusted points at 0 before renormalizing — already documented in-code
+as the correct behavior (a usage share can't be negative), not a symptom to silently propagate.
+Checked how often this actually engages: ~20-24% of real player-games project under 1-2 raw points,
+a real population of low-usage players genuinely vulnerable to a modest matchup delta crossing zero.
+Not changed — the existing clip is still the principled choice — but this quantifies that it isn't
+a rare edge case either.
 
 ### 5.6 Predictive distributions (`prop_distribution.py`)
 
@@ -1172,6 +1213,16 @@ fix.
    range without a new paid historical-odds source (SBRO stops at 2022-23) — not pursued unless
    closing the market gap becomes an explicit project goal, but worth keeping in mind as the honest
    current ceiling estimate whenever "how good is this model" comes up.
+10. **Score-distribution's variance model needs a genuine walk-forward refit, not another static
+    fit (§4).** A real, significant per-season decline in margin interval coverage was found
+    (r=−0.749 to −0.782, p<0.01) — today's live win-probability/spread outputs are measurably
+    overconfident on margin, and getting worse in more recent seasons. A recency-weighted (WLS)
+    version of the same single global fit does NOT resolve it (tested, the declining trend gets
+    mildly worse, not better). The right fix is structural: refit the variance model periodically
+    using only residuals available as of that point in time, the same walk-forward discipline
+    every other component in this codebase already follows (`rapm_lite.py`'s biweekly refit is the
+    closest existing analog to build from). Not yet built — real infrastructure work, not a
+    parameter tune.
 
 ### P2 — known-tested, currently low-value (don't re-litigate without new information)
 

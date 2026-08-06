@@ -3115,3 +3115,86 @@ how close to done the model actually is. **Cannot currently be extended to the h
 market data exists there) -- if closing a market-comparison gap becomes a real project goal, a paid
 historical-odds source covering 2023-2025 would be needed; not pursued here absent that being an
 explicit goal.
+
+## 45. Three more items from the external review run down (2026-08-02)
+
+### 45.1 No phantom NBA Cup game, but a real regime gap found and fixed: playoff predictions were indistinguishable from regular-season ones
+
+Checked directly: no season in the cached schedule shows any team with more than 82 regular-season
+games (2019-20/2020-21 correctly show their real shortened counts, 75/72) -- the NBA Cup
+championship game does not add a phantom 83rd game for either participant, confirmed empirically,
+not just assumed.
+
+A related, real gap WAS found: every training signal in this codebase (`build_team_game_log`,
+`build_team_stat_game_log`) is regular-season-only, but nothing distinguished a playoff prediction
+from an ordinary one at the live-pipeline level -- the model would silently apply regular-season-fit
+ratings/pace/home-court to a playoff game with no indication the underlying training assumption
+doesn't hold there. Fixed: `active_roster.games_on_date` now classifies each game's type from its
+`gameId` prefix (confirmed live: `"0022..."` = regular season with a blank `gameLabel`, `"0042..."` =
+playoff with a populated one, e.g. "West First Round") and both live pipelines tag a non-regular-
+season output row with `regime_warning` instead of predicting it as if it were equivalent. Does not
+change any regular-season prediction at all -- purely additive, an honest caveat where the training
+assumption doesn't hold, not a new modeling decision.
+
+### 45.2 Composition-rule coherence: a real, substantial bug found and fixed
+
+Checked whether a player's `points` prop reconciles with `2*2pt_made + 3*3pt_made + ft_made` after
+the composition rule (§ usage_allocation.py) runs. It did not, and the gap was large: on a real
+2025-01-15 slate (262 players), **150 (57%) showed a gap exceeding 1 point, 93 (35%) exceeding 2
+points, and the single worst case was off by 8.36 points**. Root cause: `points` is matchup-adjusted
+AND macro-anchored to the team total (`final_points = usage_share * team_total`), but the shooting-
+component props (`2pt_made`/`3pt_made`/`ft_made`) were served straight from the raw, untouched
+rate-model projections -- neither the matchup adjustment nor the team-total anchoring ever touched
+them. A bettor comparing a player's points prop to their own shooting-component props would see
+numbers that visibly didn't add up for over half of any given slate.
+
+**Fixed**: new `generate_props._component_scale_factors(raw_points, final_points)` computes, per
+player, the ratio their TOTAL points projection underwent (matchup adjustment + anchoring combined),
+falling back to 1.0 (no rescaling) for a player whose raw points are ~0 (avoids a division blow-up).
+Each shooting component is rescaled by that same factor before being served -- this preserves a
+player's own shot-mix (2PT vs. 3PT vs. FT share, the best available proxy since matchup difficulty
+isn't modeled separately per shot type) while guaranteeing exact reconciliation with the points prop.
+Confirmed on the SAME real 2025-01-15 slate after the fix: max gap across all 262 players is
+1.07e-14 (pure floating-point noise), 0 players show any gap exceeding 0.01. Regression-tested with
+synthetic data covering both directions (a boosted and a suppressed matchup) plus the near-zero-raw
+fallback case.
+
+### 45.3 A real, statistically significant calibration finding: margin interval coverage is degrading over time -- tested one fix, found it doesn't resolve it
+
+Checked whether Phase 3's score-distribution variance model (a single OLS fit on ALL historical
+residuals, no recency weighting at all) calibrates equally well across every season, or whether
+calibration itself is quietly drifting the way margin_mae was found to (Sec44.2) -- fit once on the
+full dev+holdout range (matching current production behavior), then computed empirical coverage of
+the nominal 80%/95% margin and total intervals, per season:
+
+```
+margin_cov80 by season (2015-2025): 0.844, 0.824, 0.837, 0.829, 0.828, 0.789, 0.783, 0.838, 0.789, 0.787, 0.780
+```
+
+**A real, statistically significant declining trend**: margin_cov80 vs. season, r=-0.749, p=0.0080;
+margin_cov95 vs. season, r=-0.782, p=0.0044. By 2024-2025 the nominal-80% interval is only actually
+covering ~78-79% of real outcomes -- a genuine, current overconfidence in the live win-probability/
+spread-interval output, not just a historical curiosity. **Total coverage shows no comparable
+trend** (total_cov80 r=-0.429 p=0.19, total_cov95 r=+0.128 p=0.71) -- this is specifically a MARGIN
+problem, consistent with every other finding this session that margin (a difference metric) is more
+exposed to whatever's drifting than total (a sum metric).
+
+**Tested one candidate fix, found it does NOT resolve the trend**: a weighted-least-squares version
+of the variance-model OLS fit (`variance ~ intercept + slope*pace`), with weights exponentially
+decaying by game recency (tested halflives 3000/1500/800 games), applied as a single retroactive
+fit across the whole range. Result: mean coverage across all seasons shifts slightly toward nominal
+(pooled cov80 mean 0.8117 -> 0.8220 at halflife=800), but the season-level DECLINING TREND gets
+slightly WORSE, not better (r=-0.749 -> r=-0.814 at halflife=800) -- a single global recency-weighted
+fit, applied retroactively to every season including old ones, doesn't target the actual problem.
+
+**Diagnosis, not yet fixed**: the current production variance model is a single static fit over the
+ENTIRE historical range, applied identically to every season -- structurally different from every
+other component in this codebase, all of which are properly WALK-FORWARD (refit using only strictly-
+prior data, `rapm_lite.py`'s biweekly refit being the closest analog). A genuine walk-forward
+variance-model refit (recomputing the OLS fit periodically using only residuals available as of that
+point in time, mirroring `rapm_lite.py`'s cadence) is the correct next thing to try, not another
+single-global-fit weighting scheme -- queued as real follow-up work, not built here given the scope
+of a proper walk-forward-refit infrastructure addition. **Live impact today**: `generate_predictions.py`
+already refits this model fresh on every call using all data available at call time, so it is not
+frozen at a stale historical snapshot -- but every DAY's fit is still the same "one static fit over
+everything seen so far" shape that produced this declining-coverage trend in the diagnostic above.

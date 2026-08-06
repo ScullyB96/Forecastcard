@@ -41,7 +41,9 @@ from src.models.rapm_lite import _career_games_played, prepare_stints
 from src.models.team_stat_rates import (ADOPTED_CATEGORIES, CROSS_SEASON_WEIGHT_STAT, OWN_HALFLIFE_GAMES_STAT,
                                          STAT_COLUMNS, add_team_stat_ratings, build_team_stat_game_log, project_team_stat)
 from src.models.team_strength import OWN_HALFLIFE_GAMES_RATING, PRIOR_GAMES_PACE, PRIOR_GAMES_RATING, add_team_ratings
-from src.pipeline.generate_props import _anchor_preserving_missing, _latest_snapshot, _team_stat_totals
+from src.pipeline.generate_props import (
+    _anchor_preserving_missing, _component_scale_factors, _latest_snapshot, _team_stat_totals,
+)
 
 FAILURES = []
 
@@ -1339,6 +1341,37 @@ def test_game_type_from_id_classifies_regular_season_vs_playoff():
           _game_type_from_id("0052400001") == "non_regular_season")
 
 
+def test_component_scale_factors_makes_points_prop_reconcile_with_its_own_components():
+    """`generate_props._component_scale_factors` (2026-08-02, external technical review): REAL BUG
+    FOUND -- `final_points` (matchup-adjusted, team-total-anchored) and the shooting-component props
+    (2pt_made/3pt_made/ft_made, served raw) had no relationship to each other. Confirmed on a real
+    2025-01-15 slate before this fix: 150/262 players (57%) showed a >1-point gap between `points`
+    and what `2*2pt_made + 3*3pt_made + ft_made` implied, several exceeding 8 points -- a bettor
+    comparing a player's points prop to their own shooting-component props would see numbers that
+    visibly don't add up. Confirms the fix: rescaling each component by the same player's own
+    scale factor makes `2*2pt_made_scaled + 3*3pt_made_scaled + ft_made_scaled` reconcile EXACTLY
+    with `final_points`, for players whose raw projection moved in EITHER direction (boosted by a
+    weak matchup, suppressed by a tough one), and safely falls back to no rescaling for a player
+    with ~zero raw points (dividing by near-zero would blow up into a meaningless factor)."""
+    raw_points = pd.Series({1: 20.0, 2: 10.0, 3: 0.0})
+    final_points = pd.Series({1: 24.0, 2: 6.0, 3: 3.0})  # player 1 boosted, 2 suppressed, 3 was ~0 raw
+    scale = _component_scale_factors(raw_points, final_points)
+
+    check("player 1's scale factor is exactly final/raw (1.2x boost)",
+          abs(scale[1] - 1.2) < 1e-9, f"got {scale[1]}")
+    check("player 2's scale factor is exactly final/raw (0.6x suppression)",
+          abs(scale[2] - 0.6) < 1e-9, f"got {scale[2]}")
+    check("player 3 (near-zero raw points) falls back to scale=1.0, not a division blow-up",
+          scale[3] == 1.0, f"got {scale[3]}")
+
+    # Simulate applying the scale to real shooting components and confirm exact reconciliation.
+    components = {1: {"2pt": 6.0, "3pt": 2.0, "ft": 2.0}, 2: {"2pt": 3.0, "3pt": 1.0, "ft": 1.0}}
+    for pid, c in components.items():
+        implied = 2 * (c["2pt"] * scale[pid]) + 3 * (c["3pt"] * scale[pid]) + (c["ft"] * scale[pid])
+        check(f"player {pid}: rescaled components reconcile exactly with final_points",
+              abs(implied - final_points[pid]) < 1e-9, f"got {implied}, expected {final_points[pid]}")
+
+
 def test_generate_props_before_filter_excludes_on_and_after_date():
     """`generate_props._before` (2026-08-01) is the fix for the real bug
     found via a 2025-01-15 spot-check: a star player's trailing-minutes
@@ -1611,6 +1644,7 @@ if __name__ == "__main__":
     test_block_bootstrap_correctly_widens_ci_for_within_block_correlated_deltas()
     test_block_bootstrap_still_detects_a_real_effect_with_no_block_correlation()
     test_game_type_from_id_classifies_regular_season_vs_playoff()
+    test_component_scale_factors_makes_points_prop_reconcile_with_its_own_components()
     test_generate_props_before_filter_excludes_on_and_after_date()
     test_team_history_season_filter_excludes_prior_season_games()
     test_team_stat_game_log_for_against_symmetry()
