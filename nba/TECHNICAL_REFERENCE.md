@@ -1068,15 +1068,22 @@ date) → build and rate the team-game log, filtered strictly to `gameDate < gam
 team's latest rating and the latest walk-forward home-court multiplier (`_latest_home_court_mult`,
 §2.3) → build team history and load the current roster (both season-restricted, see below/§3) → (skipped
 entirely while `INCLUDE_LINEUP_ADJUSTMENT = False`) fit RAPM-lite → fit the score-distribution
-residual/variance/correlation model → per game, `project_game(...)` → win probability / 80% spread
-interval if the distribution fit succeeded → write `data/processed/daily_predictions_{date}.parquet`.
+variance model as a genuine walk-forward periodic refit (`_full_range_variance_checkpoints`, §4) →
+per game, `project_game(...)` → win probability / 80% spread interval if the distribution fit
+succeeded → write `data/processed/daily_predictions_{date}.parquet`.
 
-A real bug lived here until 2026-08-01: `run()` called `project_game(..., home_court_mult=1.0)`
-**literally hardcoded**, discarding the entire empirically-validated home-court effect — two equally
--rated teams got an identical projected score regardless of who was home, and the score-distribution
-layer's win-probability/interval math (fit on residuals that DO assume the correction) was applied
-to a systematically biased mean. Fixed via `_latest_home_court_mult`, which fits
-`fit_home_court_walk_forward` on the same already-filtered team log and takes its most recent value.
+Two real bugs of the IDENTICAL shape lived here, fixed on different dates: `run()` called
+`project_game(..., home_court_mult=1.0)` **literally hardcoded** until 2026-08-01, discarding the
+entire empirically-validated home-court effect — two equally-rated teams got an identical projected
+score regardless of who was home, and the score-distribution layer's win-probability/interval math
+(fit on residuals that DO assume the correction) was applied to a systematically biased mean. Fixed
+via `_latest_home_court_mult`, which fits `fit_home_court_walk_forward` on the same already-filtered
+team log and takes its most recent value. **The variance model had the same bug's quieter sibling
+until 2026-08-06**: it fit from `validate_team_strength_baseline.build_dev_predictions()`, which
+stops at `DEV_MAX_SEASON - 1` (2023) regardless of `game_date` — every live call in 2024-2026 was
+excluding 2+ real, already-cached seasons from its own calibration. Fixed via
+`_full_range_variance_checkpoints`, which reuses the SAME through-`game_date` `team_log` that
+`_latest_home_court_mult` already uses (§4).
 
 **`generate_props.py run(game_date)`**: calls `generate_predictions.run(game_date)` **directly** for
 team totals — "props and game predictions can never silently disagree on a team's total, and this
@@ -1274,16 +1281,21 @@ fix.
    user's own account/purchase to make, not pursued unless closing the market gap becomes an explicit
    goal, but worth keeping in mind as the honest current ceiling estimate whenever "how good is this
    model" comes up.
-10. **Score-distribution's variance model needs a genuine walk-forward refit, not another static
-    fit (§4).** A real, significant per-season decline in margin interval coverage was found
-    (r=−0.749 to −0.782, p<0.01) — today's live win-probability/spread outputs are measurably
-    overconfident on margin, and getting worse in more recent seasons. A recency-weighted (WLS)
-    version of the same single global fit does NOT resolve it (tested, the declining trend gets
-    mildly worse, not better). The right fix is structural: refit the variance model periodically
-    using only residuals available as of that point in time, the same walk-forward discipline
-    every other component in this codebase already follows (`rapm_lite.py`'s biweekly refit is the
-    closest existing analog to build from). Not yet built — real infrastructure work, not a
-    parameter tune.
+10. **BUILT AND WIRED LIVE (2026-08-06).** Score-distribution's variance model is now a genuine
+    walk-forward periodic refit (`compute_walkforward_variance_model`/`predict_variance_walk_forward`,
+    §4, mirroring `rapm_lite.py`'s biweekly-refit shape). Re-running the per-season margin-coverage
+    diagnostic walk-forward-honestly (instead of via one full-range fit with look-ahead information)
+    weakens the apparent decline from real/significant (r=−0.759..−0.788, p<0.01) to NOISE
+    (r=−0.410..−0.485, p=0.13-0.21) — the original "declining" framing was itself partly an artifact
+    of the old diagnostic's full-range fit over-covering early seasons using future data they'd never
+    have had live. **Not fully resolved**: pooled coverage still sits ~1-2pp below nominal fairly
+    consistently across most of the range (a mean-level issue, not a trend) — a missing variance
+    predictor beyond pace (e.g. team-quality-spread) is the likely next lever, not built here.
+    **A real, separate live bug found while wiring this in**: the OLD static fit
+    (`build_dev_predictions()`) stopped at `DEV_MAX_SEASON - 1` regardless of `game_date` — every live
+    call in 2024-2026 was excluding 2+ already-cached seasons from its own calibration, the identical
+    bug shape as the home-court hardcode fixed earlier this project. Fixed via
+    `_full_range_variance_checkpoints`, verified end-to-end against a real historical slate.
 
 ### P2 — known-tested, currently low-value (don't re-litigate without new information)
 

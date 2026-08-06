@@ -67,7 +67,8 @@ from src.ingest.fetch_schedule import FIRST_DEV_SEASON, season_for_date, season_
 from src.models.lineup_rating import player_minutes_from_stints, project_lineup_adjustment, team_recent_roster_rapm
 from src.models.rapm_lite import fit_rapm, prepare_stints
 from src.models.score_distribution import (
-    fit_home_away_correlation, fit_residual_variance_model, interval, predict_variance, win_prob_home,
+    compute_walkforward_variance_model, fit_home_away_correlation, interval, predict_variance_walk_forward,
+    win_prob_home,
 )
 from src.models.home_court import fit_home_court_walk_forward
 from src.models.team_strength import add_team_ratings, build_team_game_log, project_game
@@ -162,6 +163,56 @@ def _latest_home_court_mult(team_log: pd.DataFrame) -> float:
     return float(mult) if pd.notna(mult) else 1.0
 
 
+def _full_range_variance_checkpoints(team_log: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, float]:
+    """Task #56 (MODEL_DOCUMENTATION.md Sec51): walk-forward periodic-refit
+    variance checkpoints (home, away) + a single home/away residual
+    correlation, built from the SAME through-`game_date` `team_log`
+    `_latest_home_court_mult` already uses -- NOT the dev-range-only static
+    fit this replaces.
+
+    REAL STALENESS BUG FOUND AND FIXED here: the static fit this replaces
+    (`validate_team_strength_baseline.build_dev_predictions()`) stops at
+    `DEV_MAX_SEASON - 1` (currently 2023) regardless of `game_date` -- so
+    every live call in 2024-2026 was quietly excluding 2+ REAL,
+    ALREADY-CACHED seasons of residual history from its own variance/
+    interval calibration, the exact same shape of bug `_latest_home_court_mult`
+    was already built to fix for the home-court multiplier. This ALSO
+    resolves Sec45.3's declining-margin-coverage-trend finding (evaluated
+    walk-forward-honestly instead of via a single full-range fit with
+    look-ahead information, the trend weakens from real/significant to
+    NOISE -- see Sec51) -- a strict improvement on both axes, not a
+    tradeoff. Falls back to an empty checkpoint frame if there's no game
+    history yet to fit from; callers must check `.empty` the same way
+    `have_distribution` already gates on a fit failure."""
+    games = _to_wide_games(team_log)
+    if games.empty:
+        return pd.DataFrame(), pd.DataFrame(), 0.0
+    games = games.copy()
+    games["home_court_mult"] = fit_home_court_walk_forward(games).fillna(1.0)
+
+    rows = []
+    for row in games.itertuples(index=False):
+        proj_pace, pred_home, pred_away = project_game(
+            home_pace=row.pace_shrunk_mean_home, away_pace=row.pace_shrunk_mean_away,
+            league_avg_pace=row.league_avg_pace,
+            home_oRtg=row.rtg_attack_rate_home, home_dRtg=row.rtg_defense_rate_home,
+            away_oRtg=row.rtg_attack_rate_away, away_dRtg=row.rtg_defense_rate_away,
+            league_avg_rtg=row.league_avg_rtg, home_court_mult=row.home_court_mult,
+        )
+        rows.append({"gameDate": row.gameDate, "projected_pace": proj_pace,
+                      "home_resid": row.actual_home_score - pred_home, "away_resid": row.actual_away_score - pred_away})
+    preds = pd.DataFrame(rows).dropna(subset=["home_resid", "away_resid"])
+    if preds.empty:
+        return pd.DataFrame(), pd.DataFrame(), 0.0
+
+    home_checkpoints = compute_walkforward_variance_model(
+        preds.rename(columns={"home_resid": "residual", "projected_pace": "pace"})[["gameDate", "residual", "pace"]])
+    away_checkpoints = compute_walkforward_variance_model(
+        preds.rename(columns={"away_resid": "residual", "projected_pace": "pace"})[["gameDate", "residual", "pace"]])
+    corr = fit_home_away_correlation(preds["home_resid"].to_numpy(), preds["away_resid"].to_numpy())
+    return home_checkpoints, away_checkpoints, corr
+
+
 def run(game_date: str) -> pd.DataFrame:
     refresh_all_data()  # ensure real-time data is backfilled; season logic below uses game_date, not "today"
     # `target_season` is derived PURELY from `game_date` (see `season_for_date`'s docstring), never
@@ -208,23 +259,16 @@ def run(game_date: str) -> pd.DataFrame:
         player_ratings, player_minutes = pd.DataFrame(), pd.DataFrame()
         have_lineup_adjustment = False
 
-    # Score-distribution variance/correlation is fit from the DEV-RANGE-ONLY historical backtest
-    # (`build_dev_predictions` stops at DEV_MAX_SEASON - 1) -- recomputed on every call for v1
-    # (correctness over efficiency); caching this as a persisted artifact, and/or extending its
-    # fit range through the live game_date the way home_court_mult now does (see
-    # `_latest_home_court_mult` above), is a documented follow-up, not done here. This dev-only
-    # staleness is a separate, lower-severity, already-acknowledged tradeoff -- NOT the home-court
-    # hardcode bug fixed above (that one silently discarded a real, validated effect entirely;
-    # this one uses a real, validated fit that just doesn't extend all the way to today).
+    # Score-distribution variance/correlation is now a genuine walk-forward periodic refit
+    # (`_full_range_variance_checkpoints`, task #56/Sec51) -- spans the SAME through-`game_date`
+    # `team_log` used for `home_court_mult`, not the dev-range-only static fit this replaces (see
+    # that function's own docstring for the staleness bug this fixes).
     try:
-        from src.models.validate_team_strength_baseline import build_dev_predictions
-        dev_preds = build_dev_predictions().dropna(subset=["pred_home", "pred_away"])
-        home_resid = (dev_preds["actual_home"] - dev_preds["pred_home"]).to_numpy()
-        away_resid = (dev_preds["actual_away"] - dev_preds["pred_away"]).to_numpy()
-        home_var_model = fit_residual_variance_model(home_resid, dev_preds["projected_pace"].to_numpy())
-        away_var_model = fit_residual_variance_model(away_resid, dev_preds["projected_pace"].to_numpy())
-        corr = fit_home_away_correlation(home_resid, away_resid)
-        have_distribution = True
+        home_checkpoints, away_checkpoints, corr = _full_range_variance_checkpoints(team_log)
+        have_distribution = not home_checkpoints.empty and not away_checkpoints.empty
+        if not have_distribution:
+            print("WARNING: not enough historical residual data yet to fit any variance checkpoint; "
+                  "falling back to point predictions only", flush=True)
     except Exception as e:
         print(f"WARNING: could not fit score distribution from historical data yet ({e}); "
               f"falling back to point predictions only", flush=True)
@@ -287,8 +331,9 @@ def run(game_date: str) -> pd.DataFrame:
                   "regime_warning": None if is_regular_season else "non_regular_season_untested_regime"}
 
         if have_distribution:
-            var_home = predict_variance(home_var_model, np.array([proj_pace]))[0]
-            var_away = predict_variance(away_var_model, np.array([proj_pace]))[0]
+            game_date_series = pd.Series([game_date])
+            var_home = predict_variance_walk_forward(home_checkpoints, game_date_series, np.array([proj_pace]))[0]
+            var_away = predict_variance_walk_forward(away_checkpoints, game_date_series, np.array([proj_pace]))[0]
             wp_home = win_prob_home(pred_home, pred_away, var_home, var_away, corr)
             lo, hi = interval(pred_home - pred_away, var_home + var_away - 2 * corr * np.sqrt(var_home * var_away), 0.8)
             line += f"  |  home win prob {wp_home:.1%}  |  80% spread interval ({lo:+.1f}, {hi:+.1f})"

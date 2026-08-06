@@ -41,6 +41,64 @@ def predict_variance(variance_model: dict, pace: np.ndarray) -> np.ndarray:
     return np.maximum(raw, MIN_VARIANCE)
 
 
+REFIT_PERIOD_DAYS = 14  # mirrors rapm_lite.py's own biweekly cadence -- the closest existing
+# walk-forward-refit analog in this codebase (see that module's docstring for the tractability
+# rationale: refitting for every individual game date would be far more compute than a periodic
+# refit, while still being fully walk-forward-safe).
+MIN_RESIDUALS_TO_FIT = 200  # don't attempt an OLS fit on a tiny, unstable early sample --
+# same role as rapm_lite.MIN_STINTS_TO_FIT, tuned for this much simpler 2-parameter fit.
+
+
+def compute_walkforward_variance_model(residuals: pd.DataFrame, refit_period_days: int = REFIT_PERIOD_DAYS) -> pd.DataFrame:
+    """`residuals` must have columns `gameDate`, `residual`, `pace` (one row
+    per team-side residual). Refits `fit_residual_variance_model` every
+    `refit_period_days`, using ONLY residuals STRICTLY BEFORE each
+    checkpoint -- fixes Sec45.3's finding that a single static fit over the
+    entire historical range produces a real, significant declining margin-
+    coverage trend (r=-0.749 to -0.782 by season) that a global recency-
+    weighted refit does NOT resolve (Sec45.3 also tested that; it makes the
+    trend slightly worse). Mirrors `rapm_lite.compute_walkforward_player_ratings`'s
+    exact checkpoint-loop shape. Returns one row per checkpoint that had
+    enough prior data to fit: `asOfDate`, `intercept`, `slope`."""
+    residuals = residuals.sort_values("gameDate").reset_index(drop=True)
+    first_date, last_date = residuals["gameDate"].min(), residuals["gameDate"].max()
+    checkpoints = pd.date_range(first_date, last_date, freq=f"{refit_period_days}D")
+
+    rows = []
+    for checkpoint in checkpoints:
+        prior = residuals[residuals["gameDate"] < checkpoint]
+        if len(prior) < MIN_RESIDUALS_TO_FIT:
+            continue
+        model = fit_residual_variance_model(prior["residual"].to_numpy(), prior["pace"].to_numpy())
+        rows.append({"asOfDate": checkpoint, "intercept": model["intercept"], "slope": model["slope"]})
+    return pd.DataFrame(rows, columns=["asOfDate", "intercept", "slope"])
+
+
+def predict_variance_walk_forward(variance_checkpoints: pd.DataFrame, game_dates: pd.Series,
+                                   pace: np.ndarray) -> np.ndarray:
+    """For each row, looks up the latest checkpoint strictly before that
+    row's `gameDate` (same "most recent prior checkpoint" lookup pattern
+    used throughout this project's RAPM-lite validation scripts, e.g.
+    `validate_predictive_lineup_adjustment.py`) and applies
+    `predict_variance` with that checkpoint's fit. A date before EVERY
+    checkpoint falls back to the EARLIEST available checkpoint (matches
+    this project's standing convention of using whatever's genuinely
+    available rather than refusing a prediction -- e.g.
+    `team_stat_rates`'s `games_played_before=0` fallback to the league
+    prior) instead of raising or returning NaN."""
+    if variance_checkpoints.empty:
+        raise ValueError("no variance checkpoints available -- not enough residual history to fit even one")
+    checkpoints = variance_checkpoints.sort_values("asOfDate").reset_index(drop=True)
+    game_dates = pd.to_datetime(game_dates).reset_index(drop=True)
+
+    idx = checkpoints["asOfDate"].to_numpy().searchsorted(game_dates.to_numpy(), side="left") - 1
+    idx = np.clip(idx, 0, len(checkpoints) - 1)
+    intercept = checkpoints["intercept"].to_numpy()[idx]
+    slope = checkpoints["slope"].to_numpy()[idx]
+    raw = intercept + slope * np.asarray(pace)
+    return np.maximum(raw, MIN_VARIANCE)
+
+
 def fit_home_away_correlation(home_residuals: np.ndarray, away_residuals: np.ndarray) -> float:
     """A single global correlation (not pace-conditional -- a simpler first
     cut; pace-conditional correlation is a candidate refinement, not

@@ -35,6 +35,7 @@ from src.models.player_playmaking_rates import PRIOR_TOUCHES_AST, PRIOR_TOUCHES_
 from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FTA, add_scoring_rates
 from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_family, log_score, over_under_prob, predict_variance
 from src.models.score_distribution import _t_scale
+from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta
 from src.models.lineup_rating import predictive_minutes_shares, semi_oracle_minutes_shares
@@ -286,6 +287,55 @@ def test_project_team_oreb_gives_exact_game_level_coherence_with_projected_misse
           abs(away_oreb - away_share * away_misses) < 1e-9, f"got {away_oreb}, expected {away_share * away_misses}")
     check("the opponent's implied DREB on home's own misses reconciles exactly to home's projected misses",
           abs((home_oreb + (home_misses - home_oreb)) - home_misses) < 1e-9)
+
+
+def test_compute_walkforward_variance_model_has_no_leak_across_a_checkpoint():
+    """Task #56: `compute_walkforward_variance_model` must fit each
+    checkpoint using ONLY residuals strictly BEFORE that checkpoint date --
+    the same walk-forward-safety requirement as every other periodic-refit
+    primitive in this project (mirrors `rapm_lite.compute_walkforward_player_ratings`).
+    Builds 250 low-variance warm-up residuals (pace=100, residual~N(0,4),
+    deterministic small values) dated well before a checkpoint, then 250
+    HUGE-variance residuals (residual=500) dated ON/AFTER that same
+    checkpoint -- if the huge residuals leaked into the checkpoint's own
+    fit, its intercept would be enormous; if not, it stays small."""
+    dates_before = pd.date_range("2020-10-01", periods=250, freq="D")
+    dates_after = pd.date_range("2021-06-08", periods=250, freq="D")
+    residuals = pd.DataFrame({
+        "gameDate": list(dates_before) + list(dates_after),
+        "residual": [2.0 if i % 2 == 0 else -2.0 for i in range(250)] + [500.0] * 250,
+        "pace": [100.0] * 500,
+    })
+    checkpoints = compute_walkforward_variance_model(residuals, refit_period_days=400)
+    check("at least one checkpoint was fit", len(checkpoints) >= 1, f"got {len(checkpoints)} checkpoints")
+    first_checkpoint_intercept = float(checkpoints["intercept"].iloc[0])
+    check("the first checkpoint's fit (using only the low-variance warm-up residuals) has a SMALL "
+          "intercept, not contaminated by the huge post-checkpoint residuals",
+          first_checkpoint_intercept < 50.0, f"got intercept={first_checkpoint_intercept}")
+
+
+def test_predict_variance_walk_forward_picks_the_latest_prior_checkpoint():
+    """Task #56: `predict_variance_walk_forward` must select the LATEST
+    checkpoint strictly before each row's gameDate (not the nearest by
+    absolute distance, not a future one) -- confirms the checkpoint-lookup
+    arithmetic (searchsorted-based) matches the "checkpoints < gameDate,
+    take the last one" pattern used everywhere else in this project's
+    validation scripts. Also confirms a query date before EVERY checkpoint
+    falls back to the EARLIEST checkpoint rather than raising or NaN-ing."""
+    checkpoints = pd.DataFrame({
+        "asOfDate": pd.to_datetime(["2020-11-01", "2020-11-15", "2020-12-01"]),
+        "intercept": [10.0, 20.0, 30.0], "slope": [0.0, 0.0, 0.0],
+    })
+    dates = pd.Series(pd.to_datetime(["2020-10-01", "2020-11-10", "2020-11-16", "2020-12-31"]))
+    result = predict_variance_walk_forward(checkpoints, dates, pace=np.array([100.0] * 4))
+    check("a query date BEFORE every checkpoint falls back to the earliest checkpoint's variance",
+          abs(result[0] - 10.0) < 1e-9, f"got {result[0]}")
+    check("a query date between checkpoint 1 and 2 uses checkpoint 1 (the latest STRICTLY prior one)",
+          abs(result[1] - 10.0) < 1e-9, f"got {result[1]}")
+    check("a query date between checkpoint 2 and 3 uses checkpoint 2",
+          abs(result[2] - 20.0) < 1e-9, f"got {result[2]}")
+    check("a query date after every checkpoint uses the LATEST (checkpoint 3)",
+          abs(result[3] - 30.0) < 1e-9, f"got {result[3]}")
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -1820,6 +1870,8 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_compute_walkforward_variance_model_has_no_leak_across_a_checkpoint()
+    test_predict_variance_walk_forward_picks_the_latest_prior_checkpoint()
     test_add_walk_forward_exposure_rate_has_no_leak_on_a_teams_first_ever_game()
     test_project_oreb_share_returns_exact_league_average_at_league_average_inputs()
     test_project_team_oreb_gives_exact_game_level_coherence_with_projected_misses()

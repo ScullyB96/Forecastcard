@@ -3430,3 +3430,47 @@ this project's available features) rather than a missing lever or a wrong functi
 pursued further without a genuinely new data source (e.g. shot-location/contest data distinguishing
 "long rebounds off missed threes" from "short rebounds off missed layups," which isn't in any
 currently-ingested source). `oreb_decomposition.py` remains available, unused by any live path.
+
+## 51. Walk-forward periodic refit for score_distribution's variance model -- built, wired live, and it uncovered a real live staleness bug (2026-08-06)
+
+Fourth item from the "scoped but not tested" inventory, and the fix Sec45.3 itself named as the
+correct next step: the production variance model was a single static OLS fit, structurally
+different from every other component in this codebase (all properly walk-forward). Built
+`score_distribution.compute_walkforward_variance_model`/`predict_variance_walk_forward`, mirroring
+`rapm_lite.compute_walkforward_player_ratings`'s exact checkpoint-loop shape (refit every
+`REFIT_PERIOD_DAYS=14`, using only residuals strictly before each checkpoint; lookup picks the
+latest checkpoint strictly before a query date, falling back to the earliest if none qualifies).
+Leak-guard and checkpoint-selection regression tests added.
+
+**Re-ran Sec45.3's per-season margin-coverage diagnostic with this walk-forward fit instead of a
+single full-range fit**: the declining trend weakens from real/significant (nominal 80%: r=-0.759,
+p=0.0067; nominal 95%: r=-0.788, p=0.0040) to NOISE (80%: r=-0.410, p=0.21; 95%: r=-0.485, p=0.13) --
+swept refit_period_days 7/30/60, all give essentially the same result, so this isn't sensitive to
+refresh cadence. **Reframes Sec45.3's original finding**: that diagnostic's "single fit over the
+FULL dev+holdout range" gave early seasons (2015-2019) look-ahead information from a decade of
+future data they wouldn't have had access to live, artificially over-covering them and making later
+seasons look like a decline BY COMPARISON. The walk-forward-honest re-run shows coverage instead
+sits fairly consistently in the high-0.79/low-0.94 range across nearly the WHOLE dev+holdout range,
+not merely declining recently -- a mean-level mild overconfidence, not a worsening-over-time trend.
+**Not fully resolved**: pooled coverage under walk-forward (0.794 for nominal 80%, 0.937 for nominal
+95%) is not obviously closer to nominal than the static fit's pooled average in every season -- most
+notably the MOST RECENT 2 seasons (2024-2025, the ones that matter most for live predictions today)
+show walk-forward performing about the same as or marginally worse than static on raw coverage,
+even though the multi-year TREND is fixed. The remaining ~1-2pp mean-level undercoverage across most
+of the range is a separate, still-open question (a real predictor missing from the variance model
+beyond pace, e.g. team-quality-spread capturing blowout-vs-competitive-game variance differences, is
+the most likely next lever -- not built here).
+
+**A real, separate live-production bug found and fixed while wiring this in**: `generate_predictions.py`'s
+variance fit previously called `validate_team_strength_baseline.build_dev_predictions()`, which stops
+at `DEV_MAX_SEASON - 1` (2023) REGARDLESS of the live `game_date` -- every call in 2024-2026 was
+quietly excluding 2+ REAL, ALREADY-CACHED seasons (2024, 2025, and the entire in-progress 2025-26
+season) from its own variance/interval calibration. `TECHNICAL_REFERENCE.md` had previously
+(incorrectly) characterized this as "not frozen at a stale historical snapshot" since the fit is
+recomputed fresh on every call -- true, but it was recomputing the SAME frozen dev-range data every
+time, not extending through the live date. Fixed via `_full_range_variance_checkpoints`, which reuses
+the SAME through-`game_date` `team_log` already built for `_latest_home_court_mult` (an identical bug
+shape to the home-court hardcode fixed earlier this project, Sec28-era) -- a strict improvement on
+both the trend-significance axis AND the live-data-freshness axis, not a tradeoff. Verified end-to-end
+against a real historical slate (2025-01-15): win probabilities and 80% spread intervals compute
+correctly under the new checkpoint-based path.
