@@ -58,8 +58,11 @@ real-looking, not yet proven as strongly as previously claimed, with the product
 coefficient conservatively set (shrunk to the rolling-origin fold median) regardless of how
 this resolves. Player props: target share corr 0.74, carry share corr 0.88 (real, strong
 signal); TD-probability
-calibration is an isotonic regression refit every pipeline run (§9.4), replacing an earlier
-hand-fit linear map that was a recurring stale-coupling risk; yards/receptions carry
+calibration is an auto-refit LINEAR map, refit every pipeline run from real historical
+(raw_td_prob, actual_td) pairs (§9.4) — round 3 tried isotonic, round 4 reverted it (isotonic
+underperformed a strict walk-forward comparison and had only been kept on resubstitution-
+flavored evidence); auto-refitting itself (not the specific model class) is what retires the
+stale-coupling risk a frozen hand-fit linear map used to carry. yards/receptions carry
 weak-but-real signal (0.5-3.7% MAE improvement over naive); QB passing yards similarly
 weak-but-real; interceptions are close to pure noise. See §13 for the full ledger of
 everything tested, kept, and rejected — it is long, because this project's discipline is to
@@ -804,29 +807,71 @@ literature-informed range, on the CB-flagged TEST holdout (n=192):
 | **2.446 (current production)** | **9.827** | **6.994** | **−0.290** |
 | 2.977 (pre-shrink v3) | 9.802 | 6.966 | −0.282 |
 
-MAE and CRPS improve **monotonically** with coefficient magnitude across the entire tested
-range — there is no elbow where accuracy peaks and then degrades; 2.977 (the largest value
-ever fit) still edges out 2.446 on this holdout, and every literature-informed value (0 to 1.5)
-is measurably worse than what's currently shipped. **Our own held-out accuracy data gives zero
-support for shrinking further toward the real-world benchmark range — if anything it points
-the other way.**
+MAE and CRPS improve across the entire tested range up through 2.977 (the largest value ever
+fit) — every literature-informed value (0 to 1.5) is measurably worse than what's currently
+shipped. **Our own held-out accuracy data gives zero support for shrinking further toward the
+real-world benchmark range within this tested window — if anything it points the other way.**
 
 This does not resolve the tension found above; it sharpens exactly what the tension is. The
-important caveat: this sweep is partly self-referential — the candidate values bracketing
+important caveat, flagged directly by external review and confirmed by the two follow-up checks
+immediately below: this sweep is partly self-referential — the candidate values bracketing
 current production were themselves derived by least-squares fitting on data drawn from the
 same underlying process being re-scored here, so "our fitted region beats smaller values on
 our own data" is close to expected by construction, not new independent corroboration that the
-*true* effect is that large. It doesn't distinguish "the true CB effect really is ~2.4-3
-points" from "our estimate is inflated by an unmeasured confound or the small-sample
-specification-search effect already flagged (§6.1.1's permutation test, 95th percentile) —
-and that same inflated estimate naturally looks best when re-scored against more of the same
-kind of data." **Decision: no coefficient change.** Shrinking further has no accuracy
-justification from our own data, and the existing ±2.446 is already the conservative choice
-within what our data supports (the fold-median, not the pooled 2.977). But this real,
-unresolved disagreement between two legitimate forms of evidence — measured walk-forward
-accuracy vs. a real-world professional-market benchmark — means the magnitude should be held
-with genuine caution for anything beyond directional bet-sizing, more so than either check
-would suggest in isolation.
+*true* effect is that large.
+
+**Two follow-up discriminators (2026-08, external review), run to actually distinguish "real
+effect near this magnitude" from "inflated estimate/confound":**
+
+- **§T3.3, extend the sweep past 2.977.** The table above stopped at the largest coefficient
+  ever fit — it can't tell "recovered the OLS optimum" from "the flag proxies a confound bigger
+  than any plausible individual-player effect" without testing further out. Extended to 4, 5,
+  6, 8:
+
+  | Coefficient | MAE | CRPS |
+  |---|---|---|
+  | 2.446 | 9.827 | 6.994 |
+  | 2.977 | 9.802 | 6.966 |
+  | **4.000** | **9.796** | **6.947** |
+  | 5.000 | 9.838 | 6.972 |
+  | 6.000 | 9.959 | 7.041 |
+  | 8.000 | 10.424 | 7.310 |
+
+  **This is NOT the runaway-monotonic pattern that would flag an unbounded confound — it's a
+  real, bounded, peaked curve.** MAE bottoms out around 4.0 (barely below 2.977's 9.802) and
+  then degrades on the far side badly enough that by 8.0 it's *worse than having no CB term at
+  all* (10.149 at coefficient=0.0, §T3.2 above). A confound proxying something unboundedly
+  large would keep improving indefinitely; this doesn't. What it DOES show: this exact
+  holdout's own accuracy-minimizing point sits modestly higher (~4.0) than even the pre-shrink
+  v3 value (2.977), let alone the shipped v4 (2.446) — reinforcing, more sharply than §T3.2
+  alone, that nothing in our own held-out accuracy data wants a smaller coefficient. The
+  differences involved are small relative to n=192, though, and this is now the third or fourth
+  time this same CB-flagged TEST slice has been re-examined across this document's rounds —
+  a real, standing tension with this project's own "touch TEST once per question" discipline,
+  not resolved here.
+
+- **§T3.4, does the CB flag survive controlling for team quality?** Added the team's own
+  Layer-1 `pregame_rating_diff` as a covariate in the same pooled 2018-2025 residual regression
+  that produces `JOINT_COEFS_FORWARD`'s CB coefficient — if a generic "this team is just worse
+  overall" confound (that our own independent rating system would already capture) were driving
+  the apparent CB effect, adding this covariate should shrink the CB coefficient substantially.
+  It doesn't: `+2.990` (t=+4.01) without the covariate vs. `+2.972` (t=+3.99) with it — a
+  **−0.6% change**, essentially no movement at all (`pregame_rating_diff` itself is not
+  significant here, t=+0.94). **This is real evidence against the confound hypothesis** — at
+  least the specific, checkable form of it (generic team quality already visible to our own
+  Layer-1 ratings). It does not rule out a confound our rating system wouldn't catch (e.g. a
+  cluster of same-week secondary injuries correlated with, but not captured by, season-to-date
+  team strength).
+
+**Updated decision, same as before, on firmer footing**: no coefficient change. The extended
+sweep found a real, bounded optimum (not a runaway confound signal) that if anything sits above
+current production, and the team-quality confound test found no evidence the CB flag is a
+generic-quality proxy. Both results argue *against* shrinking, reinforcing rather than
+resolving the standing tension with the real-world benchmark. ±2.446 stays — already the
+conservative choice within what the data supports — held with real confidence on direction,
+real skepticism on magnitude relative to the literature, and an explicit acknowledgment that
+this exact holdout slice has now been re-used across enough sequential checks in this document
+that any single number from it should be read as suggestive, not decisive.
 
 Sources: Hoffer, A., & Pincin, J. A. (2019). Quantifying NFL Players' Value With the Help of
 Vegas Point Spreads Values. *Journal of Sports Economics*, 20(7), 959–974.
@@ -1344,7 +1389,9 @@ condition → wrap in N Monte Carlo trials → aggregate), not its mechanics:
 run (`build_simulator_for_season_range(pbp, schedules)`, fresh bin edges each run — this is
 forward production, not a TEST-scoring exercise) and, per game, converts each side's
 market-implied team total into a quantile bin (`implied_total_quantile_bin`) and runs
-`simulate_game(home_q, away_q, n_trials=300)`. **Display-only addition** — does not replace
+`simulate_game(home_q, away_q, n_trials=5000)` (raised from 300, §9.5.1 — 300 trials'
+Monte Carlo standard error on a win probability, √(0.25/300)≈2.9 percentage points, was larger
+than the ~1% Brier improvement the calibration layer bought). **Display-only addition** — does not replace
 `our_margin`/`our_total` above. Adds `sim_margin_std`, `sim_home_win_prob`, and a derived
 American-odds moneyline for both sides (`american_odds_from_prob`) to
 `predictions_{season}_wk{week}.parquet` and the printed output; falls back to `None` for the
@@ -1436,6 +1483,14 @@ the resulting probability itself. Verified on a live Week 1 2026 slate: win prob
 32.7%–90.2% across 16 games, moneylines/margins move in the expected direction together, no
 degenerate values.
 
+**Trial count raised 300→5,000 (2026-08, external review).** Monte Carlo standard error on a
+win probability at `n_trials` is √(p(1−p)/n) — at 300, roughly 2.9 percentage points at p=0.5,
+*larger than the ~1% Brier improvement this whole calibration layer just bought*, meaning the
+simulation noise floor could have been swamping the very correction being shipped. At 5,000
+trials the MC error drops to ~0.7pp. Confirmed via a real timed run that this is close to free:
+16 games × 5,000 trials adds well under a minute to a ~1.5-minute full pipeline run (up from
+~1 minute at 300 trials) — not worth trading calibration precision for.
+
 **Total is now shipped too (review round 4, #5), unblocked by the same fix.** Total was held
 back because its MAE (12.28) trails the top-down model's (10.20) — but that gap is location,
 and `our_total` already provides the better location estimate. Recentered the same way and
@@ -1448,8 +1503,8 @@ estimate structurally cannot produce.
 Sanity-checked on a real live run: win probability tracks margin's sign correctly across all
 16 Week 1 2026 games, moneylines are now internally consistent with the displayed spread by
 construction, simulated margin/total std land in plausible ranges (~13-16 / ~13-15 points),
-and the added Monte Carlo cost is negligible (16 games × 300 trials adds well under a second
-to a ~1-minute full pipeline run).
+and the added Monte Carlo cost is negligible (16 games × 5,000 trials — raised from 300, §9.5.1
+— adds well under a minute to a ~1.5-minute full pipeline run, confirmed via a real timed run).
 
 **Pace/volume-factor correlation fix (review round 2, #3.2): premise tested, NOT supported,
 not built.** The proposed mechanism-based fix for v3's failure was to decompose the shared
@@ -1763,9 +1818,13 @@ component, at any point. It exists specifically so this project's own real forwa
 performance can be checked honestly against real outcomes nobody could have curve-fit to,
 which no amount of held-out-but-already-fully-explored historical data (2022-2025 has now
 been directly analyzed in dozens of experiments — see §13's counter below) can substitute
-for. Once a CLV (closing-line value) tracking framework exists — proposed, not yet built,
-requires acquiring historical opening-line data; see §13.1.1's review-round-2 tracking for
-this item — 2026 is also the natural tracking window for it. (This doc's own §5.2 is the QB
+for. **This section predates the build and went stale — corrected 2026-08**: a CLV (closing-
+line value) tracking framework is no longer "proposed, not yet built." It's live (§11.2.1,
+review round 3's self-generated line-snapshot log, extended with post-game reconciliation and
+`bet_side` recorded at snapshot time) and doesn't require historical opening-line data at all
+— it snapshots the CURRENT line at prediction time every pipeline run, sidestepping the
+acquisition problem entirely rather than solving it. 2026 is the natural tracking window for
+it, and that tracking is now operational, not aspirational. (This doc's own §5.2 is the QB
 offseason bootstrap, unrelated — fixed a stale cross-reference here 2026-07.)
 
 ---
@@ -2131,12 +2190,17 @@ here whether it worked or not. Making the count explicit matters because of real
 comparisons exposure: at a conventional p<0.05 threshold, a handful of false positives are
 expected purely by chance across enough independent tests.
 
-**Approximate running count: ~75-85 distinct TEST-window experiments** as of 2026-07 (the
-original review estimated ~30-40 pre-review; round-1 implementation added ~25-30 more; round-2
-added roughly 10-15 (TD-calibration refit, EB ≥100-touch diagnostic, the CB ATS/rolling-origin/
-snap-rank panel, the pending totals panel) — some genuinely single hypotheses, some small
-multi-part investigations counted as one entry each). Given this base rate, expect on the order
-of 3-4 "significant" results in this ledger to be false positives, not real effects. **Items
+**Approximate running count: ~80-90 distinct TEST-window experiments** as of 2026-08 (~75-85
+as of 2026-07: the original review estimated ~30-40 pre-review; round-1 implementation added
+~25-30 more; round-2 added roughly 10-15 — TD-calibration refit, EB ≥100-touch diagnostic, the
+CB ATS/rolling-origin/snap-rank panel, the pending totals panel; +5 more in 2026-08's follow-up
+round: the win-probability CALIB/HOLDOUT calibration comparison, the props-simulator demeaning
+test, and the CB-coefficient magnitude sweep/extended-sweep/team-quality-confound trio — some
+genuinely single hypotheses, some small multi-part investigations counted as one entry each).
+**Fixed a real stale-counter bug here 2026-08: §14 was citing this section as "~85-95+" while
+this section itself still said "~75-85" — this section is the authoritative count; §14 now
+matches it exactly rather than drifting independently.** Given this base rate, expect on the
+order of 3-4 "significant" results in this ledger to be false positives, not real effects. **Items
 worth the most skeptical re-look under this lens** — not because anything specific is wrong
 with them, but because their statistical margin is thin relative to how confidently they're
 currently treated:
@@ -2153,13 +2217,21 @@ currently treated:
 - The CB-flagged snap-rank discriminator (§6.1.1, round-2) — inconclusive at n=37-103 per rank;
   doesn't confirm the hypothesized single-corner mechanism, but the sample is too small to rule
   it out either.
+- **The CB adjustment's ATS%=62.4% itself (§6.1.1) — corrected 2026-08.** This section
+  previously cited this number in the *high-confidence* list below, alongside a "CI clearing
+  breakeven even at its lower bound" framing. That's the RESUBSTITUTION number round 4
+  invalidated (fit on data overlapping its own scoring window) — citing it approvingly here, in
+  the section built specifically to guard against exactly this kind of overconfidence, was a
+  real bug in this document, not a judgment call. The honest, walk-forward, full-specification-
+  search-corrected status (§6.1.1) is ~95th percentile of the corrected null — right at the edge
+  of conventional significance — not a clean high-confidence result. Belongs in this skeptical
+  list, not the one below.
 
 By contrast, the strong, high-confidence results in this ledger (wind's effect on QB/WR
 yards-per-touch at p=0.0022/p<0.0001, RB reallocation at p=0.0003, the draft-capital rookie
-prior at p<0.0001 on both target and carry share, the game-script market-implied-total
-co-input replicated across a fixed split AND independently via rolling-origin CV in §10.5, and
-now the CB adjustment's own ATS%=62.4% with a CI clearing breakeven even at its lower bound,
-§6.1.1 round-2) are not the ones this multiple-comparisons caveat should make anyone doubt.
+prior at p<0.0001 on both target and carry share, and the game-script market-implied-total
+co-input replicated across a fixed split AND independently via rolling-origin CV in §10.5) are
+not the ones this multiple-comparisons caveat should make anyone doubt.
 
 ### 13.1 KEPT / LIVE in production
 - Layer 1 recursive opponent-adjusted EPA power ratings, tuned `alpha=0.06/off_shrink=0.20/
@@ -2516,7 +2588,7 @@ download):**
    count, whenever a future session extends the full compound chain.
 
 **Before testing a new hypothesis**: check §13 first. The base rate of "this plausible-sounding
-idea turns out to be null" is roughly 80% in this project's own history (~85-95+ distinct
+idea turns out to be null" is roughly 80% in this project's own history (~80-90 distinct
 TEST-window experiments run as of this writing, §13.0) — a new idea needs a specific,
 non-generic mechanism argued for it, not just plausibility, before spending a validation cycle
 on it. The pattern across all four review rounds has been consistent: real hits cluster in

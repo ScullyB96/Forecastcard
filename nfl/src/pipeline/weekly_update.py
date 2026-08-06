@@ -596,7 +596,13 @@ if __name__ == "__main__":
             away_implied_total = market_total / 2 - market_spread / 2
             home_q = implied_total_quantile_bin(home_implied_total, sim_bin_edges)
             away_q = implied_total_quantile_bin(away_implied_total, sim_bin_edges)
-            sim_result = game_sim.simulate_game(home_q, away_q, n_trials=300)
+            # n_trials=5000 (raised from 300, review 2026-08): at 300 trials the Monte Carlo
+            # standard error on a win probability is sqrt(0.25/300) ~= 2.9 percentage points --
+            # material noise on a number converted directly into a moneyline, and larger than
+            # the ~1% Brier improvement WIN_PROB_CALIB_A/B bought above. At 5000 trials the MC
+            # error drops to ~0.6pp. Cost is real but small (a per-game simulation loop, not the
+            # dominant runtime cost of a weekly pipeline run already fetching years of PBP data).
+            sim_result = game_sim.simulate_game(home_q, away_q, n_trials=5000)
 
             # Recenter on our_margin before deriving win probability/moneyline (review round 4,
             # #4): the raw simulated margin distribution centers wherever the drive dynamics land

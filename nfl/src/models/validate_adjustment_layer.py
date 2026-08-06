@@ -439,3 +439,69 @@ if __name__ == "__main__":
     )
     print(f"\nMAE-minimizing candidate among those tested: {best_by_mae}")
     print("(Interpretation belongs in MODEL_DOCUMENTATION.md §6.1.1, not hardcoded here.)")
+
+    print("\n=== T3.3 (2026-08, external review follow-up): extend the sweep PAST 2.977 ===")
+    print("T3.2 only tested up to the largest coefficient ever fit -- can't tell 'recovered the")
+    print("OLS optimum' from 'the flag proxies a confound bigger than any plausible CB effect.'")
+    print("If MAE/CRPS keep improving well past ~3, no causal CB story supports that; if they")
+    print("peak/plateau near 2.6-3.0, this just re-confirms the existing fitted region.")
+    extended_candidates = [2.446, 2.977, 4.0, 5.0, 6.0, 8.0]
+    ext_results = []
+    for coef_val in extended_candidates:
+        adj = coef_val * (cb_flagged["away_cb_flag"] - cb_flagged["home_cb_flag"])
+        base_no_cb = cb_flagged["market_margin"] + SWAP_B_MARKET * cb_flagged["net_swap_delta"] - 0.018
+        margin_at_coef = base_no_cb + adj
+        mae = (margin_at_coef - cb_flagged["actual_margin"]).abs().mean()
+        crps_val = crps_gaussian(margin_at_coef, cb_flagged["actual_margin"], sigma)["crps"]
+        ext_results.append((coef_val, mae, crps_val))
+        print(f"  {coef_val:6.3f}  MAE={mae:.3f}  CRPS={crps_val:.3f}")
+    best_ext = min(ext_results, key=lambda r: r[1])
+    print(f"\nMAE-minimizing candidate, extended range: {best_ext[0]}")
+    if best_ext[0] >= 4.0:
+        print("-> MAE keeps improving well past the largest coefficient ever fit. No causal CB")
+        print("   story supports that magnitude -- this is evidence the flag proxies a confound")
+        print("   larger than any plausible individual-player effect.")
+    else:
+        print("-> MAE peaks back near the existing fitted region (2.446-2.977), not beyond it --")
+        print("   this just re-confirms the OLS optimum already found, no new confound signal.")
+
+    print("\n=== T3.4 (2026-08, external review follow-up): does the CB flag survive controlling")
+    print("    for team quality (Layer-1 pregame_rating_diff)? ===")
+    print("The residual (actual_margin - market_margin) is already market-adjusted, but the market")
+    print("might not fully/immediately price in a same-week quality shift a CB-out flag partly")
+    print("proxies for. If OUR OWN separately-computed Layer-1 rating differential still explains")
+    print("away the CB coefficient once added as a covariate, that's evidence of confounding; if")
+    print("the CB coefficient survives essentially unchanged, that's evidence it isn't just proxying")
+    print("generic team quality our own rating system would already have caught.")
+    conf_df = df[df["season"].isin(ALL_SEASONS)].copy()  # pooled 2018-2025, matching JOINT_COEFS_FORWARD's own fit basis
+    conf_df["resid"] = conf_df["actual_margin"] - conf_df["market_margin"]
+    conf_df["cb_diff"] = conf_df["away_cb_flag"] - conf_df["home_cb_flag"]
+    conf_df = conf_df.dropna(subset=["pregame_rating_diff"])
+
+    def fit_ols_tstats(y, X_cols_df):
+        X = np.column_stack([np.ones(len(X_cols_df))] + [X_cols_df[c].to_numpy(dtype=float) for c in X_cols_df.columns])
+        yv = y.to_numpy(dtype=float)
+        beta, *_ = np.linalg.lstsq(X, yv, rcond=None)
+        resid = yv - X @ beta
+        n, k = X.shape
+        sigma2 = (resid ** 2).sum() / (n - k)
+        cov = sigma2 * np.linalg.inv(X.T @ X)
+        se = np.sqrt(np.diag(cov))
+        tstats = beta / se
+        return beta, tstats
+
+    beta_uni, t_uni = fit_ols_tstats(conf_df["resid"], conf_df[["cb_diff"]])
+    print(f"WITHOUT team-quality covariate: cb_diff coef={beta_uni[1]:+.3f}  t={t_uni[1]:+.2f}")
+
+    beta_multi, t_multi = fit_ols_tstats(conf_df["resid"], conf_df[["cb_diff", "pregame_rating_diff"]])
+    print(f"WITH pregame_rating_diff covariate: cb_diff coef={beta_multi[1]:+.3f}  t={t_multi[1]:+.2f}  "
+          f"(pregame_rating_diff coef={beta_multi[2]:+.4f}  t={t_multi[2]:+.2f})")
+    pct_change = (beta_multi[1] - beta_uni[1]) / beta_uni[1] * 100
+    print(f"\ncb_diff coefficient change when controlling for team quality: {pct_change:+.1f}%")
+    if abs(pct_change) > 30:
+        print("-> Substantial shrinkage when controlling for team quality -- real evidence the CB")
+        print("   flag was partly proxying a team-quality confound our own Layer-1 rating catches.")
+    else:
+        print("-> Coefficient essentially survives controlling for team quality -- evidence against")
+        print("   the confound hypothesis (at least the part our own rating system would catch).")
+    print("(Interpretation belongs in MODEL_DOCUMENTATION.md §6.1.1, not hardcoded here.)")
