@@ -413,3 +413,29 @@ if __name__ == "__main__":
     print("(Documented as an explicit trade, not a one-sided precaution -- see MODEL_DOCUMENTATION.md")
     print(" §6.1.1's staking note: sizing should use the coefficient's own implied edge and CI,")
     print(" which this bias check informs, not the ATS number, which the shrink can't move at all.)")
+
+    print("\n=== T3.2 (2026-08, follow-up on the literature-benchmark check): empirical MAE/CRPS/bias")
+    print("    curve across candidate CB coefficient magnitudes, including the real-world-informed")
+    print("    range (0 to ~1.5, per the Sports Insights oddsmaker survey -- MODEL_DOCUMENTATION.md")
+    print("    §6.1.1) ===")
+    print("ATS can't discriminate magnitude (every candidate implies the same bet direction) -- MAE/")
+    print("CRPS/signed-bias can. This is the honest test of whether shrinking toward the literature-")
+    print("plausible range costs real accuracy on our own held-out data, or is close to free.")
+    for coef_val in [0.0, 0.5, 1.0, 1.5, 2.0, 2.446, 2.977]:
+        adj = coef_val * (cb_flagged["away_cb_flag"] - cb_flagged["home_cb_flag"])
+        base_no_cb = cb_flagged["market_margin"] + SWAP_B_MARKET * cb_flagged["net_swap_delta"] - 0.018
+        margin_at_coef = base_no_cb + adj
+        b = signed_bias(margin_at_coef, cb_flagged["actual_margin"])
+        mae = (margin_at_coef - cb_flagged["actual_margin"]).abs().mean()
+        crps_val = crps_gaussian(margin_at_coef, cb_flagged["actual_margin"], sigma)["crps"]
+        label = {0.0: "0.0 (no CB term)", 0.5: "0.5 (lit: elite skill-position ceiling)",
+                 1.5: "1.5 (lit: best-defender speculative ceiling)", 2.446: "2.446 (current production)",
+                 2.977: "2.977 (pre-shrink v3)"}.get(coef_val, f"{coef_val}")
+        print(f"  {label:42s}  MAE={mae:.3f}  CRPS={crps_val:.3f}  signed_bias={b['bias']:+.3f}  CI=[{b['ci'][0]:+.3f},{b['ci'][1]:+.3f}]")
+    best_by_mae = min(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 2.446, 2.977],
+        key=lambda c: (cb_flagged["market_margin"] + SWAP_B_MARKET * cb_flagged["net_swap_delta"] - 0.018
+                       + c * (cb_flagged["away_cb_flag"] - cb_flagged["home_cb_flag"]) - cb_flagged["actual_margin"]).abs().mean(),
+    )
+    print(f"\nMAE-minimizing candidate among those tested: {best_by_mae}")
+    print("(Interpretation belongs in MODEL_DOCUMENTATION.md §6.1.1, not hardcoded here.)")

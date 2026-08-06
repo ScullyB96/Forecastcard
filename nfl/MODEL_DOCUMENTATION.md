@@ -788,6 +788,46 @@ so"), but it materially updates the honest bottom line: hold this adjustment's *
 real confidence, and its *magnitude* with real skepticism, more skepticism than stated above
 before this check.
 
+**Follow-up (2026-08, same day): does our own held-out data support shrinking toward that
+literature-informed range? Tested directly — no, the opposite.** `validate_adjustment_layer.py`
+(new §T3.2) extends the existing v3-vs-v4 bias check (which only compared 2.977 vs. 2.446) into
+a full MAE/CRPS/signed-bias sweep across candidate coefficient magnitudes, including the
+literature-informed range, on the CB-flagged TEST holdout (n=192):
+
+| Coefficient | MAE | CRPS | Signed bias |
+|---|---|---|---|
+| 0.0 (no CB term at all) | 10.149 | 7.283 | −0.328 |
+| 0.5 (lit.: elite skill-position ceiling) | 10.042 | 7.203 | −0.321 |
+| 1.0 | 9.953 | 7.133 | −0.313 |
+| 1.5 (lit.: best-defender speculative ceiling) | 9.891 | 7.075 | −0.305 |
+| 2.0 | 9.853 | 7.028 | −0.297 |
+| **2.446 (current production)** | **9.827** | **6.994** | **−0.290** |
+| 2.977 (pre-shrink v3) | 9.802 | 6.966 | −0.282 |
+
+MAE and CRPS improve **monotonically** with coefficient magnitude across the entire tested
+range — there is no elbow where accuracy peaks and then degrades; 2.977 (the largest value
+ever fit) still edges out 2.446 on this holdout, and every literature-informed value (0 to 1.5)
+is measurably worse than what's currently shipped. **Our own held-out accuracy data gives zero
+support for shrinking further toward the real-world benchmark range — if anything it points
+the other way.**
+
+This does not resolve the tension found above; it sharpens exactly what the tension is. The
+important caveat: this sweep is partly self-referential — the candidate values bracketing
+current production were themselves derived by least-squares fitting on data drawn from the
+same underlying process being re-scored here, so "our fitted region beats smaller values on
+our own data" is close to expected by construction, not new independent corroboration that the
+*true* effect is that large. It doesn't distinguish "the true CB effect really is ~2.4-3
+points" from "our estimate is inflated by an unmeasured confound or the small-sample
+specification-search effect already flagged (§6.1.1's permutation test, 95th percentile) —
+and that same inflated estimate naturally looks best when re-scored against more of the same
+kind of data." **Decision: no coefficient change.** Shrinking further has no accuracy
+justification from our own data, and the existing ±2.446 is already the conservative choice
+within what our data supports (the fold-median, not the pooled 2.977). But this real,
+unresolved disagreement between two legitimate forms of evidence — measured walk-forward
+accuracy vs. a real-world professional-market benchmark — means the magnitude should be held
+with genuine caution for anything beyond directional bet-sizing, more so than either check
+would suggest in isolation.
+
 Sources: Hoffer, A., & Pincin, J. A. (2019). Quantifying NFL Players' Value With the Help of
 Vegas Point Spreads Values. *Journal of Sports Economics*, 20(7), 959–974.
 https://doi.org/10.1177/1527002519832060. Sports Insights, "NFL Player Point Spread Values"
