@@ -877,16 +877,37 @@ predates Phase 2 ever being wired in. `generate_props.py` has no independent Pha
 own — it only ever reused `generate_predictions.py`'s output as its points macro-anchor, so
 disabling Phase 2 there propagates automatically.
 
-### 6.4 What would be needed to safely re-enable Phase 2
+### 6.4 What would be needed to safely re-enable Phase 2 — decisively scoped (2026-08-02)
 
-Per the code's own documentation: a **genuinely improved minutes-projection mechanism** must be
-built and pass the full dev → holdout confirmatory-veto pipeline again — not just re-trusting the
-old, hindsight-leaked backtest. One additional asymmetry worth weighing when judging any new
-mechanism: the honest re-validated backtest has ZERO injury information (RotoWire has no historical
-archive, §1.3), while the live pipeline DOES have real, if partial, injury exclusion — meaning the
-current honest backtest is likely a *pessimistic* lower bound on live performance, not a precise
-estimate of it. Mechanically, re-enabling is a one-line flag flip in two files once a new mechanism
-clears validation — nothing structural needs to change.
+A three-way decomposition (`validate_semi_oracle_lineup_adjustment.py`, new) settles exactly where
+the predictive-mode gap comes from, via a bridging **semi-oracle** mode
+(`lineup_rating.semi_oracle_minutes_shares`: REAL attendance for the exact game + TRAILING-AVERAGE
+shares — not a deployable mode itself, built purely to isolate the two possible failure causes).
+Run once on the full dev range (10,467 games, all three modes available):
+
+| comparison | total_mae | margin_mae |
+|---|---|---|
+| oracle vs. semi-oracle (share-redistribution error) | NOISE | NOISE |
+| semi-oracle vs. predictive (attendance-prediction error) | REAL IMPROVEMENT (-0.0263) | REAL IMPROVEMENT (-0.0424) |
+
+**Decisive**: semi-oracle performs almost identically to full oracle — trailing-average SHARE
+assignment, given known attendance, is already statistically indistinguishable from knowing a
+player's exact real minutes. The ENTIRE swing from a real improvement (semi-oracle) to a real
+regression (predictive) is attributable to not knowing WHO is active tonight, not to how minutes
+get split among them once that's known.
+
+**This narrows what "genuinely improved minutes-projection mechanism" (needed to re-enable Phase 2)
+actually means**: only the ATTENDANCE half needs work; the share-redistribution half needs none.
+And attendance prediction has a hard, already-known ceiling — no historical injury archive exists
+(§1.3), so a backtest can only ever validate an attendance model against "recent pattern, no injury
+info," while the live system's real RotoWire feed is strictly better than anything backtestable
+(the same asymmetry Sec28.2 already flagged, now precisely bounded rather than just noted). A
+narrower, more tractable next step than a full two-stage rebuild: replace the current binary
+trailing-window union (in-or-out) with a probabilistic attendance signal using already-backtestable
+features (games-played fraction, DNP streak length, rest days) — validated by comparing its
+predicted attendance set directly against real oracle attendance, before ever combining it with the
+(already-confirmed-adequate) share step. Mechanically, re-enabling remains a one-line flag flip in
+two files once a new mechanism clears validation.
 
 ### 6.5 Rest/back-to-back (`rest_schedule.py`) — a related, separately-tested, NOT-adopted signal
 
@@ -1223,10 +1244,14 @@ fix.
    coherence (home OREB + away DREB should reconcile to home's own projected misses) that the current
    independent-fit approach doesn't guarantee. A genuinely different primitive, not a parameter
    choice — worth the two-stage-then-holdout protocol if pursued.
-7. **Phase 2 (RAPM-lite lineup adjustment) is disabled and should stay disabled** until a genuinely
-   improved minutes-projection mechanism is built (§6.4) — the core signal (oracle mode) is real and
-   confirmed; the deployable minutes-estimation piece specifically is the gap. This is real,
-   substantial modeling work (not a quick parameter tune) if pursued.
+7. **Phase 2 (RAPM-lite lineup adjustment) is disabled and should stay disabled — but the fix is
+   now precisely scoped (§6.4), not an open-ended rebuild.** A semi-oracle decomposition proved the
+   ENTIRE predictive-mode gap is attendance-prediction error (real, −0.0424 margin_mae) — the
+   share-redistribution half is already statistically indistinguishable from oracle (NOISE). Don't
+   build a full two-stage minutes model; build a smarter attendance-probability signal alone (using
+   games-played fraction / DNP streaks / rest days, all already backtestable) and validate it
+   directly against real attendance before combining with the unchanged share step. Real work, but
+   narrower and cheaper than originally scoped.
 8. **`cross_season_weight`'s stl/blk results for team_stat_rates are the least statistically robust
    adopted change this session** (§7.5) — they don't survive a conservative Bonferroni correction,
    though they're not reversed to a regression either. As next season's real games accumulate, this
@@ -1234,9 +1259,15 @@ fix.
 9. **A real market benchmark now exists for dev range only (§2.5/§9.5)** — the model shows a real,
    quantified gap vs. real closing lines (margin_mae +0.39, total_mae +0.61, SU accuracy −2.3pp), the
    project's first external (non-naive) reference point. Cannot be extended to the 2024-2025 holdout
-   range without a new paid historical-odds source (SBRO stops at 2022-23) — not pursued unless
-   closing the market gap becomes an explicit project goal, but worth keeping in mind as the honest
-   current ceiling estimate whenever "how good is this model" comes up.
+   range without a new paid historical-odds source (SBRO stops at 2022-23) — checked two free
+   alternatives (2026-08-02): TeamRankings.com only exposes aggregate against-the-spread trend
+   statistics, not a per-game archive; OddsPortal.com claims 2023-2025 coverage but is a commercial
+   gambling-affiliate site (cookie walls, login prompts, heavy client-side rendering) unlike SBRO's
+   plain archival pages — not a good target for reliable, ToS-respecting scraping. No good free path
+   found. Extending to holdout needs a paid source (SportsDataIO, Odds Warehouse, or similar) — the
+   user's own account/purchase to make, not pursued unless closing the market gap becomes an explicit
+   goal, but worth keeping in mind as the honest current ceiling estimate whenever "how good is this
+   model" comes up.
 10. **Score-distribution's variance model needs a genuine walk-forward refit, not another static
     fit (§4).** A real, significant per-season decline in margin interval coverage was found
     (r=−0.749 to −0.782, p<0.01) — today's live win-probability/spread outputs are measurably

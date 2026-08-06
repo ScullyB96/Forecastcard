@@ -111,6 +111,59 @@ def predictive_minutes_shares(player_minutes: pd.DataFrame, game_id: str, team_s
     return trailing_avg / total
 
 
+def semi_oracle_minutes_shares(player_minutes: pd.DataFrame, game_id: str, team_side: str,
+                                team_game_ids_before: list[str], team_side_by_game: dict[str, str],
+                                lookback_games: int = DEFAULT_LOOKBACK_GAMES) -> pd.Series:
+    """A THIRD mode (2026-08-02, external-review follow-up), between oracle and predictive, that
+    exists ONLY to diagnose where Phase 2's predictive-mode gap (Sec28.2: real margin_mae
+    regression, both dev and holdout) actually comes from -- NOT a live-deployable or backtest-
+    adopted mode itself, since it deliberately reintroduces a real-attendance hindsight leak.
+
+    Uses the REAL attendance for this exact game (`oracle_minutes_shares(...).index` -- perfect
+    knowledge of who's active tonight) but assigns each attendee's SHARE from their own trailing-
+    average minutes over the team's last `lookback_games` (the SAME mechanism `predictive_minutes_shares`
+    uses), not their real minutes that specific night. This isolates two genuinely different
+    failure modes that were conflated in earlier analysis:
+
+    - full ORACLE (real attendance + real minutes) vs. this SEMI-ORACLE (real attendance +
+      predicted shares) -- the gap here is purely SHARE-REDISTRIBUTION error: even with perfect
+      knowledge of who's active, how much value is lost from not knowing each player's EXACT
+      minutes that night (blowout garbage time, foul trouble, a coach's specific rotation call)?
+    - this SEMI-ORACLE vs. full PREDICTIVE (trailing-window union + predicted shares) -- the gap
+      here is purely ATTENDANCE-PREDICTION error: how much value is lost specifically from not
+      knowing WHO is active (the injury/rest/healthy-scratch problem live's RotoWire feed only
+      partially solves)?
+
+    A player in the real active set with NO trailing history at all (e.g. a real debut) is
+    excluded here -- there's no trailing average to assign, and this function exists only to
+    decompose an existing gap, not to be a complete deployable mode with its own bootstrap prior
+    for that edge case."""
+    real_active_ids = oracle_minutes_shares(player_minutes, game_id, team_side).index
+    if len(real_active_ids) == 0:
+        return pd.Series(dtype=float)
+
+    recent_game_ids = team_game_ids_before[-lookback_games:]
+    if not recent_game_ids:
+        return pd.Series(dtype=float)
+
+    rows = []
+    for gid in recent_game_ids:
+        side = team_side_by_game.get(gid)
+        if side is None:
+            continue
+        rows.append(player_minutes[(player_minutes["gameId"] == gid) & (player_minutes["team_side"] == side)])
+    if not rows:
+        return pd.Series(dtype=float)
+    combined = pd.concat(rows, ignore_index=True)
+    trailing_avg = combined.groupby("playerId")["minutes"].mean()
+
+    trailing_avg = trailing_avg.reindex(real_active_ids).dropna()
+    total = trailing_avg.sum()
+    if total <= 0:
+        return pd.Series(dtype=float)
+    return trailing_avg / total
+
+
 def team_recent_roster_rapm(player_minutes: pd.DataFrame, player_ratings_as_of: pd.DataFrame,
                              team_game_ids_before: list[str], team_side_by_game: dict[str, str],
                              lookback_games: int = DEFAULT_LOOKBACK_GAMES) -> tuple[float, float]:

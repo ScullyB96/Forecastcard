@@ -36,7 +36,7 @@ from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_fam
 from src.models.score_distribution import _t_scale
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta
-from src.models.lineup_rating import predictive_minutes_shares
+from src.models.lineup_rating import predictive_minutes_shares, semi_oracle_minutes_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
 from src.models.team_stat_rates import (ADOPTED_CATEGORIES, CROSS_SEASON_WEIGHT_STAT, OWN_HALFLIFE_GAMES_STAT,
                                          STAT_COLUMNS, add_team_stat_ratings, build_team_stat_game_log, project_team_stat)
@@ -811,6 +811,59 @@ def test_predictive_minutes_shares_has_no_hindsight_leak():
           "still included -- the live system has no way to know this in advance either",
           2 in shares.index, f"got {set(shares.index)}")
     check("shares renormalize to exactly 1.0", abs(shares.sum() - 1.0) < 1e-9)
+
+
+def test_semi_oracle_minutes_shares_uses_real_attendance_but_trailing_average_shares():
+    """`lineup_rating.semi_oracle_minutes_shares` (2026-08-02, external-review follow-up): a
+    diagnostic-only third mode between oracle (real attendance + real minutes) and predictive
+    (trailing-window union + trailing-average shares), used to isolate whether Phase 2's
+    predictive-mode gap (Sec28.2) comes from not knowing WHO plays vs. imprecise SHARE
+    redistribution among known attendees. Confirms both halves of the design: (1) active-SET
+    membership comes from REAL attendance in the target game (player C, a normal trailing-history
+    rotation player who is OUT tonight, must be excluded -- unlike predictive mode, which would
+    include him); (2) each attendee's SHARE comes from their own TRAILING AVERAGE minutes, not
+    their real minutes that specific night -- checked with a scenario where the real-minutes ratio
+    and the trailing-average ratio are OPPOSITE (player A: real=10 low / trailing=30 high; player
+    D: real=30 high / trailing=10 low), so a share vector accidentally built from real minutes
+    instead of trailing averages would be immediately, unambiguously detectable."""
+    player_minutes = pd.DataFrame([
+        # trailing games g1-g4: A averages 30 min, C averages 15 min, D averages 10 min
+        {"gameId": "g1", "playerId": "A", "team_side": "home", "minutes": 32.0},
+        {"gameId": "g1", "playerId": "C", "team_side": "home", "minutes": 14.0},
+        {"gameId": "g1", "playerId": "D", "team_side": "home", "minutes": 8.0},
+        {"gameId": "g2", "playerId": "A", "team_side": "home", "minutes": 28.0},
+        {"gameId": "g2", "playerId": "C", "team_side": "home", "minutes": 16.0},
+        {"gameId": "g2", "playerId": "D", "team_side": "home", "minutes": 12.0},
+        {"gameId": "g3", "playerId": "A", "team_side": "home", "minutes": 31.0},
+        {"gameId": "g3", "playerId": "C", "team_side": "home", "minutes": 15.0},
+        {"gameId": "g3", "playerId": "D", "team_side": "home", "minutes": 9.0},
+        {"gameId": "g4", "playerId": "A", "team_side": "home", "minutes": 29.0},
+        {"gameId": "g4", "playerId": "C", "team_side": "home", "minutes": 15.0},
+        {"gameId": "g4", "playerId": "D", "team_side": "home", "minutes": 11.0},
+        # target game g5: A has foul trouble (real=10, far below trailing avg 30); D gets extended
+        # garbage-time run (real=30, far above trailing avg 10); C is a healthy scratch (no row at
+        # all for g5 -- real attendance excludes him even though he has full trailing history).
+        {"gameId": "g5", "playerId": "A", "team_side": "home", "minutes": 10.0},
+        {"gameId": "g5", "playerId": "D", "team_side": "home", "minutes": 30.0},
+    ])
+    team_game_ids_before = ["g1", "g2", "g3", "g4"]
+    team_side_by_game = {"g1": "home", "g2": "home", "g3": "home", "g4": "home"}
+
+    shares = semi_oracle_minutes_shares(
+        player_minutes, game_id="g5", team_side="home",
+        team_game_ids_before=team_game_ids_before, team_side_by_game=team_side_by_game, lookback_games=10)
+
+    check("C (real trailing-history rotation player, but OUT in the target game) is excluded -- "
+          "active-SET membership comes from REAL attendance, not trailing-window presence",
+          "C" not in shares.index, f"got {set(shares.index)}")
+    check("both real attendees (A, D) are present", set(shares.index) == {"A", "D"}, f"got {set(shares.index)}")
+    check("A's share reflects A's HIGH trailing average (30), not A's LOW real minutes tonight (10) "
+          "-- A gets the LARGER share despite playing fewer real minutes than D",
+          shares["A"] > shares["D"], f"got A={shares['A']}, D={shares['D']}")
+    check("the share ratio matches the trailing-average ratio (30:10 = 0.75:0.25) exactly, "
+          "not the real-minutes ratio (10:30 = 0.25:0.75, which would be the OPPOSITE order)",
+          abs(shares["A"] - 0.75) < 1e-9 and abs(shares["D"] - 0.25) < 1e-9,
+          f"got A={shares['A']}, D={shares['D']}")
 
 
 def test_resolve_active_lineup_excludes_departed_players():
@@ -1664,6 +1717,7 @@ if __name__ == "__main__":
     test_name_index_prefers_active_player_and_flags_genuine_ambiguity()
     test_resolve_active_lineup_excludes_departed_players()
     test_predictive_minutes_shares_has_no_hindsight_leak()
+    test_semi_oracle_minutes_shares_uses_real_attendance_but_trailing_average_shares()
 
     print()
     if FAILURES:

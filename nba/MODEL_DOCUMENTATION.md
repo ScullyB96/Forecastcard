@@ -3259,3 +3259,62 @@ built into a fix: a mean-dependent or per-bucket family selection would be a rea
 needing its own validation (does it actually improve log-score/calibration specifically for the
 low-minutes population, checked properly, not assumed) -- queued as a candidate refinement, not
 adopted on the strength of this diagnostic alone.
+
+## 47. Decomposing Phase 2's predictive-mode gap: a decisive result that reframes the whole minutes-model rebuild question (2026-08-02)
+
+Sec28.2 found predictive-mode Phase 2 (the deployable minutes-share mechanism) is a REAL regression
+on margin_mae, while oracle mode (real, already-known minutes -- a ceiling test) is a real
+improvement. That leaves an open question this session's external review asked directly: is the gap
+because the live system can't know WHO plays (attendance), or because trailing-average SHARES are a
+poor stand-in for real minutes among players it does correctly identify as active? The single
+predictive-mode backtest conflates both failure modes into one number and can't distinguish them.
+
+**New diagnostic mode**: `lineup_rating.semi_oracle_minutes_shares` -- uses the REAL attendance set
+for the exact game being scored (like oracle) but assigns each attendee's SHARE from their own
+TRAILING AVERAGE minutes (like predictive), not their real minutes that night. This is not a
+deployable or backtest-adopted mode itself (it deliberately reintroduces a real-attendance
+hindsight leak) -- it exists purely to bound where the predictive-mode gap comes from. Regression-
+tested with a scenario where a player's real-vs-trailing-average minutes ratio is deliberately
+inverted (player A: real=10/trailing=30; player D: real=30/trailing=10), confirming the function's
+output share ratio matches the TRAILING ratio, not the real one, and that a real trailing-history
+rotation player who's a healthy scratch tonight is correctly excluded from the active set.
+
+**Result, run once on the full dev range (10,467 games with all three modes available)**:
+
+| comparison | total_mae | margin_mae | su |
+|---|---|---|---|
+| oracle vs. baseline | REAL IMPROVEMENT (-0.0199) | REAL IMPROVEMENT (-0.0343) | NOISE |
+| semi-oracle vs. baseline | REAL IMPROVEMENT (-0.0183) | REAL IMPROVEMENT (-0.0310) | NOISE |
+| predictive vs. baseline | REAL REGRESSION (+0.0080) | REAL REGRESSION (+0.0114) | NOISE |
+| **oracle vs. semi-oracle (share-redistribution error)** | **NOISE (-0.0016)** | **NOISE (-0.0032)** | NOISE |
+| **semi-oracle vs. predictive (attendance-prediction error)** | **REAL IMPROVEMENT (-0.0263)** | **REAL IMPROVEMENT (-0.0424)** | NOISE |
+
+**This is a decisive, clean result that reframes the entire scoping question.** Semi-oracle
+performs almost identically to full oracle (margin_mae -0.0310 vs. -0.0343, the gap between them is
+NOISE on every metric) -- meaning trailing-average SHARE assignment, given known attendance, is
+**already statistically indistinguishable from knowing a player's exact real minutes**. There is
+NO real value being lost in the share-redistribution step. The entire swing from a real improvement
+(semi-oracle) to a real regression (predictive) -- a margin_mae delta of 0.0424, larger than several
+of this session's adopted Phase 1 wins -- is attributable ENTIRELY to not knowing who's active
+tonight.
+
+**Consequence for the minutes-model rebuild originally scoped**: the two-stage architecture drafted
+before this test (Stage 1: attendance probability; Stage 2: position-group-aware share
+redistribution) was over-scoped. **Stage 2 needs no work at all** -- confirmed, not assumed.
+**Stage 1 (attendance prediction) is the entire problem**, and it has a hard, already-documented
+ceiling: no historical injury archive exists (`fetch_rotowire_lineups.py`), so a backtest can only
+ever validate an attendance model against "recent pattern, no injury info" -- the live system's real
+RotoWire Out/Doubtful feed is strictly better than anything backtestable, meaning this decomposition
+(like Sec28.2's own oracle/predictive comparison) is a pessimistic lower bound on live performance,
+not a precise estimate of it.
+
+**Narrowed recommendation for future work, if pursued**: don't build the full two-stage rebuild.
+Build a smarter Stage-1-only attendance signal using features that ARE backtestable even without
+injury data -- current trailing-window union treats "appeared in the last 10 games" as a binary
+in/out cutoff; a probabilistic model using games-played-fraction, current DNP streak length, and
+rest days (all already available, walk-forward safe, no new ingest) could plausibly improve on that
+crude binary rule even before any live injury signal is added on top. Validate it the same way this
+diagnostic did: compare its predicted attendance set against the REAL oracle attendance set directly
+(not folded into the full lineup-adjustment MAE), before ever combining it with the (already-
+confirmed-adequate) share-redistribution step. This spent no holdout read and adopts nothing -- pure
+dev-only research informing where a future rebuild should actually focus.
