@@ -680,8 +680,29 @@ if __name__ == "__main__":
     rosters = pd.read_parquet(DATA_RAW / f"weekly_rosters_{min(ros_seasons)}_{max(ros_seasons)}.parquet")
     latest_roster_week = rosters[rosters["season"] == pred_season]["week"].max()
     if pd.isna(latest_roster_week):
-        latest_roster_week = rosters["week"].max()
         latest_roster_season = rosters["season"].max()
+        # BUG FIX (2026-07, exposed by the nflreadpy migration -- see fetch.py's module
+        # docstring): this used to be rosters["week"].max() unconditionally, which picks the
+        # roster table's OWN raw max week -- for a season already finished, that's whatever
+        # postseason week the eventual Super Bowl participants played (week 22 for a recent
+        # season). That's doubly wrong as a "current roster" proxy: (1) it's severely
+        # degenerate -- every non-playoff team has already had its real players stripped from
+        # the table (confirmed: week 22 of a recent season has only 165 rows total, vs.
+        # ~2,650 at a normal midseason week); (2) even a real regular-season-ending week
+        # (e.g. week 18) carries that week's real, IN-SEASON injury/reserve STATUSES (RES/INA/
+        # etc.) -- confirmed directly: Patrick Mahomes shows status="RES" at week 18 of a
+        # recent season from a real midseason IR stint, which would incorrectly carry over
+        # into "currently out" if used as a stand-in for a brand-new season's roster. Fix:
+        # use that season's own WEEK 1 snapshot instead -- confirmed directly (Mahomes,
+        # Jayden Daniels both "ACT" at week 1 of the same season) that a season-opening
+        # roster is the closest real historical analog to "a fresh, mostly-healthy, full
+        # 32-team roster," which is exactly what's needed as a stand-in for a season not yet
+        # underway. Previously masked entirely because nfl_data_py could already return real,
+        # if early, NEXT-season preseason roster data, so this fallback path rarely fired;
+        # nflreadpy currently validates season ranges more strictly (raises rather than
+        # returning early preseason data), which exposed this latent bug on the first real
+        # run under the new library.
+        latest_roster_week = rosters[rosters["season"] == latest_roster_season]["week"].min()
     else:
         latest_roster_season = pred_season
     current_roster = rosters[(rosters["season"] == latest_roster_season) & (rosters["week"] == latest_roster_week)]
@@ -743,6 +764,18 @@ if __name__ == "__main__":
                     clay_name_to_id, clay_lastname_team_pos_to_id, clay_lastname_pos_to_id,
                     carry_engine, rush_attempts, league_ypc, league_rush_td_rate,
                 )
+                # BUG FIX (2026-07, found verifying the nflreadpy migration): rookie_fallback_rb_rates
+                # doesn't check out_ids at all (its own trigger is "zero real engine history", unrelated
+                # to this week's roster status) -- a true rookie who is BOTH a zero-history player AND
+                # currently marked Out/inactive gets rendered TWICE: once by the main per-roster-row loop
+                # (status_note="OUT", correctly zeroed) and again here (a real, nonzero fallback row for
+                # the same person). Confirmed reproducing (Jordan James, SF, 2026 wk1). Drop any Clay
+                # fallback entry whose name matches an Out player on this team, by normalized name (same
+                # matching convention as the draft-capital-vs-Clay dedup just below, for the same reason:
+                # resolved_pid isn't reliable enough alone).
+                out_names = {norm_name(current_roster.loc[current_roster["player_id"] == pid, "player_name"].iloc[0])
+                             for pid in out_ids if (current_roster["player_id"] == pid).any()}
+                rookie_rbs = {k: v for k, v in rookie_rbs.items() if norm_name(v["player_name"]) not in out_names}
             # BUG FIX 2026-07 (self-caught in a full-codebase review): the two
             # rookie fallbacks are keyed differently -- draft-capital by the
             # real player_id, Clay by a synthetic "clay:<name>" string -- so
@@ -780,7 +813,14 @@ if __name__ == "__main__":
                 **rookie_fallback_from_draft_capital(team, "WR", current_roster, draft_picks, pred_season, tgt_engine, target_share_prior),
                 **rookie_fallback_from_draft_capital(team, "TE", current_roster, draft_picks, pred_season, tgt_engine, target_share_prior),
             }
-            qb_eligible_roster = current_roster[~current_roster["player_id"].isin(out_ids)]
+            # BUG FIX (2026-07, found investigating the roster-snapshot fallback bug above):
+            # this used to be current_roster (ALL 32 teams) minus out_ids, not team-filtered --
+            # harmless whenever presumed_starter_qb_id's real-history match succeeds, but its
+            # own fallback (roster_qbs.iloc[0]) then silently returns THE SAME first QB row in
+            # the entire league-wide table for every team that falls through, rather than a
+            # real roster QB for that specific team. Team-filtering here makes that fallback
+            # (if it ever fires again) at least return one of this team's own real QBs.
+            qb_eligible_roster = team_roster[~team_roster["player_id"].isin(out_ids)]
 
             starter_id = presumed_starter_qb_id(
                 team, qb_eligible_roster, weekly,

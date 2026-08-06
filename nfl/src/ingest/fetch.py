@@ -1,4 +1,24 @@
-"""Pull raw NFL data via nfl_data_py and cache it locally as parquet.
+"""Pull raw NFL data via nflreadpy and cache it locally as parquet.
+
+Migrated off `nfl_data_py` (2026-07): confirmed directly against the real GitHub repo that it
+was archived read-only on 2025-09-25, with the maintainers' own words -- "nfl_data_py has been
+deprecated in favour of nflreadpy. All future development will occur in nflreadpy and users are
+encouraged to switch immediately. No further nfl_data_py maintenance or updates are planned."
+Running a live pipeline on a permanently unmaintained package (no further releases, ever) one
+season before kickoff was flagged as this project's single highest-priority structural risk by
+an external review, verified rather than taken on faith.
+
+`nflreadpy` returns Polars DataFrames, not pandas -- every loader call below converts via
+`.to_pandas()` immediately, so every downstream file (which only ever reads the cached parquet
+output of this module, never imports nflreadpy directly) needs zero changes. Verified by direct,
+hands-on comparison (real 2024 data, both libraries, columns AND values) before migrating:
+schedules/pbp/snap_counts/draft_picks are schema- and value-identical to the old source for
+every column this codebase actually reads. Weekly rosters rename `gsis_id`->`player_id` and
+`full_name`->`player_name` right after fetching (nflreadpy's own column names) specifically so
+every downstream consumer of the old column names keeps working unchanged; `age` is dropped
+(confirmed unused anywhere in this project). Injuries drops `season_type` (confirmed unused
+here too) but needs no renames -- `full_name`/`gsis_id`/`report_status` were already named
+identically in both sources.
 
 Every fetch_* function is idempotent: it skips the network call if a cached
 file already exists, unless force=True. Run this module directly to (re)build
@@ -7,7 +27,7 @@ the full raw cache for a season range.
 
 import time
 
-import nfl_data_py as nfl
+import nflreadpy as nfr
 
 from src.utils.paths import DATA_RAW
 
@@ -52,49 +72,53 @@ def _cached(name: str, seasons: list[int], loader, force: bool = False):
 
 
 def fetch_schedules(seasons: list[int], force: bool = False):
-    return _cached("schedules", seasons, lambda: nfl.import_schedules(seasons), force)
+    return _cached("schedules", seasons, lambda: nfr.load_schedules(seasons).to_pandas(), force)
 
 
 def fetch_pbp(seasons: list[int], force: bool = False):
-    return _cached(
-        "pbp", seasons, lambda: nfl.import_pbp_data(seasons, downcast=True, cache=False), force
-    )
+    return _cached("pbp", seasons, lambda: nfr.load_pbp(seasons).to_pandas(), force)
+
+
+def _load_weekly_rosters(seasons: list[int]):
+    df = nfr.load_rosters_weekly(seasons).to_pandas()
+    # nflreadpy's own column names -- renamed back to nfl_data_py's so every downstream
+    # consumer of player_id/player_name (15+ files) needs zero changes. See module docstring.
+    return df.rename(columns={"gsis_id": "player_id", "full_name": "player_name"})
 
 
 def fetch_weekly_rosters(seasons: list[int], force: bool = False):
-    return _cached(
-        "weekly_rosters", seasons, lambda: nfl.import_weekly_rosters(seasons), force
-    )
+    return _cached("weekly_rosters", seasons, lambda: _load_weekly_rosters(seasons), force)
 
 
 def fetch_weekly_data(seasons: list[int], force: bool = False):
     return _cached(
         "weekly_player_stats",
         seasons,
-        lambda: nfl.import_weekly_data(seasons, downcast=True),
+        lambda: nfr.load_player_stats(seasons).to_pandas(),
         force,
     )
 
 
 def fetch_snap_counts(seasons: list[int], force: bool = False):
-    return _cached("snap_counts", seasons, lambda: nfl.import_snap_counts(seasons), force)
+    return _cached("snap_counts", seasons, lambda: nfr.load_snap_counts(seasons).to_pandas(), force)
 
 
 def fetch_injuries(seasons: list[int], force: bool = False):
-    return _cached("injuries", seasons, lambda: nfl.import_injuries(seasons), force)
+    return _cached("injuries", seasons, lambda: nfr.load_injuries(seasons).to_pandas(), force)
 
 
 def fetch_ngs(stat_type: str, seasons: list[int], force: bool = False):
     """stat_type is one of 'passing', 'receiving', 'rushing'."""
     return _cached(
-        f"ngs_{stat_type}", seasons, lambda: nfl.import_ngs_data(stat_type, seasons), force
+        f"ngs_{stat_type}", seasons,
+        lambda: nfr.load_nextgen_stats(seasons, stat_type=stat_type).to_pandas(), force,
     )
 
 
 def fetch_draft_picks(seasons: list[int], force: bool = False):
     """Draft round/pick/position, keyed by real gsis_id -- used by
     rookie_prior.py's draft-capital usage prior (review #2.6)."""
-    return _cached("draft_picks", seasons, lambda: nfl.import_draft_picks(seasons), force)
+    return _cached("draft_picks", seasons, lambda: nfr.load_draft_picks(seasons).to_pandas(), force)
 
 
 def fetch_all(seasons: list[int], force: bool = False) -> dict[str, str]:

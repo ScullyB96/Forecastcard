@@ -71,7 +71,7 @@ outcome roughly 80% of the time.
 ## 1. Architecture overview
 
 ```
-raw NFL data (nfl_data_py)                                 (src/ingest/fetch.py)
+raw NFL data (nflreadpy -- migrated from nfl_data_py 2026-07, §2.2.1)  (src/ingest/fetch.py)
   schedules · play-by-play · weekly rosters · injuries · snap counts
         │
         ├── silent partial-fetch guard: verifies every requested season is present in the
@@ -80,7 +80,7 @@ raw NFL data (nfl_data_py)                                 (src/ingest/fetch.py)
         │
         ▼
 our own weekly player-stat aggregation from raw PBP        (build_weekly_stats_from_pbp.py)
-  (nfl_data_py's own weekly aggregate lags the season; PBP is the trusted source)
+  (the library's own weekly aggregate lags the season; PBP is the trusted source)
         │
         ▼
 Layer 1: recursive opponent-adjusted EPA power ratings      (src/models/ratings.py)
@@ -141,30 +141,61 @@ discipline is being followed, not that the project is failing.
 `PROJECT_ROOT`, `DATA_RAW`, `DATA_PROCESSED` path constants. No business logic.
 
 ### 2.2 `src/ingest/fetch.py`
-Thin wrapper around `nfl_data_py`, one `fetch_*` function per endpoint (`fetch_schedules`,
+Thin wrapper around `nflreadpy`, one `fetch_*` function per endpoint (`fetch_schedules`,
 `fetch_pbp`, `fetch_weekly_rosters`, `fetch_weekly_data` [unused in production — see below],
 `fetch_snap_counts`, `fetch_injuries`, `fetch_ngs`). Each is idempotent via `_cached()`
 (skips the network call if the parquet already exists, unless `force=True`).
 
-**`_cached()`'s completeness guard** (added after a real incident — §12.1): `nfl_data_py`'s
-multi-season loaders can silently drop a season from the middle of a requested range with
-**no exception at all**. Confirmed directly: an 11-season pbp pull once came back missing
-2017 and 2023 entirely, no error, no warning distinguishable from a normal run. `_cached()`
-now checks every requested season is actually present in the result; if a *non-trailing*
-season is missing, it retries (up to `MAX_FETCH_RETRIES`, transient issues resolve); if
-*only* the newest requested season is missing, it raises immediately without wasting
-retries (that's the normal "season hasn't started yet" case — the caller's own fallback,
-`_fetch_with_fallback` in `weekly_update.py`, handles it by trimming the range).
+**`_cached()`'s completeness guard** (added after a real incident — §12.1): the underlying
+library's multi-season loaders can silently drop a season from the middle of a requested
+range with **no exception at all**. Confirmed directly: an 11-season pbp pull once came back
+missing 2017 and 2023 entirely, no error, no warning distinguishable from a normal run.
+`_cached()` now checks every requested season is actually present in the result; if a
+*non-trailing* season is missing, it retries (up to `MAX_FETCH_RETRIES`, transient issues
+resolve); if *only* the newest requested season is missing, it raises immediately without
+wasting retries (that's the normal "season hasn't started yet" case — the caller's own
+fallback, `_fetch_with_fallback` in `weekly_update.py`, handles it by trimming the range).
 
-`import_weekly_data()` (nfl_data_py's own weekly player-stat aggregate) is fetched by
+`load_player_stats()` (the library's own weekly player-stat aggregate) is fetched by
 `fetch_weekly_data()` but **deliberately not used anywhere in production** — it lags real-
-time by design and has not published a 2025+ release. All weekly player stats are derived
-from our own trusted PBP data instead (§2.3). Confirmed via a 2026-07 housekeeping audit that
-nothing calls `fetch_weekly_data()`/`fetch_ngs()` outside `fetch.py` itself; `fetch_all()`
-(only invoked from this module's own `__main__`, a manual full-cache-rebuild utility) no
-longer includes `fetch_weekly_data()` in its default set for this reason — the function
-itself is kept (harmless, occasionally useful for an ad-hoc comparison), just not spent on
-by default.
+time by design. All weekly player stats are derived from our own trusted PBP data instead
+(§2.3). Confirmed via a 2026-07 housekeeping audit that nothing calls
+`fetch_weekly_data()`/`fetch_ngs()` outside `fetch.py` itself; `fetch_all()` (only invoked
+from this module's own `__main__`, a manual full-cache-rebuild utility) no longer includes
+`fetch_weekly_data()` in its default set for this reason — the function itself is kept
+(harmless, occasionally useful for an ad-hoc comparison), just not spent on by default.
+
+### 2.2.1 `nfl_data_py` → `nflreadpy` migration (2026-07-08)
+
+The entire ingestion layer originally ran on `nfl_data_py`. An external review flagged running
+a live pipeline on that library, one month before kickoff, as this project's single
+highest-priority structural risk — checked directly against the real GitHub repo rather than
+taken on faith: `nfl_data_py` was **archived read-only on 2025-09-25**, with the maintainers'
+own words — *"nfl_data_py has been deprecated in favour of nflreadpy. All future development
+will occur in nflreadpy and users are encouraged to switch immediately. No further
+nfl_data_py maintenance or updates are planned."* A silent upstream schema or endpoint change
+would never get patched.
+
+Migration was scoped to this one file — every other file in `src/` only ever reads `fetch.py`'s
+cached parquet output, never imports the ingestion library directly, so preserving `fetch.py`'s
+*output* schema meant nothing downstream needed to change. `nflreadpy` returns Polars
+DataFrames, not pandas; every loader call converts via `.to_pandas()` immediately at the fetch
+boundary. Verified by direct, hands-on comparison (real 2024 data, both libraries, columns
+*and* values, not just assumed compatibility) before migrating: schedules/pbp/snap_counts/
+draft_picks are schema- and value-identical for every column this codebase actually reads.
+Weekly rosters needed a rename (`gsis_id`→`player_id`, `full_name`→`player_name`) applied
+right at the fetch boundary so all 15+ downstream consumers of the old column names keep
+working unchanged; `age` is dropped (confirmed unused anywhere in this project). Injuries drop
+`season_type` (confirmed unused here too) but needed no renames.
+
+The migration itself went cleanly, but re-running the full pipeline against freshly-fetched
+data (rather than the old cached parquet files) exposed two **pre-existing, previously latent**
+bugs — both now fixed, both documented in detail at §12.1.3 and §12.1.4. Root cause of both:
+`nflreadpy`'s season-range validation is currently *stricter* than `nfl_data_py`'s was (it
+raises rather than returning early/incomplete data for a season that hasn't started), which for
+the first time actually triggered `weekly_update.py`'s roster-fallback code path on a real run
+— code that had been sitting unexercised in production because the old library happened to
+paper over the case it was meant to handle.
 
 ### 2.3 `src/ingest/build_weekly_stats_from_pbp.py`
 `build_weekly_stats(pbp, rosters)` aggregates PBP into one row per (season, week, team,
@@ -1725,6 +1756,61 @@ Two checks, one real, one synthetic (real 2026 injury-report data still 404s fro
 Recommend repeating the synthetic check (or, better, confirming directly) once real 2026
 injury-report data actually starts publishing — this rehearsal is real verification of the
 mechanism, not a substitute for watching it fire on a genuine first case.
+
+### 12.1.3 Roster-snapshot fallback bug: "Joshua Dobbs at QB for ~15 teams" (found during the nflreadpy migration, §2.2.1)
+
+`weekly_update.py` needs a "current roster" snapshot to identify each team's presumed starters.
+When the target season's own roster data isn't available yet, it falls back to the most recent
+prior season on record, previously via `rosters["week"].max()` unconditionally. This was always
+wrong two different ways, just never exercised: (a) a finished season's last on-record week is
+often a degenerate postseason snapshot — only the two Super Bowl teams have any roster rows at
+all by week 22 — and (b) even a real *regular-season*-ending week carries that week's genuine
+point-in-time injury statuses, which get wrongly read as "current" months later (e.g. a real
+IR stint shows up as a QB's status forever after).
+
+`nflreadpy`'s stricter season-range validation (raises for a season that hasn't started, rather
+than nfl_data_py's looser behavior of already returning early real data for at least weekly
+rosters) triggered this fallback path for the first time on a real run. The result: a roster
+snapshot with only 165 total rows, most teams missing their real QB entirely, so
+`presumed_starter_qb_id()`'s own last-resort fallback (`roster_qbs.iloc[0]`) kept returning the
+same wrong global-first QB — Joshua Dobbs — for roughly 15 different teams. Traced via targeted
+debug prints through `presumed_starter_qb_id()` before the root cause (upstream roster
+emptiness, not a bug in that function itself) became clear.
+
+Fix: when the target season's roster data is unavailable, fall back to that prior season's own
+**week 1** snapshot rather than its max week — week 1 is the best available analog for "a
+fresh, mostly-healthy, full roster" (confirmed directly: both Mahomes and Jayden Daniels show
+`status="ACT"` at their respective teams' week-1-2025 snapshots, vs. Mahomes showing a real
+`status="RES"` at week 18 2025 from an actual IR stint). Also fixed, defensively, a related gap
+in the same code path: `qb_eligible_roster` was being built from the *global* current-roster
+frame instead of that specific team's roster, which could let the same wrong global-first-QB
+fallback leak into a team that otherwise had perfectly good roster data of its own.
+
+Verified: all 32 teams' presumed starters correct against the live 2026 fallback snapshot after
+the fix.
+
+### 12.1.4 Rookie-fallback / `out_ids` dedup gap: duplicate "Jordan James, SF" prop rows (found during the nflreadpy migration, §2.2.1)
+
+Found via the standard `props.duplicated(subset=["game_id","team","player"])` check
+immediately after the §12.1.3 fix (same debugging session, different root cause).
+`rookie_fallback_rb_rates()` (the Clay-PDF-based rookie prior, §7.x) triggers purely on "zero
+real engine history for this player" — it never checks whether that player is *also* currently
+marked Out via roster status (`out_ids`). A true rookie who is both zero-history AND Out gets
+rendered twice: once correctly as `status_note="OUT"` via the main per-team loop, and once more
+via the Clay fallback as if he were an active, available back. Reproduced with a real case:
+Jordan James (SF RB), whose real status at the week-1-2025 fallback roster snapshot (§12.1.3)
+is `"INA"`.
+
+This is the same *class* of bug as the earlier Quinshon Judkins name-collision duplication
+(review round 2), but a genuinely different root cause — that one was an identity/matching
+error; this one is a missing filter between two independently-correct subsystems (the OUT-flag
+loop and the rookie-fallback loop) that were never told about each other.
+
+Fix: immediately after computing `rookie_rbs`, filter out any rookie whose normalized name
+matches a currently-Out player on that team (`out_names`, built from `current_roster` +
+`out_ids`) — mirroring the existing draft-capital-vs-Clay dedup pattern already present a few
+lines below in the same function. Verified: zero duplicate rows across the full live props
+output after the fix.
 
 ### 12.2 The `np.polyfit(...)[::-1]` slope/intercept swap — now fixed via `src/utils/stats.py`
 `np.polyfit(x, y, 1)` returns `[slope, intercept]` (highest degree first). A `[::-1]`
