@@ -2978,3 +2978,140 @@ Result: total_mae delta -0.2323, 95% CI (-0.2654, -0.2001), REAL IMPROVEMENT; ma
 conservative bar comfortably -- a fourth independent validation lens (after the full-dev aggregate,
 the per-season dev rolling window, and the per-season holdout check) confirming these wins are not
 an artifact of any particular resampling assumption.
+
+## 44. Four diagnostics from an external technical review (2026-08-02)
+
+`TECHNICAL_REFERENCE.md` (a from-scratch, architecture-organized synthesis of this whole project,
+written for external review) was reviewed independently and returned a long, technically rigorous
+critique. Four of its cheapest, most checkable claims were run down immediately; the rest (market
+data acquisition for holdout, a two-stage minutes/attendance rebuild, OREB miss-decomposition, etc.)
+are queued as larger, separately-scoped follow-ups, not attempted here.
+
+### 44.1 A real documentation error caught and fixed
+
+The reviewer noted `LEAGUE_AVG_HALFLIFE_GAMES_RATING = 2000.0` was described as "~2.4 NBA seasons"
+without stating which unit (team-rows vs. real games) that assumed. Checked directly:
+`_trailing_league_stat_ewma` runs on the per-`gameId`-COLLAPSED series (one row per real game, not
+per team-side), and the dev range averages ~1,193 real games/season -- so 2000 games is **~1.7
+seasons**, not 2.4 (which would only be right if the EWMA ran on team-rows, 2x the real-game count).
+Fixed in `TECHNICAL_REFERENCE.md`; no code was wrong, only the document's stated interpretation.
+
+### 44.2 Margin-MAE normalization: the "still-open" scoring-era-drift finding is very likely mostly a scale artifact, not real model decay
+
+Sec9.5/24/26/29/33/36 have treated Phase 1's rising raw margin_mae as an open, partially-unresolved
+problem across six sections and three adopted fixes. The reviewer's suggested diagnostic: margin_mae
+is not scale-invariant, and this project has already documented (Sec26) that cross-team rating
+spread is genuinely rising over time -- so does the raw MAE trend actually reflect the model getting
+WORSE, or just the games themselves getting genuinely less predictable?
+
+Computed per-season, full dev+holdout range, using the current fully-adopted config: raw margin_mae
+rises significantly with season (Pearson r=+0.828, p=0.0017) -- confirming the documented trend is
+real in absolute terms. But the REALIZED margin standard deviation (actual game-to-game
+unpredictability) rises at almost the identical rate (r=+0.846, p=0.0010, from ~13.3-13.7 points in
+2015-2019 to ~15.2-16.4 in 2020-2025). Two normalized ratios tell the real story:
+
+- **model_margin_mae / naive_margin_mae** (relative skill vs. the naive floor): **essentially flat**
+  across the whole range (r=+0.046, p=0.893) -- the model is NOT losing relative ground to naive over
+  time. Holdout mean (0.9086) is actually slightly BETTER than dev mean (0.9218).
+- **model_margin_mae / realized_margin_std** (does the model's error scale proportionally with the
+  game's own true difficulty): flat-to-improving (r=-0.375, not significant at n=11 seasons, but the
+  wrong sign for "getting worse"). Holdout mean (0.6944) is again slightly BETTER than dev mean
+  (0.7256) -- **the two holdout seasons post the best-normalized margin performance in the entire
+  11-season range**, not the worst.
+
+**Conclusion, held with appropriate caution given only 11 season-level data points**: the raw
+margin_mae trend that's motivated three separate adopted fixes this session is very likely
+predominantly explained by genuinely rising game-to-game unpredictability across NBA eras (real,
+irreducible, not something further shrinkage-primitive tuning can eliminate), not by the model
+falling further behind a fixed level of task difficulty. This does NOT retroactively invalidate the
+three adopted levers (§29/33/36) -- each was confirmed via a proper paired bootstrap on ABSOLUTE
+margin_mae against the PRIOR config on the SAME games, which remains a valid comparison regardless
+of this finding -- but it reframes whether "margin drift" should keep being treated as a distinct,
+unsolved research target (Sec2.6 of `TECHNICAL_REFERENCE.md`) versus an accepted characteristic of
+the sport that the model already copes with about as well as its own naive floor does. Diagnostic
+script run ad hoc, not yet saved as a standalone `validate_*.py` -- worth doing if this line of
+investigation continues.
+
+### 44.3 Combine log5-slope diagnostic: a real, previously-unchecked mis-calibration found
+
+`project_game`'s multiplicative-ratio combine (§2.4 of `TECHNICAL_REFERENCE.md`) has an implicit
+assumption baked into its algebra: a team's rating deviation from league average translates 1:1 into
+the combine's output (slope = 1.0 on both the offensive and defensive deviation terms). This had
+never been checked. Regressed realized log-rating deviation (from real game outcomes, home-court-
+adjusted) on the walk-forward-predicted log-deviation terms, pooled across both home/away sides,
+full dev+holdout range (n=26,352 team-game observations):
+
+```
+slope_off = 0.9163 (se=0.0264)   slope_def = 0.9066 (se=0.0297)     [both ~3.1-3.2 SEs below 1.0]
+```
+
+**Both slopes are real, statistically significant over-extrapolations** -- real outcomes regress
+toward league average MORE than the ratio-combine's implicit slope=1 assumes, meaning the model is
+mildly overconfident for teams far from average (exactly the kind of effect that would show up as
+disproportionate margin error on lopsided-rating matchups, and would matter MORE in eras with wider
+team-quality spread -- directly relevant to §44.2's finding of rising rating dispersion).
+
+The identical check for PACE found the OPPOSITE sign: `slope_home = 1.0721 (se=0.0262)`,
+`slope_away = 1.1034 (se=0.0262)` -- both ABOVE 1.0, meaning pace's combine slightly
+UNDER-extrapolates real pace deviations. Rating and pace do not share the same mis-calibration
+direction -- another instance of this project's recurring "don't assume by analogy" lesson, this
+time within the SAME combine formula rather than across categories.
+
+**Not yet adopted or built into a corrected model** -- this is a diagnostic finding, not a validated
+fix. The natural next step (queued, not done here) is a single fitted damping/amplification
+coefficient applied to each deviation term before combining (e.g.
+`league_avg * (dev_off/league_avg)**gamma_off * ...` with `gamma_off`/`gamma_def`/`gamma_pace` fit
+on dev data), swept via the same two-stage-then-one-time-holdout protocol as every other lever this
+session, not adopted on the strength of this diagnostic alone.
+
+### 44.4 A real, external market benchmark for the dev range -- and the model has a real, quantified gap vs. the market
+
+Every validation in this project up to now compared the model against either a naive floor (a
+deliberately weak straw man: trailing-5-game own scoring average, no opponent adjustment) or against
+its own prior configuration. There was no external, market-based benchmark anywhere in the
+validation story -- a real blind spot the reviewer flagged directly. It turned out partial
+infrastructure for exactly this already existed and was dormant: `fetch_odds_sbro.py` (built early
+in this project, Sec2, as a "nice-to-have calibration check") had already fetched and cached real
+closing lines/totals/moneylines for 2015-16 through 2022-23 from SportsbookReviewsOnline, and this
+cache had **never once been read by any validation script**.
+
+**A real sign-convention bug found while wiring this up**: `fetch_odds_sbro.py`'s own docstring
+described `homeSpreadClose` as "positive = that team is the underdog getting points" -- checked
+empirically (n=9,367) and this was backwards. `homeSpreadClose` correlates POSITIVELY with the real
+home margin (r=0.445, p<1e-300) and its mean (+2.45) matches the real average home-court margin
+(+2.44) almost exactly -- the value IS the market's predicted home margin directly (positive = home
+favored by that many points), no sign flip needed. Fixed the docstring; the ingest/parsing logic
+itself was already correct, only the stored value's interpretation was mis-documented.
+
+**New script**: `validate_vs_market.py` -- joins the model's own dev-range predictions to the cached
+odds data on `(gameDate, homeTeamId, awayTeamId)`, matching 8,841 of 9,507 dev-range model
+predictions to a real closing line (5 further games dropped for a missing Close value -- a real
+NaN-poisons-the-bootstrap trap hit and fixed immediately: `bootstrap_compare`'s vectorized numpy
+`.mean()` does not skip NaN the way pandas' does, so even one NaN row silently corrupted every
+resample). **Purely dev-range by construction** -- SBRO's own site text says the archive "will not
+be updated," confirmed to stop at 2022-23 (itself only partial), so this cannot and does not touch
+the 2024-2025 holdout range in any way; no confirmatory-veto protocol concern applies.
+
+**Result -- the model has a real, statistically significant gap versus the market, on every metric
+checked**:
+
+| metric | model | market (closing line) | delta | verdict |
+|---|---|---|---|---|
+| margin_mae | 10.2890 | 9.8953 | +0.3937 | REAL REGRESSION (model worse) |
+| total_mae | 14.7580 | 14.1447 | +0.6132 | REAL REGRESSION (model worse) |
+| straight-up accuracy | 65.15% | 67.45% | -2.30pp | REAL REGRESSION (model worse) |
+
+(For reference, the model still clearly beats naive over this same range: margin_mae 10.289 vs.
+naive's 11.146, real improvement, 95% CI (-0.9563, -0.7565).)
+
+**This is not a failure of anything built so far -- it's the missing calibration point the reviewer
+correctly identified as absent.** Professional market lines incorporate information this from-
+scratch model has no access to (injury nuance beyond RotoWire's Out/Doubtful binary, line-shopping
+across books, real-time news, sharp-money signal) and are famously hard to beat; a real, ~2-3%
+straight-up gap and a real half-point-ish margin gap is a normal, expected finding for a model at
+this stage, not a red flag. Its value is entirely as an honest, external reference point: previous
+"how good is this model" framing only ever had naive-floor comparisons to lean on, which overstate
+how close to done the model actually is. **Cannot currently be extended to the holdout range** (no
+market data exists there) -- if closing a market-comparison gap becomes a real project goal, a paid
+historical-odds source covering 2023-2025 would be needed; not pursued here absent that being an
+explicit goal.

@@ -21,7 +21,19 @@ since NBA totals run ~180-240 -- and the OTHER carries the POINT SPREAD, a
 small number; this is SBRO's well-known format quirk across sports, not
 specific to this project), `ML` (moneyline), `2H` (second-half line, same
 total-vs-spread ambiguity, not parsed here -- not needed for a full-game
-benchmark)."""
+benchmark).
+
+SIGN CONVENTION CORRECTED (2026-08-02, `validate_vs_market.py`): `homeSpreadClose`
+is the market's own predicted HOME MARGIN directly -- positive means the
+home team is favored by that many points, not "that team is the underdog
+getting points" as an earlier draft of this docstring assumed. Confirmed
+empirically on the full 2015-16..2022-23 cache (n=9,367): `homeSpreadClose`
+correlates POSITIVELY with the real `homeScore - awayScore` margin
+(r=0.445, p<1e-300), and its mean (+2.45) matches the real average
+home-court margin (+2.44) almost exactly -- the signature of "this number
+IS the predicted home margin," not a points-given convention needing a
+sign flip. Use `market_pred_margin = homeSpreadClose` directly, no
+negation."""
 
 import re
 
