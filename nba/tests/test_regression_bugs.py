@@ -39,6 +39,7 @@ from src.models.attendance_model import attendance_features_for_game, predict_at
 from src.models.rest_schedule import add_schedule_density
 from src.models.travel_fatigue import add_travel_fatigue
 from src.models.clutch_rating import add_trailing_clutch_deviation, identify_clutch_stints, team_game_clutch_net_rating
+from src.models.lineup_continuity import add_lineup_continuity, team_game_continuity_score
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
@@ -537,6 +538,50 @@ def test_add_trailing_clutch_deviation_skips_nan_games_and_requires_a_minimum_sa
           "is their mean (+10, +20 -> +15), NOT diluted by the 2 intervening NaN blowout games",
           abs(result["trailing_clutch_deviation"].iloc[4] - 15.0) < 1e-9,
           f"got {result['trailing_clutch_deviation'].iloc[4]}")
+
+
+def test_add_lineup_continuity_counts_distinct_prior_games_not_stints():
+    """Task #62: `games_together_before` must count DISTINCT PRIOR GAMES a
+    5-man combo has appeared in, never inflated by the SAME lineup
+    recurring in multiple stints within one game (a same-game leak risk
+    this project always guards against). Team 100's lineup (1,2,3,4,5)
+    appears in TWO separate stints within game 1 (should still count as
+    ONE game of history, not two) and once in game 2 (a later date) --
+    game 2's row for that same lineup must show games_together_before=1,
+    not 2. A brand-new lineup (6,7,8,9,10) debuting in game 2 must show
+    games_together_before=0."""
+    stints = pd.DataFrame({
+        "gameId": ["g1", "g1", "g2", "g2"],
+        "gameDate": pd.to_datetime(["2020-10-01", "2020-10-01", "2020-10-05", "2020-10-05"]),
+        "homePlayers": [(1, 2, 3, 4, 5), (1, 2, 3, 4, 5), (1, 2, 3, 4, 5), (6, 7, 8, 9, 10)],
+        "awayPlayers": [(20, 21, 22, 23, 24)] * 4,
+        "possessions": [10, 8, 15, 5],
+    })
+    schedule = pd.DataFrame({"gameId": ["g1", "g2"], "homeTeamId": [100, 100], "awayTeamId": [200, 200], "season": [2020, 2020]})
+
+    continuity = add_lineup_continuity(stints, schedule)
+    g1_row = continuity[(continuity["gameId"] == "g1") & (continuity["team"] == 100)]
+    check("game 1's lineup (1-5) collapses to exactly ONE row despite 2 separate stints",
+          len(g1_row) == 1, f"got {len(g1_row)} rows")
+    check("game 1's lineup (1-5) has games_together_before=0 (first-ever use)",
+          g1_row["games_together_before"].iloc[0] == 0, f"got {g1_row['games_together_before'].iloc[0]}")
+    check("that lineup's total possessions in game 1 is 10+8=18 (both stints summed)",
+          g1_row["possessions"].iloc[0] == 18, f"got {g1_row['possessions'].iloc[0]}")
+
+    g2 = continuity[(continuity["gameId"] == "g2") & (continuity["team"] == 100)]
+    same_lineup = g2[g2["lineup_key"] == (1, 2, 3, 4, 5)]
+    new_lineup = g2[g2["lineup_key"] == (6, 7, 8, 9, 10)]
+    check("game 2's SAME lineup (1-5) shows games_together_before=1 (ONE prior GAME, not 2 -- "
+          "not inflated by game 1's 2 separate stints)",
+          same_lineup["games_together_before"].iloc[0] == 1, f"got {same_lineup['games_together_before'].iloc[0]}")
+    check("game 2's BRAND-NEW lineup (6-10) shows games_together_before=0",
+          new_lineup["games_together_before"].iloc[0] == 0, f"got {new_lineup['games_together_before'].iloc[0]}")
+
+    scores = team_game_continuity_score(continuity)
+    g2_score = scores[(scores["gameId"] == "g2") & (scores["team"] == 100)]["continuity_score"].iloc[0]
+    expected = (1 * 15 + 0 * 5) / (15 + 5)  # possession-weighted average
+    check("game 2's team-level continuity_score is the possession-weighted average across its 2 lineups",
+          abs(g2_score - expected) < 1e-9, f"got {g2_score}, expected {expected}")
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -2071,6 +2116,7 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_add_lineup_continuity_counts_distinct_prior_games_not_stints()
     test_identify_clutch_stints_requires_both_late_AND_close()
     test_add_trailing_clutch_deviation_skips_nan_games_and_requires_a_minimum_sample()
     test_add_travel_fatigue_computes_distance_and_timezone_shift_from_own_prior_game_only()

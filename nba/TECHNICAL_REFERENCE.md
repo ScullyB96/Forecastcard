@@ -1385,6 +1385,18 @@ fix.
     real correlation with next-game full-game residual either (r=-0.021, p=0.076; tercile-threshold
     view p=0.35). Confirms the standard prior (clutch performance is mostly noise/regression-to-mean)
     empirically rather than assuming it. Closed at the diagnostic stage.
+12e. Lineup continuity/chemistry (2026-08-06) — the most methodologically instructive finding of the
+    five. `lineup_continuity.py`'s `continuity_score` (possession-weighted "how many prior games has
+    tonight's lineup played together") shows a striking correlation against THAT SAME game's residual
+    (r=+0.0397, p=6.1e-9) — but this is a same-game-contamination artifact, not a predictive signal:
+    `continuity_score` is computed from the game's OWN REALIZED lineups, known only after the fact.
+    Re-tested with a genuinely walk-forward-safe version (each team's own TRAILING average
+    continuity, an expanding mean of strictly-prior games, testing whether a team's general TENDENCY
+    toward lineup stability itself predicts anything): the correlation vanishes completely
+    (r=+0.0014, p=0.84). A concrete, first-hand demonstration of the same-game leak trap this
+    codebase's docstrings warn about in the abstract — one level more subtle than the usual "raw
+    score vs residual" version, since the leak lives in the CANDIDATE FEATURE's own construction, not
+    the target. Closed; nothing built on the naive (leaked) version.
 
 ### P3 — new-season-specific hygiene (cheap, mechanical, worth doing once at tip-off)
 

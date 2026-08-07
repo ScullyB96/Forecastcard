@@ -3704,3 +3704,43 @@ well-known sports-analytics prior (clutch performance is mostly noise/regression
 than assuming it. **Closed at the diagnostic stage, no adoption test attempted** -- like travel/
 timezone fatigue (Sec55), there's no real signal here to build a correction around.
 `clutch_rating.py` remains available, unused by any live path.
+
+## 57. Lineup continuity/chemistry: a real same-game correlation that vanishes once properly leak-guarded (2026-08-06)
+
+Fourth of the lower-priority parked items, and the most methodologically instructive finding of the
+five: does using more FAMILIAR 5-man lineup combinations predict team performance beyond what
+individual/aggregate team quality already explains? Built `lineup_continuity.py` from
+`rapm_lite.prepare_stints`'s existing per-stint lineup tuples (no new ingest):
+`add_lineup_continuity` (one row per (game, team, lineup), `games_together_before` = count of
+STRICTLY PRIOR distinct games this exact 5-man combo has appeared in, collapsing same-game repeat
+stints first so a lineup recurring twice within one game never double-counts) and
+`team_game_continuity_score` (possession-weighted average across every lineup used that game --
+"how much familiar-combination history did tonight's rotation carry in"). Regression-tested for the
+same-game-collapse-first leak guard.
+
+**First pass (naive): `continuity_score` (THIS game's own realized lineups) vs. THIS game's own
+residual, full dev range (n=21,410)**: a striking, decisive correlation -- r=+0.0397, p=6.1e-9; top
+continuity quartile (mean 9.3 games together) shows mean_residual=+1.117 vs. bottom quartile
+(mean 0.3) at -0.383, delta=+1.5, t=6.664, p=2.8e-11. The strongest p-value of any diagnostic this
+session.
+
+**This is NOT a walk-forward-valid predictive signal, and re-testing properly shows why**: `continuity_score`
+is computed from the game's OWN REALIZED lineups (known only AFTER the fact) -- correlating it
+against that SAME game's residual is a contemporaneous, same-game relationship, not a pre-game
+predictor. The two are plausibly both downstream of a shared cause (full health/attendance that
+night, or simply that a team playing well has no need to experiment with new combos mid-blowout),
+not evidence that "familiarity itself causes better play." **Re-ran with a genuinely walk-forward-
+safe version instead: each team's own TRAILING average `continuity_score` (an expanding mean of
+their own STRICTLY PRIOR games, known before tonight, testing "is this team's general TENDENCY
+toward lineup stability itself predictive") vs. tonight's residual**: the correlation vanishes
+entirely -- r=+0.0014, p=0.84; top vs. bottom quartile delta=-0.080, p=0.71.
+
+**Closed, and instructively so**: the realized-lineup version's dramatic correlation is exactly the
+same-game-contamination trap this project's own `shrinkage.py`/`rest_schedule.py` docstrings warn
+about in the abstract -- this is a concrete, first-hand demonstration of it, one level more subtle
+than the usual "raw score vs residual" version (the LEAK here is in the CANDIDATE FEATURE's own
+construction, not in the target). No adoption test built on the naive version (it would have been
+built on leaked information); the walk-forward-safe version shows nothing to adopt.
+`lineup_continuity.py` remains available, unused by any live path -- the realized `continuity_score`
+function itself is still useful for other honest, non-predictive purposes (e.g. a post-hoc
+"how much rotation churn did this team have" descriptive stat), just not as a pre-game feature.
