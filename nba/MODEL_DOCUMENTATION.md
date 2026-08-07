@@ -3600,3 +3600,36 @@ the central question this task set out to answer is now settled: a probabilistic
 built purely from already-available features is a real, decisive improvement over the current crude
 rule, and the path to a working Phase 2 re-enable is concretely unblocked rather than an open research
 question.
+
+## 54. Schedule density beyond B2B: a real diagnostic, but it repeats Sec32's exact pattern -- doesn't survive adoption (2026-08-06)
+
+First of the lower-priority parked items worked through individually at the user's request. `is_b2b`
+(rest_days==0) only looks at the SINGLE immediately-prior game -- it can't distinguish a genuine
+multi-game fatigue stretch (e.g. 3 games in 4 nights) from an isolated back-to-back after several
+rested days, a structurally distinct mechanism from Sec32's already-closed B2B lever.
+
+Built `rest_schedule.add_schedule_density(log, window_days)`: adds `games_in_last_{N}d`, a
+walk-forward-safe count of a team's own games within a trailing N-day window ending just before
+tonight (strictly prior games only, same within-season convention as `add_rest_days`). Regression-
+tested for correct strictly-prior counting.
+
+**Diagnostic (residual-first discipline, same as Sec32's original B2B check): correlated residual
+(actual - `project_game` baseline, no rest term) against density, windows 3-7 days, on the full dev
+range (n=21,474)**. Every window shows a real, small negative correlation (r=-0.030 to -0.044, ALL
+p<1e-5) -- denser schedules correlate with real underperformance vs. baseline, as expected physically.
+The cleanest threshold view: `>=2 games in a trailing 4-day window` (n=5,610) shows mean_residual=-0.312
+vs. +0.685 for less-dense teams (delta=-0.997, t=-5.585, p=2.4e-8) -- a real effect of similar
+magnitude to B2B's own original "-1.02pt" diagnostic headline.
+
+**Built the same walk-forward adoption test as `validate_b2b_adjustment.py`** (expanding-mean
+correction from strictly-prior dense-game residuals only, explicit sequential loop to avoid the
+same-game leak trap) using the `>=2 games in 4 days` threshold. **Stage 1 (recent-dev slice)**: a
+small real improvement on margin_mae (-0.0047), NOISE on total_mae/su. **Stage 2 (full dev range)**:
+margin_mae's gain evaporates to NOISE, and su flips to a REAL REGRESSION (-0.0017) -- does NOT hold
+at full-dev-range scale. **Not adopted, no holdout read spent** -- this is Sec32's exact pattern
+repeating for a structurally different signal: a real, statistically significant residual correlation
+that does not translate into an adopted, out-of-sample-improving correction. Reinforces (rather than
+just repeats) Sec32's conclusion: rest/fatigue-related domain signals in this dataset appear to carry
+real but too-noisy-to-exploit information at this sample size, across at least two structurally
+different formulations now (single-game B2B, multi-game density). `add_schedule_density` remains
+available in `rest_schedule.py`, unused by any live path.

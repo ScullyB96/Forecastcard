@@ -63,6 +63,35 @@ def correlate_residual_with_rest(games_with_residual: pd.DataFrame, residual_col
     }
 
 
+def add_schedule_density(log: pd.DataFrame, window_days: int = 4) -> pd.DataFrame:
+    """Adds `games_in_last_{window_days}d`: how many games (STRICTLY
+    PRIOR, same team/season) this team has played in the trailing
+    `window_days` calendar days, INCLUDING today's own game date as the
+    right edge of the window (so a genuine "3-in-4" stretch -- 3 games
+    within a 4-day span ending tonight -- reads as 3, not 2). A distinct
+    mechanism from `is_b2b` (which only looks at the SINGLE immediately-
+    prior game): two teams can both be `is_b2b=True` tonight while one of
+    them is on a brutal 4-games-in-5-nights stretch and the other just
+    had a normal back-to-back after several rested days -- `is_b2b` alone
+    can't distinguish accumulated fatigue from a single short turnaround.
+
+    Walk-forward safe by construction (only counts games strictly before
+    the current row's own gameDate, same season -- a season-opener's
+    early games correctly show a low count with no artificial cross-
+    season bleed, matching `add_rest_days`'s own within-season-only
+    convention)."""
+    log = log.sort_values(["team", "season", "gameDate"]).reset_index(drop=True)
+    col = f"games_in_last_{window_days}d"
+    counts = []
+    for _, group in log.groupby(["team", "season"], sort=False):
+        dates = group["gameDate"].to_numpy()
+        for i, d in enumerate(dates):
+            window_start = d - np.timedelta64(window_days, "D")
+            counts.append(int(((dates[:i] > window_start) & (dates[:i] < d)).sum()))
+    log[col] = counts
+    return log
+
+
 def fit_b2b_adjustment(games_with_residual: pd.DataFrame, residual_col: str) -> float:
     """Only call this once `correlate_residual_with_rest` has confirmed a
     real (small p-value, not just nonzero) effect -- returns the mean

@@ -1359,6 +1359,15 @@ fix.
     proper walk-forward adoption test (§8). Don't re-attempt without a structurally different
     mechanism than "flat additive correction on B2B games" — that specific family has been tried and
     found wanting.
+12b. Schedule density beyond B2B (2026-08-06): tested the structurally distinct "multi-game fatigue
+    stretch" mechanism (`rest_schedule.add_schedule_density`, games in a trailing N-day window) B2B's
+    single-prior-game view can't capture. Same exact pattern as item 12: a real diagnostic correlation
+    (r=-0.03 to -0.044 across 3-7 day windows, all p<1e-5; cleanest at "≥2 games in 4 days",
+    t=-5.585 p=2.4e-8) that does NOT survive a proper walk-forward adoption test — Stage 1 shows a
+    small real margin_mae gain, but it evaporates to noise and su flips to a real regression at
+    full-dev-range scale. Not adopted. Now two structurally different rest/fatigue formulations have
+    both hit this wall — don't re-attempt a third without a genuinely different mechanism (e.g. a
+    per-team fatigue-sensitivity parameter rather than one league-wide flat correction).
 
 ### P3 — new-season-specific hygiene (cheap, mechanical, worth doing once at tip-off)
 

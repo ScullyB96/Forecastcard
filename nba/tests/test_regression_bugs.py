@@ -36,6 +36,7 @@ from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FT
 from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_family, log_score, over_under_prob, predict_variance
 from src.models.prop_distribution import family_for_mean, fit_count_family_mean_dependent
 from src.models.attendance_model import attendance_features_for_game, predict_attendance_probability
+from src.models.rest_schedule import add_schedule_density
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
@@ -435,6 +436,28 @@ def test_predict_attendance_probability_decays_with_streak_and_matches_fraction_
           probs.iloc[1] < 0.8, f"got {probs.iloc[1]}")
     check("streak=3 decreases the probability further than streak=1 (monotonic decay)",
           probs.iloc[2] < probs.iloc[1], f"got streak=1:{probs.iloc[1]}, streak=3:{probs.iloc[2]}")
+
+
+def test_add_schedule_density_counts_only_strictly_prior_games_in_window():
+    """Task #59: `add_schedule_density`'s `games_in_last_{N}d` must count
+    only STRICTLY PRIOR games (walk-forward safe) whose gameDate falls
+    within the trailing window ending just before today's own game --
+    distinct from `is_b2b` (which only looks at the single immediately-
+    prior game and can't distinguish a genuine multi-game fatigue stretch
+    from an isolated back-to-back). Builds one team with games on day 0,
+    1, 2 (three in a row) and a fourth game on day 10 (well-rested)."""
+    dates = pd.to_datetime(["2020-10-01", "2020-10-02", "2020-10-03", "2020-10-11"])
+    log = pd.DataFrame({"team": ["A"] * 4, "season": [2020] * 4, "gameDate": dates})
+    result = add_schedule_density(log, window_days=4)
+    col = "games_in_last_4d"
+    check("game 1 (first ever) has 0 prior games in window", result[col].iloc[0] == 0, f"got {result[col].iloc[0]}")
+    check("game 2 (day after game 1) has 1 prior game in the trailing 4-day window",
+          result[col].iloc[1] == 1, f"got {result[col].iloc[1]}")
+    check("game 3 (third in a row) has 2 prior games in the trailing 4-day window "
+          "-- distinguishes a genuine fatigue stretch from a single back-to-back",
+          result[col].iloc[2] == 2, f"got {result[col].iloc[2]}")
+    check("game 4 (well-rested, 8 days after game 3) has 0 games in its trailing 4-day window",
+          result[col].iloc[3] == 0, f"got {result[col].iloc[3]}")
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -1969,6 +1992,7 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_add_schedule_density_counts_only_strictly_prior_games_in_window()
     test_attendance_features_counts_dnp_streak_from_the_most_recent_game_backward()
     test_predict_attendance_probability_decays_with_streak_and_matches_fraction_at_streak_zero()
     test_fit_count_family_mean_dependent_isolates_the_near_zero_overdispersion()
