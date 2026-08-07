@@ -3815,3 +3815,48 @@ the same lesson Sec32/Sec54 already taught with B2B and team-specific home-court
 third time with a completely different domain signal. `fetch_officials.py`/`referee_rates.py` remain
 available, unused by any live path; the officials data itself is now a real, reusable asset for any
 future referee-related question.
+
+## 60. OREB shot-location decomposition: a sixth mechanism, the most rigorous test yet, still no improvement (2026-08-07)
+
+Following an external-research pass specifically flagging shot-location/shot-type data as OREB's one
+genuinely untried, structurally different lever (real published rebound-recovery research shows misses
+from different distances behave very differently), built `oreb_shot_location.py` to test it directly.
+
+**No new ingest needed**: `playbyplay_*.parquet` (already backfilled 2015-2025) already has
+`shotDistance`/`shotValue` for every "Missed Shot" action, and the immediately-following "Rebound"
+action's `teamId` tells us whether the shooting team recovered it or the opponent did --
+`stats.nba.com`'s ShotChartDetail endpoint (what the research angle assumed was needed) is not
+required. **A real quirk found and fixed**: BLOCK/STEAL credit rows share the same `actionNumber` as
+their parent event but have `actionType == ""` -- naively taking "the next row after a miss" grabs a
+block-credit row instead of the real rebound; fixed by filtering to `actionType != ""` first.
+Regression-tested (block-credit skip, dead-ball-rebound exclusion, cross-game-boundary guard).
+
+**The zone-recovery-rate diagnostic is real and substantial** (n=1,158,289 real miss-rebound pairs,
+full cached range): rim (0-4ft) misses are recovered by the offense **33.3%** of the time vs. just
+**17.6%** for long-mid-range misses -- nearly DOUBLE, confirming the mechanism transfers to this
+project's own data, not just the cited literature.
+
+Built the full team-level projection (`build_zone_team_game_log`/`add_zone_oreb_decomposition_ratings`/
+`project_team_oreb_by_zone`): the SAME architecture as Sec50's `oreb_decomposition.py` (misses for/
+against walk-forward rate + exposure-normalized own-OREB/DREB rate, combined via `project_team_stat`/
+`project_oreb_share`), applied separately to each of 4 shot zones and summed, instead of one pooled
+total.
+
+**Swept both priors widely (misses_prior 10/20/40/80, exposure_prior 50/100/200/400/800) vs. the
+CURRENT team_stat_rates OREB fit and vs. naive, on the recent-dev slice**: never a real improvement
+anywhere. Best case is NOISE (ties both current and naive); at looser shrinkage in either direction
+(weaker misses_prior or weaker exposure_prior), it becomes a REAL REGRESSION vs. naive specifically
+(e.g. exposure_prior=800: delta=+0.0290 vs current, +0.0327 vs naive, both real). Splitting exposure
+across 4 zones inherently shrinks each zone's per-game sample to 2-4 events, adding real noise that a
+single pooled prior doesn't have to contend with -- a structural cost of the finer grain, not a
+parameter-tuning failure.
+
+**Sixth independent mechanism to hit the exact same wall**, and the most rigorous one: this is real,
+substantial, granular shot-EVENT-level signal (confirmed directly on this project's own data, not
+just cited from literature) that still does not survive aggregation to a team-GAME-level predictive
+target. Reinforces the standing conclusion with the strongest evidence yet: a team's real OREB total
+in one game is governed by too few, too-noisy individual events (10-15 offensive-rebound chances,
+split across 4 zones) for ANY team-aggregate rate model -- however well-informed its priors -- to
+meaningfully out-predict a naive floor. `oreb_shot_location.py` remains available, unused by any live
+path; the miss-rebound linkage itself (`build_miss_rebound_log`) is a genuinely new, reusable
+primitive for any future question needing real shot-outcome-to-rebound attribution.

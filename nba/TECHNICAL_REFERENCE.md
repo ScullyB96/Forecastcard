@@ -1277,20 +1277,28 @@ fix.
    the three shrinkage-primitive levers already tried; (c) only pursue a dedicated era/quality-spread
    regressor if (a) and (b) don't close the gap — don't jump straight to new-mechanism-building without
    re-checking the metric itself first.
-6. **OREB team-level anchoring is closed, not open — NOW FIVE independent mechanisms, not four
-   (2026-08-06).** The external review's own concrete suggestion — `projected_team_OREB =
-   projected_misses × projected_OREB_share` (misses from a new walk-forward FGA−FGM for/against
-   model; OREB_share from a new numerator/exposure walk-forward rate, own OREB% per own miss vs.
-   own DREB% per opponent's miss, combined via the same ratio-deviation idiom as everything else,
-   adapted to two distinct baselines since OREB%≈0.28 and DREB%-allowed≈0.72 aren't one shared
-   scale) — was built (`src/models/oreb_decomposition.py`) and swept across a 32× range of
-   shrinkage strength (exposure prior 50–1600, misses-volume prior 10–80). Every configuration was
-   either a statistical tie with naive or a real regression vs. it — never a real improvement
-   anywhere. This is a STRUCTURALLY DIFFERENT primitive (not a parameter variant of the original
-   count-based family), and it still hit the exact same wall. Don't re-open this category again
-   without a genuinely new DATA source (e.g. shot-location/contest data distinguishing long
-   rebounds off missed threes from short rebounds off missed layups — not in any currently-ingested
-   source) — every modeling-side idea on the table has now been tried and confirmed not to help.
+6. **OREB team-level anchoring is closed, not open — NOW SIX independent mechanisms, including the
+   shot-location data this doc previously said was missing (2026-08-07).** The external review's own
+   concrete suggestion — `projected_team_OREB = projected_misses × projected_OREB_share` (misses from
+   a new walk-forward FGA−FGM for/against model; OREB_share from a new numerator/exposure walk-forward
+   rate, own OREB% per own miss vs. own DREB% per opponent's miss, combined via the same ratio-
+   deviation idiom as everything else, adapted to two distinct baselines since OREB%≈0.28 and
+   DREB%-allowed≈0.72 aren't one shared scale) — was built (`src/models/oreb_decomposition.py`) and
+   swept across a 32× range of shrinkage strength. Every configuration was either a statistical tie
+   with naive or a real regression vs. it. **Then the shot-location angle THIS DOC used to flag as
+   the missing piece was actually tried** (`oreb_shot_location.py`, 2026-08-07): no new ingest needed
+   — `playbyplay_*.parquet` already has shot distance/value for every miss, and the next PBP action's
+   teamId gives the real rebounding outcome. Confirmed the underlying mechanism is real and large on
+   this project's own data (rim misses recovered 33.3% of the time vs. 17.6% for long-mid misses,
+   n=1.16M real miss-rebound pairs) — then built the full zone-decomposed team projection (same
+   architecture as item above, applied per-zone and summed) and swept both priors widely. Still never
+   a real improvement anywhere; real regressions appear at looser shrinkage (splitting exposure across
+   4 zones leaves each zone with only 2-4 events/game, a structural noise cost the pooled model doesn't
+   pay). **This is the most rigorous test yet and the strongest evidence the ceiling is real**: genuine
+   shot-EVENT-level signal, confirmed on real data, still doesn't survive aggregation to a team-GAME
+   predictive target. Don't re-open this category again without something structurally different from
+   "a smarter team-level rate model" — e.g. a possession-level/player-level rebounding model rather
+   than a team-aggregate one, which is a much larger scope change, not a data-availability gap anymore.
 7. **Phase 2 (RAPM-lite lineup adjustment) is disabled and should stay disabled for now — but the
    Stage-1 attendance signal that blocked re-enabling is BUILT AND VALIDATED (§6.4, 2026-08-06).**
    A semi-oracle decomposition proved the ENTIRE predictive-mode gap is attendance-prediction error

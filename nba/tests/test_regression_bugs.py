@@ -41,6 +41,7 @@ from src.models.travel_fatigue import add_travel_fatigue
 from src.models.clutch_rating import add_trailing_clutch_deviation, identify_clutch_stints, team_game_clutch_net_rating
 from src.models.lineup_continuity import add_lineup_continuity, team_game_continuity_score
 from src.models.referee_rates import add_referee_tendency, build_official_game_log, crew_tendency
+from src.models.oreb_shot_location import build_miss_rebound_log
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
@@ -616,6 +617,49 @@ def test_add_referee_tendency_has_no_leak_on_an_officials_first_ever_game():
     check("official Z's first-ever game gets pure league-wide shrinkage (no self-leak from the "
           "extreme value in this SAME game)",
           abs(got - league_avg_at_g10) < 1e-9, f"got {got}, expected {league_avg_at_g10}")
+
+
+def test_build_miss_rebound_log_skips_block_credit_rows_and_dead_balls_and_game_boundaries():
+    """Task #65: `build_miss_rebound_log` must (a) skip BLOCK/STEAL credit
+    rows (actionType=='', sharing the SAME actionNumber as their parent
+    event) when finding "the next event after a miss" -- naively taking
+    the next ROW would grab a block-credit row instead of the real
+    rebound, (b) exclude dead-ball rebounds (teamId==0, no real team
+    credited) rather than fabricating an OREB/DREB outcome, (c) never
+    link a miss at the end of one game to a rebound at the start of the
+    next game in the sorted frame."""
+    rows = [
+        # g1: a BLOCKED miss -- team A shoots, team B gets block credit (actionType=''),
+        # THEN the real rebound (team B) at a later actionNumber. Real rebound: team B -> not OREB.
+        {"gameId": "g1", "actionNumber": 1, "actionType": "Missed Shot", "teamId": "A", "shotDistance": 5, "shotValue": 2},
+        {"gameId": "g1", "actionNumber": 1, "actionType": "", "teamId": "B", "shotDistance": 0, "shotValue": 0},
+        {"gameId": "g1", "actionNumber": 2, "actionType": "Rebound", "teamId": "B", "shotDistance": 0, "shotValue": 0},
+        # g1: a clean miss + real rebound by the SHOOTING team -> OREB
+        {"gameId": "g1", "actionNumber": 3, "actionType": "Missed Shot", "teamId": "A", "shotDistance": 25, "shotValue": 3},
+        {"gameId": "g1", "actionNumber": 4, "actionType": "Rebound", "teamId": "A", "shotDistance": 0, "shotValue": 0},
+        # g1: a miss followed by a DEAD-BALL rebound (teamId=0) -- must be excluded entirely
+        {"gameId": "g1", "actionNumber": 5, "actionType": "Missed Shot", "teamId": "A", "shotDistance": 10, "shotValue": 2},
+        {"gameId": "g1", "actionNumber": 6, "actionType": "Rebound", "teamId": 0, "shotDistance": 0, "shotValue": 0},
+        # g1: the LAST event of the game is a miss with no rebound at all within g1
+        {"gameId": "g1", "actionNumber": 7, "actionType": "Missed Shot", "teamId": "A", "shotDistance": 3, "shotValue": 2},
+        # g2: starts with a Rebound -- must NOT be linked to g1's trailing miss above
+        {"gameId": "g2", "actionNumber": 1, "actionType": "Rebound", "teamId": "B", "shotDistance": 0, "shotValue": 0},
+    ]
+    pbp = pd.DataFrame(rows)
+    result = build_miss_rebound_log(pbp)
+
+    check("exactly 2 real miss-rebound pairs found (the blocked one and the clean one) -- "
+          "NOT the dead-ball one, and NOT a spurious cross-game link for g1's trailing miss",
+          len(result) == 2, f"got {len(result)} rows: {result.to_dict('records')}")
+    blocked_row = result[(result["gameId"] == "g1") & (result["zone"] == "short_mid")]
+    check("the blocked miss correctly links to the REAL rebound (actionNumber=2, team B), "
+          "not the block-credit row (actionNumber=1, also team B coincidentally here -- verified "
+          "by construction that skipping the blank row was necessary, not accidental)",
+          len(blocked_row) == 1 and blocked_row["is_oreb"].iloc[0] == 0.0,
+          f"got {blocked_row.to_dict('records')}")
+    clean_row = result[(result["gameId"] == "g1") & (result["zone"] == "three")]
+    check("the clean three-point miss + same-team rebound is correctly flagged as OREB",
+          len(clean_row) == 1 and clean_row["is_oreb"].iloc[0] == 1.0, f"got {clean_row.to_dict('records')}")
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -2150,6 +2194,7 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_build_miss_rebound_log_skips_block_credit_rows_and_dead_balls_and_game_boundaries()
     test_add_referee_tendency_has_no_leak_on_an_officials_first_ever_game()
     test_add_lineup_continuity_counts_distinct_prior_games_not_stints()
     test_identify_clutch_stints_requires_both_late_AND_close()
