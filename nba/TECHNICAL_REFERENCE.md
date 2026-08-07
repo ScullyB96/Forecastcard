@@ -1397,6 +1397,15 @@ fix.
     codebase's docstrings warn about in the abstract — one level more subtle than the usual "raw
     score vs residual" version, since the leak lives in the CANDIDATE FEATURE's own construction, not
     the target. Closed; nothing built on the naive (leaked) version.
+12f. Referee-crew tendencies (2026-08-06): the prior "no usable data source" assumption was WRONG,
+    never actually checked until now. `nba_api`'s `BoxScoreSummaryV2` endpoint (already this
+    project's core dependency) returns a real `Officials` dataset (3-person crew, IDs + names) —
+    confirmed live across the full dev+holdout range (2015-16 through 2022-23 all returned real
+    crews). A documented availability caveat exists only for games on/after 2025-04-10, outside this
+    project's training/validation range. Building an actual tendency feature is real, larger new
+    scope than every other item here (new ingest backfill across ~13,000 games, a per-official
+    walk-forward rate, a crew-level combine) — flagged as a corrected, real option for future work,
+    not built in this pass.
 
 ### P3 — new-season-specific hygiene (cheap, mechanical, worth doing once at tip-off)
 

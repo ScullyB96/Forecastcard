@@ -3744,3 +3744,24 @@ built on leaked information); the walk-forward-safe version shows nothing to ado
 `lineup_continuity.py` remains available, unused by any live path -- the realized `continuity_score`
 function itself is still useful for other honest, non-predictive purposes (e.g. a post-hoc
 "how much rotation churn did this team have" descriptive stat), just not as a pre-game feature.
+
+## 58. Referee-crew tendencies: the "no usable data source" assumption was WRONG -- real data exists, confirmed live (2026-08-06)
+
+Fifth and last of the lower-priority parked items -- previously assumed to have no usable data
+source (never actually checked, just carried forward as an assumption). **That assumption is
+FALSE**: `nba_api`'s `BoxScoreSummaryV2` endpoint (the same library this entire project already
+depends on) returns an `Officials` dataset -- the 3-person crew (`OFFICIAL_ID`, name, jersey number)
+for any game -- confirmed LIVE for real games spanning the full dev+holdout range (2015-16, 2018-19,
+2022-23 all returned real crews). `BoxScoreSummaryV2` carries a documented data-availability warning
+for games on/after 2025-04-10 (its own maintainers recommend `BoxScoreSummaryV3` going forward), but
+the dev+holdout range this project trains/validates on is unaffected.
+
+**This is a real, actionable finding, not yet acted on**: building a referee-tendency feature would
+need (a) a new ingest module backfilling `Officials` for ~13,000+ games (comparable cost to the
+existing box-score backfills), (b) a per-official walk-forward trailing rate (e.g. fouls/FTA-rate/
+pace tendency, mirroring `team_stat_rates.py`'s own for/against rate-model shape but keyed by
+official rather than team), and (c) a crew-level combine (3 officials per game) before any residual-
+correlation diagnostic could even be attempted -- meaningfully more scope than every other item in
+this "go through each individually" pass, all of which reused already-cached data. Flagged here as a
+corrected, real option for future work; NOT built in this pass -- the ingest/build decision is the
+user's to make given the added scope, not assumed.
