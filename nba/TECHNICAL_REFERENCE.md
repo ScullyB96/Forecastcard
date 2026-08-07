@@ -1406,6 +1406,21 @@ fix.
     scope than every other item here (new ingest backfill across ~13,000 games, a per-official
     walk-forward rate, a crew-level combine) — flagged as a corrected, real option for future work,
     not built in this pass.
+12g. **BUILT AND HOLDOUT-TESTED (2026-08-07) — real on dev, does NOT confirm on holdout, NOT
+    adopted.** Backfilled `officials_*.parquet` (~13,000 games, `fetch_officials.py`); found and
+    fixed a real `nba_api` V3-parser bug along the way (`AttributeError` on a null arena field,
+    crashed the whole backfill on one malformed game — added to the caught-exception list so one
+    game's failure degrades to a WARNING instead). `referee_rates.py`'s trailing crew FTA-tendency
+    showed a real, decisive diagnostic correlation with total-score residual (r=+0.034, p=0.00045,
+    n=10,727) and a walk-forward additive-correction adoption test cleared BOTH Stage 1 (total_mae
+    -0.0087) and Stage 2 (full dev range, -0.0056) cleanly at K=0.5, robust across a
+    `prior_games` sweep (100/200/400 all real). **The one-time confirmatory holdout read came back
+    NOISE** (delta=-0.0097, 95% CI includes zero, n=1,464) — final, not adopted, per the
+    confirmatory-veto protocol. Third confirmed instance this project has hit of "real, decisive
+    dev-range signal that doesn't survive the one holdout read that matters" (after B2B/team-
+    specific home-court) — `fetch_officials.py`/`referee_rates.py` remain available as reusable
+    infrastructure, and the officials data itself is a genuine new asset for any future
+    referee-related question.
 
 ### P3 — new-season-specific hygiene (cheap, mechanical, worth doing once at tip-off)
 

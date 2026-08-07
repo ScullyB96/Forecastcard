@@ -3765,3 +3765,53 @@ correlation diagnostic could even be attempted -- meaningfully more scope than e
 this "go through each individually" pass, all of which reused already-cached data. Flagged here as a
 corrected, real option for future work; NOT built in this pass -- the ingest/build decision is the
 user's to make given the added scope, not assumed.
+
+## 59. Referee-crew tendency: real on dev, cleared both sweep stages, but does NOT confirm on holdout (2026-08-07)
+
+Following up Sec58's correction (real referee data exists, contra the earlier assumption), the user
+asked to proceed with the actual build. Backfilled `officials_*.parquet` (2015-16 through the
+in-progress 2025-26 season, ~13,000 games) via the new `fetch_officials.py` (`BoxScoreSummaryV3`).
+
+**A real bug found and fixed mid-backfill**: `nba_api`'s own V3 response parser
+(`boxscoresummaryv3.py`'s `get_arena_info_data`) unconditionally calls `.get()` on a game's parsed
+arena dict with no None-check, raising a bare `AttributeError` on any game with a null/missing arena
+section in the real API response -- confirmed live, this crashed the entire multi-hour backfill on
+one single malformed game (10 of 11 seasons had already completed and were safely checkpointed
+first). `AttributeError`/`TypeError` added to `_fetch_game_with_retry`'s caught-exception list so a
+single library-parser bug on one game degrades to a per-game WARNING (skip, retry, eventually give
+up on just that game) instead of taking down every other already-fetched game's progress -- the
+exact same "one game's edge case shouldn't cost the whole run" discipline this project already
+applies everywhere else in its ingest layer.
+
+Built `referee_rates.py`: `build_official_game_log` (one row per (game, official) with that game's
+own shared total FTA/fouls, both teams summed) and `add_referee_tendency` (a walk-forward-shrunk
+trailing mean of an official's own history, blended toward the trailing league-wide mean -- NOT
+season-reset, same design choice as `home_court.fit_team_home_court_walk_forward` and
+`referee_rates`'s own docstring: an official's calling style is a persistent trait, not reset by
+roster turnover the way team quality is). Same-game leak guard regression-tested (multiple officials
+sharing one game's value can't leak into each other's trailing history).
+
+**Diagnostic (full dev range, n=10,727 games)**: a real, decisive correlation --
+`crew_total_fta_tendency` vs. total-score residual: r=+0.0339, p=0.00045; `crew_total_fouls_tendency`:
+r=+0.0306, p=0.0015. Top-quartile-tendency crews show mean_residual=+2.29 vs. bottom-quartile's
++0.33 (delta=+1.96, t=3.87, p=0.00011) -- a physically sensible direction (crews with a history of
+calling more FTA correlate with real games scoring MORE than baseline predicts).
+
+**Built a walk-forward adoption test** (additive correction to the game TOTAL only,
+`pred_total + K * (crew_tendency - crew_league_avg_tendency)`, K swept 0.5-3.0). **K=0.5 cleared BOTH
+stages cleanly**: Stage 1 (recent-dev slice) total_mae -0.0087 (CI entirely negative); Stage 2 (full
+dev range) total_mae -0.0056 (CI entirely negative) -- higher K values overcorrect into noise.
+Sanity-swept `prior_games` (25/50/100/200/400) at K=0.5: 100/200/400 all real, with a smooth,
+monotonically-shrinking effect size as shrinkage strength increases -- the signature of a genuine
+signal, not a lucky pick.
+
+**The one-time confirmatory holdout read (K=0.5, prior_games=100) came back NOISE**: holdout-only
+total_mae delta=-0.0097, 95% CI=(-0.0214, +0.0015) -- CI includes zero. The point estimate is still
+in the favorable direction, but at holdout's smaller sample size (n=1,464) it isn't distinguishable
+from zero. **NOT ADOPTED** -- per the confirmatory-veto protocol, this result is final; no re-tuning
+or re-testing with a different K/prior_games now that holdout has been read. A real, decisive,
+physically-sensible dev-range finding that still didn't survive the one read that actually matters --
+the same lesson Sec32/Sec54 already taught with B2B and team-specific home-court, now confirmed a
+third time with a completely different domain signal. `fetch_officials.py`/`referee_rates.py` remain
+available, unused by any live path; the officials data itself is now a real, reusable asset for any
+future referee-related question.

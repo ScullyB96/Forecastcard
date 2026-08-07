@@ -40,6 +40,7 @@ from src.models.rest_schedule import add_schedule_density
 from src.models.travel_fatigue import add_travel_fatigue
 from src.models.clutch_rating import add_trailing_clutch_deviation, identify_clutch_stints, team_game_clutch_net_rating
 from src.models.lineup_continuity import add_lineup_continuity, team_game_continuity_score
+from src.models.referee_rates import add_referee_tendency, build_official_game_log, crew_tendency
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
@@ -582,6 +583,39 @@ def test_add_lineup_continuity_counts_distinct_prior_games_not_stints():
     expected = (1 * 15 + 0 * 5) / (15 + 5)  # possession-weighted average
     check("game 2's team-level continuity_score is the possession-weighted average across its 2 lineups",
           abs(g2_score - expected) < 1e-9, f"got {g2_score}, expected {expected}")
+
+
+def test_add_referee_tendency_has_no_leak_on_an_officials_first_ever_game():
+    """Task #64: `add_referee_tendency` must fall back to PURE trailing
+    league-wide shrinkage (zero own-history weight) on an official's
+    first-ever game -- and the trailing league average itself must not
+    leak that SAME game's own extreme value (the same-game collapse guard,
+    since multiple officials share one game's value_col). Builds 10
+    warm-up games (3 officials each, rotating pool of 4, total_fta=40
+    flat) then an 11th game where a brand-new official "Z" works
+    alongside 2 warm-up officials, with a deliberately extreme
+    total_fta=200 for that game."""
+    pool = ["A", "B", "C", "D"]
+    rows = []
+    for i in range(10):
+        crew = [pool[i % 4], pool[(i + 1) % 4], pool[(i + 2) % 4]]
+        for official in crew:
+            rows.append({"gameId": f"g{i}", "personId": official, "total_fta": 40.0,
+                         "gameDate": pd.Timestamp("2020-10-01") + pd.Timedelta(days=i)})
+    rows.append({"gameId": "g10", "personId": "Z", "total_fta": 200.0, "gameDate": pd.Timestamp("2020-10-11")})
+    rows.append({"gameId": "g10", "personId": "A", "total_fta": 200.0, "gameDate": pd.Timestamp("2020-10-11")})
+    log = pd.DataFrame(rows)
+
+    result = add_referee_tendency(log, "total_fta", prior_games=50.0)
+    z_row = result[(result["gameId"] == "g10") & (result["personId"] == "Z")]
+    league_avg_at_g10 = float(z_row["total_fta_league_avg"].iloc[0])
+    got = float(z_row["total_fta_official_tendency"].iloc[0])
+    check("the trailing league average at game 10 is exactly 40.0 (the flat warm-up rate, not "
+          "leaking game 10's own extreme 200 value)",
+          abs(league_avg_at_g10 - 40.0) < 1e-9, f"got {league_avg_at_g10}")
+    check("official Z's first-ever game gets pure league-wide shrinkage (no self-leak from the "
+          "extreme value in this SAME game)",
+          abs(got - league_avg_at_g10) < 1e-9, f"got {got}, expected {league_avg_at_g10}")
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -2116,6 +2150,7 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_add_referee_tendency_has_no_leak_on_an_officials_first_ever_game()
     test_add_lineup_continuity_counts_distinct_prior_games_not_stints()
     test_identify_clutch_stints_requires_both_late_AND_close()
     test_add_trailing_clutch_deviation_skips_nan_games_and_requires_a_minimum_sample()
