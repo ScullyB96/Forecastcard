@@ -92,6 +92,66 @@ def add_schedule_density(log: pd.DataFrame, window_days: int = 4) -> pd.DataFram
     return log
 
 
+def fit_team_b2b_adjustment_walk_forward(df: pd.DataFrame, prior_games: float = 50.0) -> pd.DataFrame:
+    """Task #70 (external-review follow-up, MODEL_DOCUMENTATION.md Sec32/54):
+    Sec32's flat, POOLED league-wide B2B correction was a real diagnostic
+    that didn't survive adoption. Real research confirms the effect is
+    HETEROGENEOUS by roster composition (veteran/star-heavy rosters show
+    materially larger B2B drops, concentrated in defense) -- a single
+    pooled scalar averages a real large effect for some teams with a
+    near-zero effect for others, diluting a genuine signal into noise.
+
+    `df`: one row per game (`gameId`, `gameDate`, `team_home`, `team_away`,
+    `pred_home`/`pred_away`, `actual_home`/`actual_away`,
+    `home_is_b2b`/`away_is_b2b` -- same shape `validate_b2b_adjustment.py`
+    already builds). Adds `home_pred_adj`/`away_pred_adj`: baseline plus a
+    TEAM-SPECIFIC walk-forward B2B correction -- each team's own trailing
+    mean B2B-game residual, count-weighted-shrunk toward the POOLED
+    league-wide B2B residual mean at `prior_games` (B2B games, not all
+    games) strength, same shrinkage shape as `home_court.
+    fit_team_home_court_walk_forward`. Same explicit-sequential-loop
+    same-game leak guard as `validate_b2b_adjustment._add_walk_forward_b2b_adjustment`
+    (reads each team's running sum/count BEFORE folding in this game's own
+    residuals)."""
+    df = df.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
+    home_resid = (df["actual_home"] - df["pred_home"]).to_numpy()
+    away_resid = (df["actual_away"] - df["pred_away"]).to_numpy()
+    home_is_b2b = df["home_is_b2b"].fillna(False).to_numpy()
+    away_is_b2b = df["away_is_b2b"].fillna(False).to_numpy()
+    home_team = df["team_home"].to_numpy()
+    away_team = df["team_away"].to_numpy()
+
+    team_sum: dict = {}
+    team_count: dict = {}
+    pooled_sum, pooled_count = 0.0, 0
+
+    home_adj = np.zeros(len(df))
+    away_adj = np.zeros(len(df))
+    for i in range(len(df)):
+        pooled_mean = pooled_sum / pooled_count if pooled_count > 0 else 0.0
+
+        t_home = home_team[i]
+        home_adj[i] = (team_sum.get(t_home, 0.0) + prior_games * pooled_mean) / (team_count.get(t_home, 0) + prior_games)
+        t_away = away_team[i]
+        away_adj[i] = (team_sum.get(t_away, 0.0) + prior_games * pooled_mean) / (team_count.get(t_away, 0) + prior_games)
+
+        if home_is_b2b[i]:
+            team_sum[t_home] = team_sum.get(t_home, 0.0) + home_resid[i]
+            team_count[t_home] = team_count.get(t_home, 0) + 1
+            pooled_sum += home_resid[i]
+            pooled_count += 1
+        if away_is_b2b[i]:
+            team_sum[t_away] = team_sum.get(t_away, 0.0) + away_resid[i]
+            team_count[t_away] = team_count.get(t_away, 0) + 1
+            pooled_sum += away_resid[i]
+            pooled_count += 1
+
+    df = df.copy()
+    df["home_pred_adj"] = df["pred_home"] + df["home_is_b2b"].fillna(False).astype(float) * home_adj
+    df["away_pred_adj"] = df["pred_away"] + df["away_is_b2b"].fillna(False).astype(float) * away_adj
+    return df
+
+
 def fit_b2b_adjustment(games_with_residual: pd.DataFrame, residual_col: str) -> float:
     """Only call this once `correlate_residual_with_rest` has confirmed a
     real (small p-value, not just nonzero) effect -- returns the mean

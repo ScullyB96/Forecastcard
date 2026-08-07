@@ -1450,6 +1450,20 @@ fix.
     the real published effects (Price & Wolfers, etc.) need individual per-call attribution or
     racial-composition conditioning this project's data source structurally can't provide, not just a
     different aggregate outcome variable.
+12i. **Follow-up (2026-08-07): item 12's own "don't re-attempt without a structurally different
+    mechanism" bar — tried a per-team heterogeneous version, still no signal.** Literature suggests
+    the B2B effect is roster-composition-dependent (bigger for veteran/star-heavy rosters); a flat
+    pooled correction could be averaging that away. Built
+    `rest_schedule.fit_team_b2b_adjustment_walk_forward` — same per-team shrinkage shape as item 9b's
+    `fit_team_home_court_walk_forward` (team's own trailing B2B residual mean, count-weighted-shrunk
+    toward the pooled league-wide mean). Regression-tested: confirmed two teams with opposite true
+    B2B effects genuinely diverge under this mechanism (not both collapsing to one pooled number).
+    Stage 1 (recent-dev slice, `prior_games` swept 10/25/50/100/200): every value on every metric is
+    NOISE — and unlike item 9c's Denver result, the point estimates aren't even directionally
+    consistent (margin_mae's delta flips sign across the sweep with no monotonic pattern). This is the
+    signature of genuine noise, not an underpowered real effect. Not adopted, no Stage 2/holdout spent.
+    Closes out the B2B lever in both the pooled (item 12) and per-team (here) formulations — no
+    adoptable version found in either direction.
 
 ### P3 — new-season-specific hygiene (cheap, mechanical, worth doing once at tip-off)
 

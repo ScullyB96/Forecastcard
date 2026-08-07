@@ -37,7 +37,7 @@ from src.models.player_scoring_rates import PRIOR_ATTEMPTS_FTM, PRIOR_MINUTES_FT
 from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_family, log_score, over_under_prob, predict_variance
 from src.models.prop_distribution import family_for_mean, fit_count_family_mean_dependent
 from src.models.attendance_model import attendance_features_for_game, predict_attendance_probability
-from src.models.rest_schedule import add_schedule_density
+from src.models.rest_schedule import add_schedule_density, fit_team_b2b_adjustment_walk_forward
 from src.models.travel_fatigue import add_travel_fatigue
 from src.models.clutch_rating import add_trailing_clutch_deviation, identify_clutch_stints, team_game_clutch_net_rating
 from src.models.lineup_continuity import add_lineup_continuity, team_game_continuity_score
@@ -2333,6 +2333,47 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
           missing == {}, f"got {missing}")
 
 
+def test_fit_team_b2b_adjustment_walk_forward_diverges_per_team_unlike_pooled_average():
+    """Task #70: the ORIGINAL `_add_walk_forward_b2b_adjustment`
+    (validate_b2b_adjustment.py) pools every team's B2B residuals into one
+    shared running mean -- a real heterogeneous per-team effect averages
+    toward ~0 league-wide. This per-team version must track each team's
+    OWN running mean (shrunk toward the pooled mean only via
+    `prior_games`), so two teams with opposite true B2B effects diverge
+    toward their own true values instead of both collapsing to the same
+    pooled number. Also confirms the same-game leak guard: a team's own
+    very first B2B game must not include its own same-game residual."""
+    rows = []
+    gid = 1
+    for _ in range(6):
+        rows.append({"gameId": gid, "gameDate": pd.Timestamp("2024-01-01") + pd.Timedelta(days=gid),
+                      "team_home": 100, "team_away": 900 + gid,
+                      "pred_home": 100.0, "pred_away": 100.0,
+                      "actual_home": 110.0, "actual_away": 100.0,
+                      "home_is_b2b": True, "away_is_b2b": False})
+        gid += 1
+        rows.append({"gameId": gid, "gameDate": pd.Timestamp("2024-01-01") + pd.Timedelta(days=gid),
+                      "team_home": 200, "team_away": 900 + gid,
+                      "pred_home": 100.0, "pred_away": 100.0,
+                      "actual_home": 90.0, "actual_away": 100.0,
+                      "home_is_b2b": True, "away_is_b2b": False})
+        gid += 1
+    df = pd.DataFrame(rows)
+    out = fit_team_b2b_adjustment_walk_forward(df, prior_games=2.0)
+
+    check("the very first B2B game in the whole league has zero adjustment (no pooled history exists yet)",
+          abs(out.loc[0, "home_pred_adj"] - 100.0) < 1e-9)
+
+    team_a_rows = out[out["team_home"] == 100].reset_index(drop=True)
+    team_b_rows = out[out["team_home"] == 200].reset_index(drop=True)
+    check("team A's own adjustment trends toward its own true +10 effect, not a pooled ~0 average",
+          team_a_rows["home_pred_adj"].iloc[-1] - 100.0 > 5.0)
+    check("team B's own adjustment trends toward its own true -10 effect, not a pooled ~0 average",
+          team_b_rows["home_pred_adj"].iloc[-1] - 100.0 < -5.0)
+    check("no same-game leak: team A's own adjustment strictly grows toward its converged value across its games",
+          team_a_rows["home_pred_adj"].iloc[0] < team_a_rows["home_pred_adj"].iloc[-1])
+
+
 if __name__ == "__main__":
     test_fit_denver_specific_home_court_uses_per_team_value_only_for_denver()
     test_build_official_game_log_differential_computes_away_minus_home_correctly()
@@ -2411,6 +2452,7 @@ if __name__ == "__main__":
     test_resolve_active_lineup_excludes_departed_players()
     test_predictive_minutes_shares_has_no_hindsight_leak()
     test_semi_oracle_minutes_shares_uses_real_attendance_but_trailing_average_shares()
+    test_fit_team_b2b_adjustment_walk_forward_diverges_per_team_unlike_pooled_average()
 
     print()
     if FAILURES:

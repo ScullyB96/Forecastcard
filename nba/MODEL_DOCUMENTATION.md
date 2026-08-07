@@ -3953,3 +3953,40 @@ independent of any multi-year era drift). The "wrong axis" diagnosis from extern
 correct in the abstract, but this project had already solved that specific problem with a different,
 better-suited mechanism before the question was ever asked. Nothing changed; `add_era_adjusted_player_rate`
 remains available, unused for 3PT on either axis now.
+
+## 64. Team-conditioned (heterogeneous) B2B correction: per-team shrinkage doesn't rescue a lever the pooled version already failed (2026-08-07)
+
+Follow-up to `validate_b2b_adjustment.py`'s finding (a real residual correlation, p=8.0e-7, that
+never converted into an adoptable correction at full-model scale): external research suggested the
+flat POOLED walk-forward B2B correction (one running mean shared across all 30 teams) could be
+averaging away a real but roster-composition-dependent effect -- literature shows B2B drops are
+reportedly larger for veteran/star-heavy rosters, concentrated in defense. Worth testing whether a
+per-team version, letting each team's own history dominate, recovers a real net win the pooled
+scalar couldn't.
+
+Built `rest_schedule.fit_team_b2b_adjustment_walk_forward`: mirrors `home_court.
+fit_team_home_court_walk_forward`'s exact per-team shrinkage shape (a team's own trailing B2B-game
+residual mean, count-weighted-shrunk toward the POOLED league-wide B2B residual mean at
+`prior_games` strength, measured in B2B games not all games) instead of one shared running mean.
+Same explicit-sequential-loop same-game leak guard as the original pooled version. Regression-tested:
+confirmed two teams with opposite true B2B effects (+10 vs. -10, by construction) diverge toward
+their own true values instead of both collapsing to the pooled ~0 average, and confirmed no
+same-game leak on a team's own first B2B game.
+
+**Stage 1 (recent-dev slice, n=3,679 games), `prior_games` swept 10/25/50/100/200**: every single
+value on every metric is NOISE (CI includes zero) -- and unlike Sec62's Denver result, the point
+estimates are NOT directionally consistent: margin_mae's delta flips sign across the sweep (+0.0127
+at prior_games=10, -0.0048 at prior_games=200, crossing zero in between with no monotonic pattern
+tied to shrinkage strength). This is the signature of genuine noise, not an underpowered real effect.
+
+**Not adopted, no Stage 2 or holdout read spent.** The per-team reformulation was a reasonable
+hypothesis (the pooled version really could have been hiding heterogeneity), but empirically it
+doesn't rescue the lever -- letting each team's own history dominate doesn't surface a real signal
+that a shared pooled mean was masking; it just adds variance without adding real information. Most
+likely explanation: whatever heterogeneity may genuinely exist in the underlying NBA-wide B2B effect
+is either too small to detect in this project's own residual signal-to-noise ratio (same story as
+Sec62's altitude effect, a market-derived study needed far more data density than a raw-score
+walk-forward test provides), or the correlation `validate_b2b_adjustment.py` originally found was
+itself mostly schedule-driven noise rather than a stable team-level trait to condition on in the
+first place. Closes out this project's B2B-lever investigation (pooled Sec-prior + per-team here)
+with no adoptable formulation found in either direction.
