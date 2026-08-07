@@ -4037,13 +4037,27 @@ original Phase 2 adoption): **REAL IMPROVEMENT on total_mae (-0.0108, CI entirel
 margin_mae (-0.0116, CI entirely negative), su noise.** Logged as
 `phase2_probabilistic_predictive_vs_phase1`.
 
-**Verdict: ADOPT at the mechanism level -- this is a real, holdout-confirmed fix for the exact defect
-that got Phase 2 predictive mode disabled.** Not yet wired into the live pipeline as of this writing:
-`generate_predictions.py`'s actual live active-lineup resolver (`active_roster.resolve_active_lineup`)
-is a structurally different function from the backtest's `predictive_minutes_shares` -- it already has
-a real injury signal (RotoWire Out/Doubtful) the backtest has to proxy for with trailing-attendance
-history, so bridging the probabilistic weighting into it (soft-weighting the NON-excluded pool by
-attendance consistency, on top of RotoWire's hard exclusion, not instead of it) is a distinct,
-not-yet-done design/implementation step, and flipping `INCLUDE_LINEUP_ADJUSTMENT` back to `True` is a
-live-production behavior change reversing an explicit prior decision (task #30) -- flagged for the
-user before proceeding rather than auto-deployed silently.
+**Verdict: ADOPT -- this is a real, holdout-confirmed fix for the exact defect that got Phase 2
+predictive mode disabled.** Flagged to the user before touching the live pipeline, since flipping
+`INCLUDE_LINEUP_ADJUSTMENT` back to `True` reverses an explicit prior production decision (task #30)
+-- user confirmed proceeding.
+
+**WIRED LIVE (2026-08-07)**: `active_roster.resolve_active_lineup` (the actual live resolver --
+structurally different from the backtest's `predictive_minutes_shares`, since it already has a real
+RotoWire Out/Doubtful injury signal the backtest has to proxy for with trailing-attendance history)
+now applies the same probabilistic weighting to the NON-RotoWire-excluded, NON-departed pool: each
+survivor's trailing-average minutes weighted by `attendance_model.predict_attendance_probability`
+(reusing that already-built, already-validated primitive directly, via the existing walk-forward-safe
+`attendance_features_for_game` helper -- no new feature-computation code, just composition) instead of
+counting every survivor at a flat weight regardless of attendance consistency. RotoWire and departed-
+roster exclusions stay exactly as hard exclusions (real ground-truth-for-tonight signals, not
+softened). `PROBABILISTIC_STREAK_DECAY = 0.5` (`active_roster.py`, matching the value validated for
+THIS downstream objective, not `predict_attendance_probability`'s own separately-tuned default of
+0.7). `INCLUDE_LINEUP_ADJUSTMENT = True` in `generate_predictions.py`; `run_final_holdout_check.py`
+updated to test the same mechanism (via the shared constant, not a re-derived value) so any future
+Phase-4-style re-check always tests what's actually live. Regression-tested (a player on a live
+2-game DNP streak is downweighted well below an equal-raw-average flat split). Verified against a
+real historical slate (2018-01-15): `generate_predictions.py` produced plausible 96-116 point
+projections, win probabilities spanning 37.3%-82.4%, lineup tags correctly reporting the new
+`probabilistic-predictive` mechanism; `generate_props.py` (shares the same resolver, no independent
+Phase 2 logic of its own) ran cleanly too (2,570 prop rows, 257 players).

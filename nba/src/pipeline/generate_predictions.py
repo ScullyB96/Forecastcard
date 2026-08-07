@@ -24,24 +24,35 @@ already-known minutes to measure a ceiling): each active player's own
 trailing-average minutes over their team's last `MINUTES_LOOKBACK_GAMES`,
 renormalized across tonight's active roster.
 
-**Phase 2 (RAPM-lite lineup adjustment) is DISABLED as of 2026-08-01**
-(`INCLUDE_LINEUP_ADJUSTMENT = False`), reverting a 2026-07-25 decision.
-The dev-only bootstrap that originally justified wiring it in
-(`validate_predictive_lineup_adjustment.py`) had a real hindsight leak in
-its own active-player-set selection (it used the real historical game's
-actual attendance -- perfect foreknowledge of who plays -- instead of the
-same trailing-rotation-union `resolve_active_lineup` genuinely has to work
-with, live). Fixed and re-ran (Sec28.2 of MODEL_DOCUMENTATION.md): under
-the honest methodology, Phase 2 shows a REAL REGRESSION on margin_mae on
-BOTH dev (+0.0146) and holdout (+0.0181), reversing the original "real
-improvement" conclusion. Oracle mode (unaffected by the leak) still
-confirms lineup-awareness carries real signal in principle -- the
-deployable minutes-share estimation mechanism just doesn't capture it net
-of its own noise. All the RAPM-lite/lineup-adjustment machinery
-(`rapm_lite.py`, `lineup_rating.py`, `active_roster.py`) is left in place,
-tested, and available -- flip `INCLUDE_LINEUP_ADJUSTMENT` back on only
-after a genuinely improved minutes-projection mechanism is built and
-re-validated, not by reverting this decision on its own.
+**Phase 2 (RAPM-lite lineup adjustment) RE-ENABLED 2026-08-07**
+(`INCLUDE_LINEUP_ADJUSTMENT = True`), reversing the 2026-08-01 disablement.
+That disablement was correct at the time: the dev-only bootstrap that
+originally justified wiring Phase 2 in (`validate_predictive_lineup_adjustment.py`)
+had a real hindsight leak in its own active-player-set selection (real
+historical attendance instead of the honest trailing-rotation-union
+`resolve_active_lineup` has to work with, live); fixed and re-run
+(Sec28.2), Phase 2 showed a REAL REGRESSION on margin_mae on both dev
+(+0.0146) and holdout (+0.0181) under the corrected methodology. Oracle
+mode (unaffected by the leak) still confirmed lineup-awareness carries
+real signal in principle -- the deployable minutes-share estimation
+mechanism just wasn't capturing it net of its own noise: the active-player
+SET was a flat, hard 1.0/0.0 union (appeared in the trailing window at all
+= full weight, regardless of how sporadically) with no accounting for
+attendance CONSISTENCY.
+
+Task #58/#66 (Sec53/Sec65 of MODEL_DOCUMENTATION.md) fixed exactly that:
+`attendance_model.predict_attendance_probability` (games-played fraction,
+decayed by current DNP-streak length) now weights `resolve_active_lineup`'s
+trailing-average minutes instead of counting every trailing-window survivor
+at full weight. Cleared the full two-stage-then-holdout adoption gate: real
+improvement on total_mae/margin_mae at Stage 1 (recent-dev slice) and Stage
+2 (full dev range), and -- the decision-relevant read -- a REAL IMPROVEMENT
+on both total_mae and margin_mae vs Phase 1 alone on HOLDOUT GAMES ONLY,
+isolated from the already-known Sec9.5 scoring-era-drift gap every
+configuration inherits. All the RAPM-lite/lineup-adjustment machinery
+(`rapm_lite.py`, `lineup_rating.py`, `active_roster.py`) was already in
+place, tested, and available; the fix was the probabilistic-weighting
+extension to `resolve_active_lineup`, not new machinery.
 
 **Non-regular-season games are flagged, not silently predicted as if equivalent (2026-08-02)**:
 every training signal in this codebase (`team_strength.build_team_game_log`,
@@ -80,9 +91,9 @@ from src.pipeline.refresh_data import refresh_all_data
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 from src.utils.tz import default_slate_date
 
-INCLUDE_LINEUP_ADJUSTMENT = False  # disabled 2026-08-01 -- see module docstring and
-# MODEL_DOCUMENTATION.md Sec28.2: the dev/holdout result that justified adopting this had a real
-# hindsight leak in its own validation; fixed and re-run, Phase 2 now shows a real regression.
+INCLUDE_LINEUP_ADJUSTMENT = True  # re-enabled 2026-08-07 -- see module docstring and
+# MODEL_DOCUMENTATION.md Sec65: probabilistic-attendance weighting fixed the real regression that
+# got this disabled 2026-08-01, cleared the full two-stage-then-holdout adoption gate.
 
 
 def _fit_latest_player_ratings(current_season: int, before_date: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:

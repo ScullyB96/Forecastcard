@@ -21,9 +21,16 @@ from nba_api.stats.endpoints import scoreboardv3
 from src.ingest.fetch_schedule import season_str
 from src.ingest.player_name_crosswalk import player_id_for_name
 from src.ingest.team_codes import ABBREV_TO_TEAM_ID
+from src.models.attendance_model import attendance_features_for_game, predict_attendance_probability
 from src.utils.paths import DATA_RAW
 
 MINUTES_LOOKBACK_GAMES = 10
+
+# task #66/Sec65: validated end-to-end (two-stage-then-holdout) for THIS downstream
+# lineup-adjustment MAE objective -- distinct from attendance_model.predict_attendance_probability's
+# own default (0.7, tuned separately for raw attendance-prediction Brier score alone, Sec53).
+# Passed explicitly here rather than relying on that function's default.
+PROBABILISTIC_STREAK_DECAY = 0.5
 
 
 # gameId's 3rd character encodes the game type in every NBA Stats API endpoint that returns one
@@ -127,7 +134,25 @@ def resolve_active_lineup(team_abbrev: str, team_prior_game_ids: list, player_mi
     for someone who isn't on the team and won't play. `current_roster_ids`
     (from `load_current_roster_player_ids`, default `None` -- preserving
     the exact original behavior when not supplied) additionally excludes
-    any player NOT on that set, same as the existing RotoWire exclusion."""
+    any player NOT on that set, same as the existing RotoWire exclusion.
+
+    PROBABILISTIC WEIGHTING (2026-08-07, task #66/Sec65): among the
+    survivors of the two hard exclusions above (RotoWire Out/Doubtful and
+    departed-roster -- both real, ground-truth-for-tonight signals, kept
+    exactly as hard exclusions, not softened), each player's trailing-
+    average minutes is additionally weighted by
+    `attendance_model.predict_attendance_probability` -- his own trailing
+    games-played fraction, decayed by any CURRENT DNP streak -- instead of
+    counting every survivor at full weight regardless of how sporadically
+    he's actually been playing (a coach's-decision/minor-tweak pattern
+    RotoWire's binary Out/Doubtful flag doesn't capture at all). This is
+    the exact mechanism that took Phase 2 predictive mode from a real
+    holdout regression (task #30) to a real, holdout-confirmed improvement
+    in the backtest (`lineup_rating.probabilistic_predictive_minutes_shares`)
+    -- reimplemented here (not called directly) because this function's
+    candidate pool is built from real RotoWire/roster data the backtest has
+    no equivalent of, not the backtest's synthetic historical-attendance
+    proxy."""
     out_names = [r["player"] for r in injury_report if r["team"] == team_abbrev and r["likely_out"]]
     out_ids = set()
     for name in out_names:
@@ -161,9 +186,18 @@ def resolve_active_lineup(team_abbrev: str, team_prior_game_ids: list, player_mi
             avg_minutes = avg_minutes.drop(index=departed)
             departed_count = len(departed)
 
-    total = avg_minutes.sum()
+    if avg_minutes.empty:
+        return pd.Series(dtype=float), "no positive minutes in lookback window after exclusions"
+
+    features = attendance_features_for_game(
+        player_minutes, team_prior_game_ids, team_side_lookup, MINUTES_LOOKBACK_GAMES).set_index("playerId")
+    prob = predict_attendance_probability(features.reindex(avg_minutes.index), streak_decay=PROBABILISTIC_STREAK_DECAY)
+    weighted_minutes = avg_minutes * prob
+
+    total = weighted_minutes.sum()
     if total <= 0:
         return pd.Series(dtype=float), "no positive minutes in lookback window after exclusions"
-    tag = (f"predictive (trailing {MINUTES_LOOKBACK_GAMES}-game minutes, {len(out_ids)} player(s) "
-           f"excluded via RotoWire, {departed_count} excluded as no longer on the roster)")
-    return avg_minutes / total, tag
+    tag = (f"probabilistic-predictive (trailing {MINUTES_LOOKBACK_GAMES}-game minutes weighted by "
+           f"attendance probability, {len(out_ids)} player(s) excluded via RotoWire, "
+           f"{departed_count} excluded as no longer on the roster)")
+    return weighted_minutes / total, tag

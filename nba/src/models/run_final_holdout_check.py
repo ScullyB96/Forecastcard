@@ -21,7 +21,7 @@ from src.ingest.build_stints import build_season_stints
 from src.ingest.fetch_schedule import FIRST_DEV_SEASON, current_nba_season
 from src.models.home_court import fit_home_court_walk_forward
 from src.models.lineup_rating import (
-    player_minutes_from_stints, predictive_minutes_shares, project_lineup_adjustment, team_recent_roster_rapm,
+    player_minutes_from_stints, probabilistic_predictive_minutes_shares, project_lineup_adjustment, team_recent_roster_rapm,
 )
 from src.models.rapm_lite import compute_walkforward_player_ratings, prepare_stints
 from src.models.team_strength import add_team_ratings, build_team_game_log, project_game
@@ -29,14 +29,17 @@ from src.models.validate_holdout_bootstrap import holdout_confirmatory_check
 from src.models.validate_predictive_lineup_adjustment import LOOKBACK_GAMES
 from src.models.validate_rapm_lineup_adjustment import _build_team_history
 from src.models.validate_team_strength_baseline import _to_wide_games
+from src.pipeline.active_roster import PROBABILISTIC_STREAK_DECAY
 
-INCLUDE_LINEUP_ADJUSTMENT = False  # REVERTED 2026-08-01 -- predictive-minutes mode was dev-adopted
-# 2026-07-25 on a hindsight-leaked validation (its active-player-set selection used the real
-# historical game's own actual attendance instead of the honest trailing-rotation-union the live
-# pipeline actually has to work with). Fixed and re-run: under the corrected methodology, predictive
-# mode shows a REAL REGRESSION on margin_mae on both dev (+0.0146) and holdout (+0.0181) vs Phase 1
-# alone -- see validate_predictive_lineup_adjustment.py / MODEL_DOCUMENTATION.md Sec28.2. Only flip
-# this back on after a genuinely improved minutes-projection mechanism is built and validated.
+INCLUDE_LINEUP_ADJUSTMENT = True  # RE-ENABLED 2026-08-07 (task #66/Sec65) -- disabled 2026-08-01
+# after a hindsight-leak fix exposed a real margin_mae regression (dev +0.0146, holdout +0.0181,
+# see MODEL_DOCUMENTATION.md Sec28.2): the flat-union predictive-minutes mechanism counted every
+# trailing-window survivor at full weight regardless of how sporadically he'd actually been playing.
+# `probabilistic_predictive_minutes_shares` (attendance-probability weighting, task #58/#66) fixed
+# exactly that and cleared the full two-stage-then-holdout gate -- see Sec65 for the real, isolated
+# holdout-only improvement vs Phase 1 alone. Uses the SAME streak_decay as the live pipeline
+# (`active_roster.PROBABILISTIC_STREAK_DECAY`), not a re-derived value, so this script always tests
+# whatever the live pipeline actually runs.
 
 
 def _full_range_long_log() -> pd.DataFrame:
@@ -67,11 +70,13 @@ def build_phase1_predictions(log: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_phase1_plus_lineup_predictions(log: pd.DataFrame) -> pd.DataFrame:
-    """Phase 1 + Phase 2 (predictive-minutes mode), across the FULL
-    dev+holdout range -- same construction as
-    `validate_predictive_lineup_adjustment.run_predictive_lineup_backtest`,
-    just spanning holdout seasons too (needs their stints built first --
-    see `build_season_stints`)."""
+    """Phase 1 + Phase 2 (probabilistic predictive-minutes mode, task #66/
+    Sec65 -- the currently-adopted mechanism, superseding the flat-union
+    `predictive_minutes_shares` this function used before 2026-08-07), across
+    the FULL dev+holdout range -- same construction as
+    `validate_probabilistic_predictive_sweep`'s bridge test, just spanning
+    holdout seasons too (needs their stints built first -- see
+    `build_season_stints`)."""
     last_season = current_nba_season()
     frames = []
     for y in range(FIRST_DEV_SEASON, last_season + 1):
@@ -120,10 +125,12 @@ def build_phase1_plus_lineup_predictions(log: pd.DataFrame) -> pd.DataFrame:
         away_recent_off, away_recent_def = team_recent_roster_rapm(
             player_minutes, ratings_snapshot, away_prior_games, team_side[away_id])
 
-        home_shares = predictive_minutes_shares(
-            player_minutes, row.gameId, "home", home_prior_games, team_side[home_id], LOOKBACK_GAMES)
-        away_shares = predictive_minutes_shares(
-            player_minutes, row.gameId, "away", away_prior_games, team_side[away_id], LOOKBACK_GAMES)
+        home_shares = probabilistic_predictive_minutes_shares(
+            player_minutes, row.gameId, "home", home_prior_games, team_side[home_id],
+            LOOKBACK_GAMES, streak_decay=PROBABILISTIC_STREAK_DECAY)
+        away_shares = probabilistic_predictive_minutes_shares(
+            player_minutes, row.gameId, "away", away_prior_games, team_side[away_id],
+            LOOKBACK_GAMES, streak_decay=PROBABILISTIC_STREAK_DECAY)
         if home_shares.empty or away_shares.empty:
             continue
 

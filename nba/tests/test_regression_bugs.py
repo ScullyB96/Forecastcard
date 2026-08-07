@@ -1570,6 +1570,37 @@ def test_resolve_active_lineup_excludes_departed_players():
           f"got {filtered_tag}")
 
 
+def test_resolve_active_lineup_downweights_a_live_dnp_streak_not_just_a_flat_average():
+    """Task #66/Sec65: `resolve_active_lineup` no longer counts every trailing-window survivor at
+    a flat 1.0 weight regardless of how sporadically he's actually been playing -- this is exactly
+    the fix that took Phase 2 predictive mode from a real holdout regression (task #30) to a real,
+    holdout-confirmed improvement. Player A and player B have IDENTICAL raw trailing-average
+    minutes (20.0) over a 4-game window, but A played all 4 games while B missed the two most
+    recent -- the OLD flat-average mechanism would give them equal 50/50 shares; the new
+    probabilistic-weighting mechanism must give A a real majority share instead."""
+    player_minutes = pd.DataFrame([
+        {"gameId": "g1", "playerId": 1, "team_side": "home", "minutes": 20.0},
+        {"gameId": "g2", "playerId": 1, "team_side": "home", "minutes": 20.0},
+        {"gameId": "g3", "playerId": 1, "team_side": "home", "minutes": 20.0},
+        {"gameId": "g4", "playerId": 1, "team_side": "home", "minutes": 20.0},
+        {"gameId": "g1", "playerId": 2, "team_side": "home", "minutes": 20.0},
+        {"gameId": "g2", "playerId": 2, "team_side": "home", "minutes": 20.0},
+        # player 2 has no rows for g3/g4 -- missed the two most recent games (a live DNP streak)
+    ])
+    team_side_lookup = {"g1": "home", "g2": "home", "g3": "home", "g4": "home"}
+    prior_game_ids = ["g1", "g2", "g3", "g4"]
+
+    shares, tag = resolve_active_lineup("TST", prior_game_ids, player_minutes, team_side_lookup, [])
+    check("both players still appear (neither is hard-excluded)", set(shares.index) == {1, 2})
+    check("shares renormalize to exactly 1.0", abs(shares.sum() - 1.0) < 1e-9)
+    check("player A (no DNP streak) gets a real majority share despite an EQUAL raw trailing average",
+          shares[1] > 0.7, f"got {shares[1]}")
+    check("player B (2-game live DNP streak) is downweighted well below the flat-average 0.5 split",
+          shares[2] < 0.3, f"got {shares[2]}")
+    check("the tag reflects the new probabilistic mechanism, not the old flat-average one",
+          "probabilistic-predictive" in tag, f"got {tag}")
+
+
 def test_name_index_prefers_active_player_and_flags_genuine_ambiguity():
     """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): the player-name-to-ID crosswalk used
     to keep whichever of two same-named players happened to appear LAST in `nba_api`'s unsorted
@@ -2453,6 +2484,7 @@ if __name__ == "__main__":
     test_predictive_minutes_shares_has_no_hindsight_leak()
     test_semi_oracle_minutes_shares_uses_real_attendance_but_trailing_average_shares()
     test_fit_team_b2b_adjustment_walk_forward_diverges_per_team_unlike_pooled_average()
+    test_resolve_active_lineup_downweights_a_live_dnp_streak_not_just_a_flat_average()
 
     print()
     if FAILURES:
