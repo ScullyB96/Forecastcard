@@ -1355,6 +1355,18 @@ fix.
     either direction, unlike gamma_rtg's real-but-rejected tradeoff (§2.4). No holdout read spent.
     Consistent with item 9's home-court-halflife conclusion: home-court hyperparameters generally
     show no real sensitivity at this sample size. Function left in place, unused by any live path.
+9c. **Follow-up (2026-08-07): a better-powered, Denver-ONLY version — directionally consistent with
+    real literature, still underpowered, not a null result.** External research confirmed Denver's
+    altitude home-court edge is a genuine, peer-reviewed outlier (needed 11 seasons of betting-line
+    data + hierarchical pooling across 30 teams to isolate). Built
+    `fit_denver_specific_home_court_walk_forward` — applies the per-team estimator ONLY to Denver,
+    concentrating power instead of diluting it across 30 mostly-null teams. Every `prior_games` value
+    swept (50/100/200/400) is NOISE, but margin_mae's point estimate is negative (improving) at EVERY
+    value, consistently -0.004 to -0.006, never flipping sign — a meaningfully different pattern from
+    a genuine null (which would show inconsistent signs). Correctly stopped at Stage 1 per protocol
+    (no Stage 2/holdout). Honest read: Denver's effect is very likely real, but a raw-score-margin
+    walk-forward test over this project's dev range doesn't have the statistical power a decade+ of
+    lower-noise betting-line data had — worth revisiting if a market-odds source is ever acquired.
 10. Garbage-time downweight factor (`DOWNWEIGHT_FACTOR = 0.25`) and the margin-threshold shape
     (`25.0 − 15.0×elapsed_fraction`): both un-calibrated placeholders, but currently moot — they only
     affect the RAPM-lite fit, and Phase 2 is disabled. Revisit only alongside item 7.

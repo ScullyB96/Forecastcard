@@ -3883,3 +3883,38 @@ small-effect even for the right formulation," at least at this project's own sam
 this fairly simple crew-averaged trailing-tendency mechanism (not the fixed-effects/racial-composition-
 conditioned designs the strongest published studies use, which would need individual per-call
 attribution this project's data source structurally can't provide -- see Sec59).
+
+## 62. Denver-specific home-court, better-powered design: directionally consistent with the literature, still underpowered at this sample size (2026-08-07)
+
+Follow-up to Sec49's generic 30-team home-court sweep (no real effect at any shrinkage strength) --
+external research confirmed Denver's altitude home-court edge IS a real, peer-reviewed outlier, but
+the study that found it (Lopez/Matthews/Baumer, *Annals of Applied Statistics*) needed 11 seasons of
+lower-noise BETTING-LINE data and hierarchical pooling across all 30 teams to isolate it. Sec49's own
+sweep, diluted 1-in-30 across mostly-null teams, plausibly lacked the power to detect a real
+single-team effect -- worth a better-powered, single-team-focused re-test rather than assuming the
+generic sweep's null was the final word.
+
+Built `home_court.fit_denver_specific_home_court_walk_forward`: applies the EXISTING per-team
+estimator (`fit_team_home_court_walk_forward`, already built and tested for Sec49) ONLY to Denver's
+own home games, concentrating all statistical power on the one team with real prior evidence, while
+every other team keeps the exact plain league-wide value completely unchanged (not a diluted 30-team
+estimate). Regression-tested (Denver's rows get the per-team value; every other team's rows,
+including games chronologically after Denver's own, get the unchanged plain league-wide value).
+
+**Stage 1 (recent-dev slice, n=3,679 games), `prior_games` swept 50/100/200/400**: every single value
+is NOISE (CI includes zero) on every metric -- but margin_mae's point estimate is NEGATIVE (an
+improvement) at EVERY prior_games value tested, consistently in the -0.004 to -0.006 range, never
+flipping sign. This is a meaningfully different result from a genuinely null effect (which would show
+inconsistent/randomly-signed deltas across different shrinkage strengths) -- it reads as a real but
+too-small-to-confirm signal at this sample size, not "no effect at all."
+
+**Not adopted, no Stage 2 or holdout read spent** -- per the established protocol (Stage 2 only
+follows a REAL Stage 1 improvement), this correctly stops here. Honest characterization: Denver's
+home-court edge is very likely real (strong independent literature support), but a raw-score-margin
+walk-forward test over this project's dev range (a few hundred Denver home games) simply does not
+have the statistical power the market-derived academic study had (a decade+ of lower-noise betting-
+line data). This is a genuinely different conclusion from Sec49's "no evidence of any per-team
+effect" -- it's "our instrument isn't sensitive enough to confirm what a better-instrumented study
+already found," worth revisiting if/when a market-odds data source is ever acquired for this project
+(see the still-open holdout-range odds-data question), which would give a much lower-noise
+observable to test against.

@@ -20,6 +20,7 @@ from src.models.bootstrap_significance import _MAX_IDX_MATRIX_BYTES, block_boots
 from src.models.rolling_window_backtest import rolling_window_report, summarize_rolling_report
 from src.models.garbage_time import add_garbage_time_weight
 from src.models.home_court import _baseline_log_ratios, fit_team_home_court_walk_forward
+from src.models.home_court import DENVER_TEAM_ID, fit_denver_specific_home_court_walk_forward, fit_home_court_walk_forward
 from src.models.oreb_decomposition import add_walk_forward_exposure_rate, project_oreb_share, project_team_oreb
 from src.models.player_rate_shrinkage import (
     _trailing_league_rate_ewma, add_era_adjusted_player_rate, add_walk_forward_player_mean_ewm,
@@ -742,6 +743,63 @@ def test_build_official_game_log_differential_computes_away_minus_home_correctly
           (result["home_foul_diff"] == 7).all(), f"got {result['home_foul_diff'].tolist()}")
     check("all 3 officials on the crew get the same shared game-level differential value",
           len(result) == 3 and result["home_fta_diff"].nunique() == 1)
+
+
+def test_fit_denver_specific_home_court_uses_per_team_value_only_for_denver():
+    """Task #67: `fit_denver_specific_home_court_walk_forward` must apply
+    the per-team estimate ONLY to Denver's own home games -- every other
+    team's home games must get the EXACT plain league-wide value
+    unchanged, not a diluted per-team estimate. Builds 30 warm-up games
+    between two non-Denver teams (establishing a league-wide baseline),
+    then Denver home games with a deliberately extreme score (so Denver's
+    own per-team estimate clearly differs from league-wide if the
+    selection logic is wrong)."""
+    dates = pd.date_range("2020-10-01", periods=34, freq="D")
+    rows = []
+    for i in range(30):
+        home, away = ("X", "Y") if i % 2 == 0 else ("Y", "X")
+        rows.append({
+            "gameId": f"g{i}", "gameDate": dates[i], "season": 2020,
+            "team_home": home, "team_away": away,
+            "league_avg_pace": 100.0, "pace_shrunk_mean_home": 100.0, "pace_shrunk_mean_away": 100.0,
+            "league_avg_rtg": 110.0, "rtg_attack_rate_home": 110.0, "rtg_defense_rate_home": 110.0,
+            "rtg_attack_rate_away": 110.0, "rtg_defense_rate_away": 110.0,
+            "actual_home_score": 112, "actual_away_score": 108,
+        })
+    for i in range(30, 34):
+        rows.append({
+            "gameId": f"g{i}", "gameDate": dates[i], "season": 2020,
+            "team_home": DENVER_TEAM_ID, "team_away": "X",
+            "league_avg_pace": 100.0, "pace_shrunk_mean_home": 100.0, "pace_shrunk_mean_away": 100.0,
+            "league_avg_rtg": 110.0, "rtg_attack_rate_home": 110.0, "rtg_defense_rate_home": 110.0,
+            "rtg_attack_rate_away": 110.0, "rtg_defense_rate_away": 110.0,
+            "actual_home_score": 140, "actual_away_score": 100,  # deliberately extreme
+        })
+    # one more non-Denver game after Denver's games, to confirm non-Denver rows stay on the plain series
+    rows.append({
+        "gameId": "g34", "gameDate": dates[33] + pd.Timedelta(days=1), "season": 2020,
+        "team_home": "Y", "team_away": "X",
+        "league_avg_pace": 100.0, "pace_shrunk_mean_home": 100.0, "pace_shrunk_mean_away": 100.0,
+        "league_avg_rtg": 110.0, "rtg_attack_rate_home": 110.0, "rtg_defense_rate_home": 110.0,
+        "rtg_attack_rate_away": 110.0, "rtg_defense_rate_away": 110.0,
+        "actual_home_score": 112, "actual_away_score": 108,
+    })
+    games = pd.DataFrame(rows)
+
+    hybrid = fit_denver_specific_home_court_walk_forward(games, prior_games=100.0)
+    plain_league_wide = fit_home_court_walk_forward(games)
+    per_team = fit_team_home_court_walk_forward(games, prior_games=100.0)
+
+    denver_mask = games["team_home"] == DENVER_TEAM_ID
+    check("Denver's home games get the PER-TEAM estimate (which differs from plain league-wide, "
+          "confirming the extreme score actually moved Denver's own estimate)",
+          (hybrid[denver_mask] - per_team[denver_mask]).abs().max() < 1e-9)
+    check("Denver's per-team estimate genuinely differs from the plain league-wide value here -- "
+          "otherwise this test wouldn't distinguish the two code paths at all",
+          (per_team[denver_mask] - plain_league_wide[denver_mask]).abs().max() > 1e-6)
+    check("every NON-Denver team's home game (including g34, AFTER Denver's games) gets the "
+          "EXACT plain league-wide value, completely unaffected by Denver's own history",
+          (hybrid[~denver_mask] - plain_league_wide[~denver_mask]).abs().max() < 1e-9)
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -2276,6 +2334,7 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_fit_denver_specific_home_court_uses_per_team_value_only_for_denver()
     test_build_official_game_log_differential_computes_away_minus_home_correctly()
     test_probabilistic_predictive_shares_matches_flat_predictive_when_everyone_certain()
     test_probabilistic_predictive_shares_downweights_a_player_on_a_current_dnp_streak()

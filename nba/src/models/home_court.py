@@ -125,6 +125,36 @@ def fit_team_home_court_walk_forward(games: pd.DataFrame, prior_games: float = 2
     return np.exp(shrunk_log_mult)
 
 
+DENVER_TEAM_ID = 1610612743  # nba_api's static team_codes.ABBREV_TO_TEAM_ID["DEN"]
+
+
+def fit_denver_specific_home_court_walk_forward(games: pd.DataFrame, prior_games: float = 100.0,
+                                                 halflife_games: float = 400.0) -> pd.Series:
+    """Task #67 (external-review follow-up, MODEL_DOCUMENTATION.md Sec49):
+    Sec49's GENERAL per-team home-court sweep (`fit_team_home_court_walk_forward`
+    applied uniformly to all 30 teams) showed no real effect at any
+    shrinkage strength -- but real, peer-reviewed research (Lopez, Matthews
+    & Baumer, *Annals of Applied Statistics*, 11 seasons / 13,290 games of
+    betting-line data with hierarchical partial pooling) confirms Denver's
+    altitude edge IS a real outlier, larger than any other team's. That
+    study needed a decade+ of lower-noise market data and pooling across
+    all 30 teams just to isolate it -- Sec49's own sweep, diluted 1-in-30
+    across mostly-null teams on a 3-season evaluation slice, plausibly
+    lacked the power to detect a REAL single-team effect, not evidence
+    the effect doesn't exist.
+
+    This tests the better-powered version directly: apply
+    `fit_team_home_court_walk_forward`'s own per-team estimate ONLY to
+    Denver's home games (concentrating all statistical power on the one
+    team with real prior evidence), while every other team keeps using
+    the existing plain league-wide `fit_home_court_walk_forward` value
+    completely unchanged -- not a diluted 30-team sweep."""
+    league_wide = fit_home_court_walk_forward(games, halflife_games=halflife_games)
+    denver_specific = fit_team_home_court_walk_forward(games, prior_games=prior_games, halflife_games=halflife_games)
+    is_denver_home = games["team_home"] == DENVER_TEAM_ID
+    return league_wide.where(~is_denver_home, denver_specific)
+
+
 def fit_home_court_walk_forward(games: pd.DataFrame, halflife_games: float = 400.0) -> pd.Series:
     """Aligned-to-`games`-index Series: for each game (sorted by date), the
     trailing EWMA-fit home-court multiplier using ONLY strictly-prior games
