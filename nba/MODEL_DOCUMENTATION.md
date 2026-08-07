@@ -3990,3 +3990,60 @@ walk-forward test provides), or the correlation `validate_b2b_adjustment.py` ori
 itself mostly schedule-driven noise rather than a stable team-level trait to condition on in the
 first place. Closes out this project's B2B-lever investigation (pooled Sec-prior + per-team here)
 with no adoptable formulation found in either direction.
+
+## 65. Probabilistic-attendance predictive minutes: the fix that flips Phase 2 predictive mode from a real regression to a real, holdout-confirmed improvement (2026-08-07)
+
+Sec9.1/Sec28.2's `predictive_minutes_shares` (the deployable, non-oracle version of Phase 2's active-
+lineup adjustment) uses a HARD include/exclude union for its candidate pool: a player counts as
+"tonight's roster" if he appeared in ANY of the last `lookback_games`, full weight, no accounting for
+HOW OFTEN he actually played in that window. This real regression (task #30, +0.0146 dev / +0.0181
+holdout margin_mae vs Phase 1 alone) is exactly why `INCLUDE_LINEUP_ADJUSTMENT=False` in
+`generate_predictions.py`/`run_final_holdout_check.py` -- Phase 2 has sat disabled live since
+2026-08-01 despite oracle mode (real, known minutes) proving the underlying lineup-awareness signal
+is genuinely there.
+
+Built `lineup_rating.probabilistic_predictive_minutes_shares` (task #58's Stage-1 attendance-
+probability model, `attendance_model.predict_attendance_probability`, already existed for exactly
+this purpose but had never been bridged into the lineup-adjustment pipeline): weights each candidate's
+trailing-average minutes by `P(attend tonight)` -- derived from that player's own trailing games-
+played-fraction and current DNP-streak, decayed by `streak_decay` -- instead of a flat 1.0/0.0 union
+weight. A strict generalization of `predictive_minutes_shares` (collapses to it exactly when every
+candidate has P=1). Regression-tested: exact match to the flat version when everyone's certain to
+play, and a real downweight for a player on a live DNP streak.
+
+**Bridge test (10,467 dev games, all four minutes-resolution modes on identical games)** confirmed
+the core diagnosis directly: CURRENT predictive mode **REAL-REGRESSES vs Phase 1 alone**
+(total_mae +0.0080, margin_mae +0.0114, both CIs entirely positive) -- reproducing task #30's finding
+independently -- while oracle, semi-oracle, AND the probabilistic-predictive candidate all show REAL
+IMPROVEMENT vs Phase 1 alone. Probabilistic-predictive vs the CURRENT predictive mechanism directly:
+REAL IMPROVEMENT on both total_mae (-0.0126) and margin_mae (-0.0193). It still real-regresses vs
+semi-oracle (knows true attendance) by design -- closes part of the oracle-ceiling gap, not all of it.
+
+**Stage 1 (recent-dev slice, n=3,621), `streak_decay` swept 0.5/0.6/0.7/0.8/0.9 vs Phase 1 baseline**:
+0.5-0.8 all clear (REAL IMPROVEMENT on total_mae AND margin_mae, su noise, no real regression
+anywhere); 0.9 shows a real su regression. streak_decay=0.5 picked (largest effect, delta=-0.0073
+total_mae). **Stage 2 (full dev range, n=10,467)**: confirmed -- total_mae -0.0069, margin_mae
+-0.0117, both CIs entirely negative, su noise. Passes both stages cleanly.
+
+**One-time confirmatory holdout read** (`run_probabilistic_predictive_holdout_check.py`, full
+dev+holdout stints refit, n=12,874 games total): Check 1 (candidate's own dev-vs-holdout gap) flags
+margin_mae as a "REAL REGRESSION -- VETO" (dev 10.3762 -> holdout 11.2022) -- but this is Sec9.5's
+already-diagnosed, real scoring-era drift (mean points/team-game rose ~13 points 2015-16 to 2025-26),
+a pre-existing Phase 1 characteristic every configuration inherits, not something this candidate
+introduces (the Phase 1 baseline's own holdout margin_mae, 11.2138, is nearly identical). **Check 2,
+the decision-relevant test** (candidate vs Phase 1 baseline, HOLDOUT GAMES ONLY, n=2,407, isolating
+the candidate's own incremental contribution from that inherited drift exactly as Sec9.4 did for the
+original Phase 2 adoption): **REAL IMPROVEMENT on total_mae (-0.0108, CI entirely negative) AND
+margin_mae (-0.0116, CI entirely negative), su noise.** Logged as
+`phase2_probabilistic_predictive_vs_phase1`.
+
+**Verdict: ADOPT at the mechanism level -- this is a real, holdout-confirmed fix for the exact defect
+that got Phase 2 predictive mode disabled.** Not yet wired into the live pipeline as of this writing:
+`generate_predictions.py`'s actual live active-lineup resolver (`active_roster.resolve_active_lineup`)
+is a structurally different function from the backtest's `predictive_minutes_shares` -- it already has
+a real injury signal (RotoWire Out/Doubtful) the backtest has to proxy for with trailing-attendance
+history, so bridging the probabilistic weighting into it (soft-weighting the NON-excluded pool by
+attendance consistency, on top of RotoWire's hard exclusion, not instead of it) is a distinct,
+not-yet-done design/implementation step, and flipping `INCLUDE_LINEUP_ADJUSTMENT` back to `True` is a
+live-production behavior change reversing an explicit prior decision (task #30) -- flagged for the
+user before proceeding rather than auto-deployed silently.

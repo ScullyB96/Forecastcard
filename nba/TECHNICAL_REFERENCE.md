@@ -1299,17 +1299,26 @@ fix.
    predictive target. Don't re-open this category again without something structurally different from
    "a smarter team-level rate model" — e.g. a possession-level/player-level rebounding model rather
    than a team-aggregate one, which is a much larger scope change, not a data-availability gap anymore.
-7. **Phase 2 (RAPM-lite lineup adjustment) is disabled and should stay disabled for now — but the
-   Stage-1 attendance signal that blocked re-enabling is BUILT AND VALIDATED (§6.4, 2026-08-06).**
-   A semi-oracle decomposition proved the ENTIRE predictive-mode gap is attendance-prediction error
-   (real, −0.0424 margin_mae) — the share-redistribution half is already statistically
-   indistinguishable from oracle (NOISE). `attendance_model.py`'s probabilistic signal
-   (games-played fraction decayed by DNP-streak length) is a decisive real improvement over the
-   current binary union rule (Brier score roughly halved, validated directly against real
-   attendance). Still not wired into a live path — composing it with the share step and clearing a
-   proper two-stage-then-holdout adoption gate for actually re-enabling Phase 2 is the remaining
-   real work, but the previously-open research question (does a better Stage-1 signal even exist)
-   is now settled, not speculative.
+7. **Phase 2 (RAPM-lite lineup adjustment) predictive mode is MECHANISM-LEVEL ADOPTED (2026-08-07,
+   MODEL_DOCUMENTATION.md Sec65) but still `INCLUDE_LINEUP_ADJUSTMENT = False` live — the code
+   change is a distinct remaining step, deliberately not auto-deployed.** §6.4's Stage-1 attendance
+   signal (`attendance_model.predict_attendance_probability`, built 2026-08-06) has now been bridged
+   into the share step: `lineup_rating.probabilistic_predictive_minutes_shares` weights trailing
+   minutes by attendance probability instead of a hard union. Cleared the full two-stage-then-holdout
+   gate: Stage 1 (streak_decay 0.5-0.8 all real improvements, 0.5 picked), Stage 2 (full dev range,
+   confirmed), and the one-time confirmatory holdout read (`run_probabilistic_predictive_holdout_check.py`)
+   came back NET POSITIVE — candidate vs Phase 1 baseline on HOLDOUT-ONLY games shows REAL IMPROVEMENT
+   on both total_mae (−0.0108) and margin_mae (−0.0116), isolated from the already-known Sec9.5
+   scoring-era-drift gap the same way Sec9.4 isolated the original Phase 2 adoption. This is a real,
+   holdout-confirmed fix for the exact regression that got Phase 2 predictive mode disabled (item 30
+   in the task log). **What's NOT done yet**: `generate_predictions.py`'s actual live resolver
+   (`active_roster.resolve_active_lineup`) is a different function from the backtest's
+   `predictive_minutes_shares` — it already has a real RotoWire injury signal the backtest has to
+   proxy for with trailing-attendance history, so bridging probabilistic weighting into it (soft-
+   weighting the NON-RotoWire-excluded pool by attendance consistency) is a distinct implementation
+   step, not a one-line swap. Flipping `INCLUDE_LINEUP_ADJUSTMENT` back to `True` reverses an
+   explicit, deliberate prior production decision (item 30) — flagged to the user rather than
+   auto-deployed silently once validated.
 8. **`cross_season_weight`'s stl/blk results for team_stat_rates are the least statistically robust
    adopted change this session** (§7.5) — they don't survive a conservative Bonferroni correction,
    though they're not reversed to a regression either. As next season's real games accumulate, this
