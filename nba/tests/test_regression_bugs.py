@@ -38,6 +38,7 @@ from src.models.prop_distribution import family_for_mean, fit_count_family_mean_
 from src.models.attendance_model import attendance_features_for_game, predict_attendance_probability
 from src.models.rest_schedule import add_schedule_density
 from src.models.travel_fatigue import add_travel_fatigue
+from src.models.clutch_rating import add_trailing_clutch_deviation, identify_clutch_stints, team_game_clutch_net_rating
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
@@ -488,6 +489,54 @@ def test_add_travel_fatigue_computes_distance_and_timezone_shift_from_own_prior_
           abs(result["travel_km"].iloc[2] - result["travel_km"].iloc[1]) < 1.0)
     check("NYC -> LA crosses 3 zones the OTHER direction (Eastern=0 -> Pacific=3, shift=+3)",
           result["tz_shift"].iloc[2] == 3, f"got {result['tz_shift'].iloc[2]}")
+
+
+def test_identify_clutch_stints_requires_both_late_AND_close():
+    """Task #61: `identify_clutch_stints` must require BOTH conditions --
+    late in the game (within the trailing 5 game-minutes) AND close
+    (margin within 5 points) -- neither alone should qualify. Builds 4
+    stints in a single regulation game: early+close, late+blowout,
+    late+close (the only real clutch stint), and an OT stint that's
+    close (confirms OT games use their own actual total length, not a
+    fixed regulation-length assumption)."""
+    stints = pd.DataFrame({
+        "gameId": ["g1", "g1", "g1", "g1"],
+        "startTenths": [10000, 27000, 28500, 29500],  # regulation ends at 28800; OT stint starts after
+        "endTenths": [10500, 27500, 28800, 30000],
+        "marginBeforeStint": [2, 20, 3, 1],
+    })
+    result = identify_clutch_stints(stints)
+    check("early + close is NOT clutch (not late enough)", not result["is_clutch"].iloc[0])
+    check("late + blowout is NOT clutch (not close enough)", not result["is_clutch"].iloc[1])
+    check("late + close IS clutch (both conditions met)", result["is_clutch"].iloc[2])
+    check("an OT stint (close, near the game's own actual end) IS clutch -- uses this game's own "
+          "real total length, not a fixed regulation-only assumption", result["is_clutch"].iloc[3])
+
+
+def test_add_trailing_clutch_deviation_skips_nan_games_and_requires_a_minimum_sample():
+    """Task #61: `add_trailing_clutch_deviation` must (a) SKIP games with
+    no clutch possessions (NaN clutch_net_rtg) when computing the
+    trailing average -- not treat a blowout's absence of clutch data as a
+    deviation of 0 -- and (b) stay NaN until `min_prior_clutch_games`
+    real clutch games have accumulated, not report an unstable 1-game
+    estimate. Builds a team with clutch deviations of +10 (game 1),
+    then two blowout games with NO clutch data (NaN), then +20 (game 4)
+    -- the trailing average feeding game 5 must be based on games 1 and 4
+    ONLY (mean=+15), not diluted by the two NaN blowouts."""
+    dates = pd.date_range("2020-10-01", periods=5, freq="3D")
+    log = pd.DataFrame({
+        "team": ["A"] * 5, "season": [2020] * 5, "gameDate": dates,
+        "clutch_net_rtg": [110.0, np.nan, np.nan, 120.0, np.nan],
+        "overall_net_rtg": [100.0, 100.0, 100.0, 100.0, 100.0],
+    })
+    result = add_trailing_clutch_deviation(log, min_prior_clutch_games=2)
+    check("with only 1 prior real clutch game (before game 4), trailing deviation stays NaN "
+          "(min_prior_clutch_games=2 not yet met)",
+          pd.isna(result["trailing_clutch_deviation"].iloc[3]), f"got {result['trailing_clutch_deviation'].iloc[3]}")
+    check("by game 5, exactly 2 real clutch games (1 and 4) have accumulated -- trailing deviation "
+          "is their mean (+10, +20 -> +15), NOT diluted by the 2 intervening NaN blowout games",
+          abs(result["trailing_clutch_deviation"].iloc[4] - 15.0) < 1e-9,
+          f"got {result['trailing_clutch_deviation'].iloc[4]}")
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -2022,6 +2071,8 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_identify_clutch_stints_requires_both_late_AND_close()
+    test_add_trailing_clutch_deviation_skips_nan_games_and_requires_a_minimum_sample()
     test_add_travel_fatigue_computes_distance_and_timezone_shift_from_own_prior_game_only()
     test_add_schedule_density_counts_only_strictly_prior_games_in_window()
     test_attendance_features_counts_dnp_streak_from_the_most_recent_game_backward()

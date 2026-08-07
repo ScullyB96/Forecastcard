@@ -1377,6 +1377,14 @@ fix.
     one around). Plausible explanation: pro travel is heavily buffered (charters, routine) and
     whatever residual toll exists may already be implicitly absorbed into a team's own recent-
     performance-based walk-forward rating.
+12d. Clutch-time performance (2026-08-06): built `clutch_rating.py` (identifies close-and-late
+    stints from `rapm_lite.prepare_stints`'s existing margin/timing data, no new ingest) to test the
+    well-known "is clutch skill persistent" sports-analytics question. A team's own trailing clutch
+    net-rating deviation doesn't even predict its OWN future clutch deviation (r=+0.018, p=0.50) --
+    the most basic test of persistence, before even asking about full-game prediction — and shows no
+    real correlation with next-game full-game residual either (r=-0.021, p=0.076; tercile-threshold
+    view p=0.35). Confirms the standard prior (clutch performance is mostly noise/regression-to-mean)
+    empirically rather than assuming it. Closed at the diagnostic stage.
 
 ### P3 — new-season-specific hygiene (cheap, mechanical, worth doing once at tip-off)
 

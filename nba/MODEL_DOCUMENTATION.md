@@ -3669,3 +3669,38 @@ already captures a lot of situational context implicitly" pattern. `team_locatio
 `travel_fatigue.py` remain available, unused by any live path, should a future check want a
 different formulation (e.g. cumulative trip length across a road swing, rather than one-hop
 distance from the immediately-prior game).
+
+## 56. Clutch-time performance: no real persistent skill found -- closed at the diagnostic stage (2026-08-06)
+
+Third of the lower-priority parked items: is there a team-level "clutch skill" (performing above/
+below one's own overall level specifically in close-and-late situations) not already captured by a
+team's overall walk-forward rating -- a well-known sports-analytics question generally found to be
+mostly noise/regression-to-the-mean, tested empirically rather than assumed.
+
+Built `clutch_rating.py`, reusing `rapm_lite.prepare_stints`'s existing `marginBeforeStint` and
+`garbage_time.py`'s per-game elapsed-time convention (no new ingest): `identify_clutch_stints`
+(within 5 points AND the trailing 5 game-minutes of that game's own real total length, correctly
+handling OT), `team_game_clutch_net_rating` (points per 100 clutch-only possessions, NaN for a game
+with zero clutch possessions -- ~81% of dev games never reach one), and
+`add_trailing_clutch_deviation` (a team's own trailing average of clutch_net_rtg minus its
+overall walk-forward net rating, skip-NaN, requiring >=10 real prior clutch games before reporting a
+value). Regression-tested (clutch requires BOTH late AND close; skip-NaN trailing average with a
+minimum-sample gate).
+
+**Diagnostic (full dev range, n=7,224 team-side rows with >=10 prior real clutch games)**:
+
+```
+trailing_clutch_deviation vs NEXT game's full-game residual:        r=-0.0209  p=0.076
+top vs bottom tercile of trailing_clutch_deviation:                 delta=-0.309  t=-0.932  p=0.35
+(self-consistency) trailing_clutch_deviation vs THIS game's OWN
+  clutch deviation (does clutch skill even predict itself?):        r=+0.0182  p=0.495
+```
+
+**No real effect anywhere** -- the borderline continuous correlation (p=0.076) doesn't survive the
+threshold view, and most tellingly, a team's own trailing clutch deviation doesn't even predict its
+OWN next clutch performance (p=0.495) -- the most basic possible test of "is this a persistent skill
+at all," independent of whether it would help full-game prediction. This directly confirms the
+well-known sports-analytics prior (clutch performance is mostly noise/regression-to-the-mean) rather
+than assuming it. **Closed at the diagnostic stage, no adoption test attempted** -- like travel/
+timezone fatigue (Sec55), there's no real signal here to build a correction around.
+`clutch_rating.py` remains available, unused by any live path.
