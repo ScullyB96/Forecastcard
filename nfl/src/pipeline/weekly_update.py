@@ -50,7 +50,7 @@ from src.models.player_usage import ShareEngine, TdRateEngine, build_player_week
 from src.models.qb_adjustment import QbRatingEngine, build_qb_week_table, build_starter_sequence
 from src.models.qb_passing_stats import build_qb_passing_engines, presumed_starter_qb_id, project_passing_stats
 from src.models.ratings import PowerRatingEngine, build_dataset
-from src.models.weather_adjustment import apply_wind_adjustment, fit_wind_adjustment
+from src.models.weather_adjustment import apply_weather_adjustment, fit_weather_adjustment
 from src.utils.paths import DATA_PROCESSED, DATA_RAW
 from src.utils.stats import fit_linear
 
@@ -353,10 +353,10 @@ if __name__ == "__main__":
     print("rebuilding QB passing statline engines (completions, yards, TDs, INTs)...")
     qb_passing_engines = build_qb_passing_engines(weekly)
 
-    print("fitting wind adjustment (QB yards/attempt, WR/TE yards/target)...")
-    sched_reg_wind = schedules[schedules["game_type"] == "REG"][["game_id", "season", "week", "home_team", "away_team", "wind", "roof"]]
-    wind_home = sched_reg_wind.rename(columns={"home_team": "recent_team"})[["season", "week", "recent_team", "wind", "roof"]]
-    wind_away = sched_reg_wind.rename(columns={"away_team": "recent_team"})[["season", "week", "recent_team", "wind", "roof"]]
+    print("fitting weather adjustment (QB yards/attempt, WR/TE yards/target -- wind + temp, jointly)...")
+    sched_reg_wind = schedules[schedules["game_type"] == "REG"][["game_id", "season", "week", "home_team", "away_team", "wind", "temp", "roof"]]
+    wind_home = sched_reg_wind.rename(columns={"home_team": "recent_team"})[["season", "week", "recent_team", "wind", "temp", "roof"]]
+    wind_away = sched_reg_wind.rename(columns={"away_team": "recent_team"})[["season", "week", "recent_team", "wind", "temp", "roof"]]
     team_game_wind = pd.concat([wind_home, wind_away])
 
     qb_weeks_wind = weekly[(weekly["season_type"] == "REG") & (weekly["attempts"] >= 5)].merge(
@@ -365,14 +365,14 @@ if __name__ == "__main__":
     league_ypa = qb_weeks_wind["passing_yards"].sum() / qb_weeks_wind["attempts"].sum()
     ypa_wind_engine = TdRateEngine(league_rate=league_ypa, prior_weight=150.0)
     ypa_wind_result = ypa_wind_engine.run_walk_forward(qb_weeks_wind, "passing_yards", "attempts")
-    qb_wind_coefs = fit_wind_adjustment(ypa_wind_result, "passing_yards", "attempts", "pregame_passing_yards_rate")
-    print(f"  QB yards/attempt wind coefs (intercept, slope): {qb_wind_coefs}")
+    qb_weather_coefs = fit_weather_adjustment(ypa_wind_result, "passing_yards", "attempts", "pregame_passing_yards_rate")
+    print(f"  QB yards/attempt weather coefs (intercept, wind_slope, temp_slope): {qb_weather_coefs}")
 
     shares_wind = shares.merge(team_game_wind, on=["season", "week", "recent_team"], how="left")
     ypt_wind_engine = TdRateEngine(league_rate=league_ypt, prior_weight=80.0)  # fresh instance -- do NOT reuse ypt_engine, it's already been walked forward once for real prop predictions
     wr_wind_result = ypt_wind_engine.run_walk_forward(shares_wind[shares_wind["targets"] > 0], "receiving_yards", "targets")
-    wr_wind_coefs = fit_wind_adjustment(wr_wind_result, "receiving_yards", "targets", "pregame_receiving_yards_rate")
-    print(f"  WR/TE yards/target wind coefs (intercept, slope): {wr_wind_coefs}")
+    wr_weather_coefs = fit_weather_adjustment(wr_wind_result, "receiving_yards", "targets", "pregame_receiving_yards_rate")
+    print(f"  WR/TE yards/target weather coefs (intercept, wind_slope, temp_slope): {wr_weather_coefs}")
 
     print("rebuilding pass rate...")
     pbp_seasons = covered["pbp"]
@@ -647,7 +647,7 @@ if __name__ == "__main__":
             "sim_home_moneyline": sim_home_moneyline, "sim_away_moneyline": sim_away_moneyline,
             "sim_total_std": sim_total_std,
             "home_cb_flag": home_cb_flag, "away_cb_flag": away_cb_flag, "qb_swap_flag": qb_swap_flag,
-            "wind": getattr(g, "wind", None), "roof": getattr(g, "roof", None),
+            "wind": getattr(g, "wind", None), "roof": getattr(g, "roof", None), "temp": getattr(g, "temp", None),
         })
 
     games_df = pd.DataFrame(game_rows)
@@ -857,11 +857,11 @@ if __name__ == "__main__":
             )
             if starter_id is not None:
                 passing = project_passing_stats(starter_id, pass_attempts, qb_passing_engines)
-                # wind adjustment: validated (p=0.0022) -- no-op indoors or when wind isn't
-                # known yet (far-in-advance predictions; this is the main thing a
-                # near-kickoff refresh gains once a real forecast exists)
-                adj_ypa = apply_wind_adjustment(
-                    qb_passing_engines["passing_yards"].predict(starter_id), g["wind"], g["roof"], qb_wind_coefs
+                # weather adjustment (wind + temp, fit jointly): validated (p=0.0086) -- no-op
+                # indoors or when weather isn't known yet (far-in-advance predictions; this is
+                # the main thing a near-kickoff refresh gains once a real forecast exists)
+                adj_ypa = apply_weather_adjustment(
+                    qb_passing_engines["passing_yards"].predict(starter_id), g["wind"], g["temp"], g["roof"], qb_weather_coefs
                 )
                 passing["proj_passing_yards"] = round(adj_ypa * pass_attempts, 1)
                 starter_row = current_roster[current_roster["player_id"] == starter_id]
@@ -895,7 +895,7 @@ if __name__ == "__main__":
                 proj_targets = pass_attempts * tgt_share
                 proj_carries = rush_attempts * carry_share
                 proj_receptions = proj_targets * catch_rate_engine.predict(pid)
-                adj_ypt = apply_wind_adjustment(ypt_engine.predict(pid), g["wind"], g["roof"], wr_wind_coefs)
+                adj_ypt = apply_weather_adjustment(ypt_engine.predict(pid), g["wind"], g["temp"], g["roof"], wr_weather_coefs)
                 proj_rec_yards = proj_targets * adj_ypt
                 proj_rush_yards = proj_carries * ypc_engine.predict(pid)
                 proj_rec_tds = proj_targets * rec_td_engine.predict(pid)

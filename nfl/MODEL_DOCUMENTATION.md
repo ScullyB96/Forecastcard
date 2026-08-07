@@ -38,7 +38,8 @@ target/carry share, TD probability, yards, receptions, and full QB passing statl
 every rostered skill player, with validated position-specific injury reallocation (a
 ruled-out RB's carries redistribute to the backfield; a ruled-out WR/TE's targets do not),
 a draft-capital rookie prior, and a Clay-projection fallback for players not yet covered by
-draft data. A validated wind adjustment activates once real forecasts exist. An automated
+draft data. A validated weather adjustment (wind + temperature, fit jointly) activates once
+real forecasts exist. An automated
 weekly + gameday-refresh pipeline regenerates everything and publishes a shareable UI.
 
 **Current validated performance** (margin, held-out TEST=2022-2025, walk-forward, no
@@ -115,7 +116,7 @@ Layer 2/3: player props
   ├── QB passing statline (completions/yards/TDs/INTs)       (qb_passing_stats.py)
   ├── injury/PUP/IR detection + position-specific reallocation (injury_reallocation.py)
   ├── rookie fallback (Clay projections, no NFL history)     (injury_reallocation.py)
-  └── wind adjustment (QB YPA, WR/TE YPT)                    (weather_adjustment.py)
+  └── weather adjustment: wind + temp, jointly (QB YPA, WR/TE YPT)  (weather_adjustment.py)
         │
         ▼
 props_{season}_wk{week}.parquet  +  full per-game statlines printed
@@ -1162,7 +1163,7 @@ regression, not real signal. Clean null; not shipped.
 
 ---
 
-## 8. Weather adjustment (`src/models/weather_adjustment.py`, added 2026-07)
+## 8. Weather adjustment (`src/models/weather_adjustment.py`, added 2026-07, extended 2026-08)
 
 Distinct from §7.4's rejected total-points wind test. Tested wind's effect on **per-touch
 efficiency rates** specifically (QB yards/attempt, WR/TE yards/target, QB completion rate),
@@ -1181,21 +1182,53 @@ impossible (real QB yards/attempt is ~7). Pre-existing mislabel inherited uncrit
 `MODEL_ARCHITECTURE_REVIEW.md`; the underlying fit/validation/shipped adjustment itself was
 never wrong, only its units label here and in `weather_adjustment.py`'s docstring.
 
-`fit_wind_adjustment()` fits `rate_residual = intercept + slope*wind` on outdoor games only
-(`roof=="outdoors"`), refit fresh each pipeline run on the full available history (2018-
-current). `apply_wind_adjustment()` is a deliberate no-op indoors or when wind isn't known
-yet (NaN — real forecasts aren't reliable/present in the schedule data until close to
-kickoff). **This is why the wind adjustment currently does nothing for predictions made
-weeks in advance** — it only activates once a game is close enough that `nfl_data_py`'s
-schedule export has a real forecast, which is exactly the reason the §11.2 gameday-refresh
-scheduled task exists.
+### 8.1 Temperature added (2026-08) — a second real, independent weather signal
 
-A real, self-caught bug during this investigation: `np.polyfit(x, y, 1)[::-1]` — the same
-slope/intercept-swap mistake documented in §12.2, made a **second time** in this exact
+Auditing what's shipped vs. what's actually available in the raw schedules data surfaced a
+real gap: `temp` (real ambient temperature, same source table as `wind`) has been sitting
+unused since this section was built — only `wind` was ever wired up. Same physical intuition
+as wind (cold reduces grip/ball feel for passers and receivers), tested the same way:
+`src/models/validate_temperature_effect.py`, walk-forward TdRateEngine (genuinely no-lookahead
+by construction) fit on TRAIN=2018-2021, scored on TEST=2022-2025.
+
+Wind and temperature have a real but weak negative correlation across real outdoor games
+(r=-0.098) — colder games trend very slightly windier. Fit **jointly**
+(`rate_residual = intercept + wind_slope·wind + temp_slope·temp`), not as two independent
+univariate corrections, so temperature's own contribution is isolated from wind bleeding
+through that correlation:
+
+| Target | Temp alone (univariate) | Temp + wind (joint) |
+|---|---|---|
+| QB projected passing yards | MAE 44.72→44.13 (t=+3.59, p=0.0163) | MAE 44.72→**44.00** (temp t=+3.39 controlling for wind; wind t=-3.57; p=0.0086) |
+| WR/TE projected receiving yards | MAE 13.56→13.32 (t=+2.36, p<0.0001) | MAE 13.56→**13.31** (temp t=+2.19 controlling for wind; wind t=-3.31; p<0.0001) |
+
+Temperature survives controlling for wind on both statlines (t stays >2 in both joint fits) —
+real, independent signal, not wind bleeding through the correlation — and the joint model
+beats either variable's own univariate-only correction on both. **Shipped**:
+`fit_wind_adjustment()`/`apply_wind_adjustment()` generalized to
+`fit_weather_adjustment()`/`apply_weather_adjustment()`, fitting wind and temperature jointly;
+`weekly_update.py` wired accordingly (`qb_weather_coefs`/`wr_weather_coefs`, refit fresh each
+run on full available history, same convention as the original wind-only version). Verified on
+a live run: zero duplicate props, sane passing-yards range (190–278 across 32 starters),
+`build_predictions_page.py` runs cleanly. Currently a no-op for the live Week 1 2026 slate
+(confirmed: `wind`/`temp` are both NaN for every game this far in advance — real forecasts
+aren't in the schedule data yet) — same activation timing as wind always had, see below.
+
+`fit_weather_adjustment()` fits the joint model on outdoor games only (`roof=="outdoors"`),
+refit fresh each pipeline run on the full available history. `apply_weather_adjustment()` is a
+deliberate no-op indoors or when either variable isn't known yet (NaN — real forecasts aren't
+reliable/present in the schedule data until close to kickoff; confirmed directly that wind and
+temp are always missing together, never independently, so a single "weather known" gate is
+correct). **This is why the weather adjustment currently does nothing for predictions made
+weeks in advance** — it only activates once a game is close enough that the schedule export has
+a real forecast, which is exactly the reason the §11.2 gameday-refresh scheduled task exists.
+
+A real, self-caught bug during the original wind investigation: `np.polyfit(x, y, 1)[::-1]` —
+the same slope/intercept-swap mistake documented in §12.2, made a **second time** in this exact
 investigation, which initially made the fitted adjustment look actively harmful (MAE nearly
-doubled, 2.14→5.78 for high-wind games) before the sign was caught and fixed against the
-raw correlation. Lesson: always sanity-check a fitted sign against the raw correlation
-before trusting any `np.polyfit`-based result in this codebase.
+doubled, 2.14→5.78 for high-wind games) before the sign was caught and fixed against the raw
+correlation. Lesson: always sanity-check a fitted sign against the raw correlation before
+trusting any `np.polyfit`-based result in this codebase.
 
 ---
 
@@ -1835,7 +1868,7 @@ offseason bootstrap, unrelated — fixed a stale cross-reference here 2026-07.)
 The orchestrator. Refreshes all data with `force=True` every run (a few minutes of runtime
 buys a lot of robustness — no partial-file merge logic to get wrong), rebuilds every engine
 from scratch via walk-forward (Layer 1, QB ratings, injury flags, player usage/TD-rate/
-yards/receptions, QB passing engines, market blend, wind adjustment, pass rate), auto-
+yards/receptions, QB passing engines, market blend, weather adjustment, pass rate), auto-
 detects the next unplayed week (`find_next_week()`), and predicts margin/total + full player
 props for it. `current_nfl_season()` handles the season-year convention (a "2026 season"
 runs Sep 2026-Feb 2027; games Jan-Jun belong to the *prior* season year).
@@ -2493,6 +2526,17 @@ per this project's standing rule on acquiring new external data.
 - Travel distance / time zone effects
 - Divisional-game effect
 - Clinched/eliminated rest effect (weeks 17-18)
+- **General rest differential** (`src/models/validate_rest_effect.py`, 2026-08) — real
+  `home_rest`/`away_rest` data (days since each team's last game, 4-17 range) already sitting
+  in the schedules table, never used; distinct from the clinched/eliminated test above (that's
+  about teams resting starters in a lost season, this is the general short-week-vs-bye-week
+  mechanism that applies to every game, every week). Clean null on MARGIN (TRAIN-fit
+  `rest_diff` slope t=-1.23; applying the TRAIN-fit correction to TEST *increases* MAE,
+  9.4945→9.5376) and on TOTAL (t=+0.94 signed, t=+0.23 for a symmetric "either team
+  short-rested" flag; no improvement). Signed bias on the short-week subset (n=250, CI
+  crosses 0) and long-rest/bye subset (n=251, CI crosses 0) both show no real effect either.
+  Real, already-available data — the market appears to already price in known rest
+  situations (byes and short weeks are scheduled long in advance), leaving no residual edge.
 
 ### 13.3 INVESTIGATED, NOT BUILT (real limitation, not a rejected hypothesis)
 - **Real player-prop market data**: unlike game-level spread/total (where real data was
