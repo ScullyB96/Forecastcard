@@ -37,6 +37,7 @@ from src.models.prop_distribution import MIN_PLAYER_VARIANCE, fit_continuous_fam
 from src.models.prop_distribution import family_for_mean, fit_count_family_mean_dependent
 from src.models.attendance_model import attendance_features_for_game, predict_attendance_probability
 from src.models.rest_schedule import add_schedule_density
+from src.models.travel_fatigue import add_travel_fatigue
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
@@ -458,6 +459,35 @@ def test_add_schedule_density_counts_only_strictly_prior_games_in_window():
           result[col].iloc[2] == 2, f"got {result[col].iloc[2]}")
     check("game 4 (well-rested, 8 days after game 3) has 0 games in its trailing 4-day window",
           result[col].iloc[3] == 0, f"got {result[col].iloc[3]}")
+
+
+def test_add_travel_fatigue_computes_distance_and_timezone_shift_from_own_prior_game_only():
+    """Task #60: `add_travel_fatigue`'s `travel_km`/`tz_shift` must reflect
+    the distance/timezone change from THIS TEAM's own immediately-prior
+    game location, walk-forward safe (first-ever game gets NaN, not a
+    fabricated 0). Builds LAL playing: game 1 at home (LA), game 2 away at
+    NYK (a real, well-known ~3,900km cross-country trip spanning 3
+    timezone zones), game 3 back home in LA (the return trip)."""
+    from src.ingest.team_codes import ABBREV_TO_TEAM_ID
+    lal_id, nyk_id, gsw_id = ABBREV_TO_TEAM_ID["LAL"], ABBREV_TO_TEAM_ID["NYK"], ABBREV_TO_TEAM_ID["GSW"]
+    dates = pd.date_range("2020-11-01", periods=3, freq="4D")
+    log = pd.DataFrame({
+        "team": [lal_id, lal_id, lal_id], "opponent": [gsw_id, nyk_id, nyk_id],
+        "is_home": [True, False, True], "season": [2020, 2020, 2020], "gameDate": dates,
+    })
+    result = add_travel_fatigue(log)
+    check("LAL's first-ever game has NaN travel_km (no prior game to compare against)",
+          pd.isna(result["travel_km"].iloc[0]), f"got {result['travel_km'].iloc[0]}")
+    check("LAL's first-ever game has NaN tz_shift",
+          pd.isna(result["tz_shift"].iloc[0]))
+    check("LA -> NYC (game 2) is a real, substantial ~3,900km trip",
+          3500 < result["travel_km"].iloc[1] < 4300, f"got {result['travel_km'].iloc[1]}")
+    check("LA -> NYC crosses exactly 3 timezone zones eastward (Pacific=3 -> Eastern=0, shift=-3)",
+          result["tz_shift"].iloc[1] == -3, f"got {result['tz_shift'].iloc[1]}")
+    check("NYC -> LA (game 3, the return trip) is the same real distance as game 2",
+          abs(result["travel_km"].iloc[2] - result["travel_km"].iloc[1]) < 1.0)
+    check("NYC -> LA crosses 3 zones the OTHER direction (Eastern=0 -> Pacific=3, shift=+3)",
+          result["tz_shift"].iloc[2] == 3, f"got {result['tz_shift'].iloc[2]}")
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -1992,6 +2022,7 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_add_travel_fatigue_computes_distance_and_timezone_shift_from_own_prior_game_only()
     test_add_schedule_density_counts_only_strictly_prior_games_in_window()
     test_attendance_features_counts_dnp_streak_from_the_most_recent_game_backward()
     test_predict_attendance_probability_decays_with_streak_and_matches_fraction_at_streak_zero()

@@ -1368,6 +1368,15 @@ fix.
     full-dev-range scale. Not adopted. Now two structurally different rest/fatigue formulations have
     both hit this wall — don't re-attempt a third without a genuinely different mechanism (e.g. a
     per-team fatigue-sensitivity parameter rather than one league-wide flat correction).
+12c. Travel distance / timezone-zone fatigue (2026-08-06): built `team_locations.py` (static 30-team
+    arena lat/lon + simplified 4-zone timezone table, same public-fact convention as `team_codes.py`)
+    and `travel_fatigue.add_travel_fatigue` (haversine distance + signed timezone-zone shift from a
+    team's own immediately-prior game). Unlike items 12/12b, this one shows NO real correlation at
+    all — every view tested (raw distance, timezone shift, long-haul/big-shift thresholds) has
+    p>0.16, most p>0.5. Closed at the diagnostic stage; no adoption test attempted (nothing to build
+    one around). Plausible explanation: pro travel is heavily buffered (charters, routine) and
+    whatever residual toll exists may already be implicitly absorbed into a team's own recent-
+    performance-based walk-forward rating.
 
 ### P3 — new-season-specific hygiene (cheap, mechanical, worth doing once at tip-off)
 

@@ -3633,3 +3633,39 @@ just repeats) Sec32's conclusion: rest/fatigue-related domain signals in this da
 real but too-noisy-to-exploit information at this sample size, across at least two structurally
 different formulations now (single-game B2B, multi-game density). `add_schedule_density` remains
 available in `rest_schedule.py`, unused by any live path.
+
+## 55. Travel distance / timezone-zone fatigue: no real signal found at all -- closed at the diagnostic stage (2026-08-06)
+
+Second of the lower-priority parked items. Required new static reference data (no live ingest):
+`src/ingest/team_locations.py`, a fixed 30-team home-arena lat/lon + simplified 4-zone US timezone
+bucket table (same "static, no-relocation-in-window fact table" convention as `team_codes.py` --
+public knowledge, not fetched). Built `travel_fatigue.add_travel_fatigue`: per team-game,
+`travel_km` (haversine distance) and `tz_shift` (signed timezone-zone change) from that team's own
+immediately-prior game location, walk-forward safe (a team's own row sequence, no cross-team leak
+risk). Regression-tested against a real, well-known LA-to-NYC round trip (~3,900km, 3 timezone
+zones each direction).
+
+**Diagnostic (residual-first discipline, full dev range, n=21,206 team-side rows with a real prior
+location)**: NO real correlation found on ANY view tested --
+
+```
+travel_km vs residual:        r=+0.0040  p=0.56
+abs(tz_shift) vs residual:    r=+0.0044  p=0.52
+signed tz_shift vs residual:  r=-0.0096  p=0.16
+>=2500km trip vs shorter:     delta=+0.157  t=+0.481  p=0.63
+>=2 timezone-zone shift:      delta=+0.220  t=+0.794  p=0.43
+```
+
+Every p-value is far above any reasonable significance threshold -- unlike B2B (Sec32) and schedule
+density (Sec54), which both showed a REAL diagnostic correlation before failing adoption, travel/
+timezone fatigue doesn't even clear the FIRST bar. **Closed at the diagnostic stage, no adoption
+test attempted** -- there's nothing here to build an adoption test around. Plausible explanation:
+NBA travel is already fairly compressed by professional standards (chartered flights, standardized
+pregame routines, a relatively small geographic footprint compared to e.g. MLB's 162-game season)
+and any real fatigue effect may already be substantially absorbed into a team's own recent-performance-based
+walk-forward rating (a team that travels a lot is also the team whose recent results already reflect
+whatever toll that took) -- consistent with this project's standing "team's own trailing rating
+already captures a lot of situational context implicitly" pattern. `team_locations.py`/
+`travel_fatigue.py` remain available, unused by any live path, should a future check want a
+different formulation (e.g. cumulative trip length across a road swing, rather than one-hop
+distance from the immediately-prior game).
