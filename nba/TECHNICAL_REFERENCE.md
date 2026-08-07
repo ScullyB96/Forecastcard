@@ -1429,6 +1429,15 @@ fix.
     specific home-court) — `fetch_officials.py`/`referee_rates.py` remain available as reusable
     infrastructure, and the officials data itself is a genuine new asset for any future
     referee-related question.
+12h. **Follow-up (2026-08-07): tried the literature-preferred home-away foul/FT DIFFERENTIAL
+    formulation instead of total fouls — still no signal.** `build_official_game_log_differential`
+    computes (away team's total) − (home team's total) fouls/FTA per game, correlated against MARGIN
+    residual specifically (not total, since a bias effect should show up in who benefits). Result:
+    weaker than even the total-based diagnostic that at least cleared Stage 1/2 before failing holdout
+    — r=-0.0121/+0.0084, both p>0.2, threshold view p=0.23. Closed at the diagnostic stage. Confirms
+    the real published effects (Price & Wolfers, etc.) need individual per-call attribution or
+    racial-composition conditioning this project's data source structurally can't provide, not just a
+    different aggregate outcome variable.
 
 ### P3 — new-season-specific hygiene (cheap, mechanical, worth doing once at tip-off)
 

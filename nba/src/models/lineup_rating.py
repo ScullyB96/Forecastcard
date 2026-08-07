@@ -164,6 +164,56 @@ def semi_oracle_minutes_shares(player_minutes: pd.DataFrame, game_id: str, team_
     return trailing_avg / total
 
 
+def probabilistic_predictive_minutes_shares(player_minutes: pd.DataFrame, game_id: str, team_side: str,
+                                             team_game_ids_before: list[str], team_side_by_game: dict[str, str],
+                                             lookback_games: int = DEFAULT_LOOKBACK_GAMES,
+                                             streak_decay: float = 0.7) -> pd.Series:
+    """A FOURTH mode (task #66, following up Sec47's decomposition and the
+    validated Stage-1 attendance model, task #58): replaces
+    `predictive_minutes_shares`'s hard include/exclude trailing-window
+    union with a CONTINUOUS weight -- each candidate's trailing-average
+    minutes is scaled by their own `attendance_model.predict_attendance_probability`
+    before renormalizing, instead of every union member being implicitly
+    treated as certain to play (P=1.0).
+
+    Strict generalization, not a different mechanism: at `streak_decay=1.0`
+    and every candidate's `games_played_fraction=1.0` (attended every
+    window game), every weight collapses to 1.0 and this reduces to
+    `predictive_minutes_shares` exactly. `game_id` is accepted for
+    interface parity with the other three modes (`oracle_minutes_shares`,
+    `semi_oracle_minutes_shares`) even though this mode never reads that
+    game's own real outcome -- unused here, same as `predictive_minutes_shares`'s
+    own signature."""
+    from src.models.attendance_model import attendance_features_for_game, predict_attendance_probability
+
+    recent_game_ids = team_game_ids_before[-lookback_games:]
+    if not recent_game_ids:
+        return pd.Series(dtype=float)
+
+    rows = []
+    for gid in recent_game_ids:
+        side = team_side_by_game.get(gid)
+        if side is None:
+            continue
+        rows.append(player_minutes[(player_minutes["gameId"] == gid) & (player_minutes["team_side"] == side)])
+    if not rows:
+        return pd.Series(dtype=float)
+    combined = pd.concat(rows, ignore_index=True)
+    trailing_avg = combined.groupby("playerId")["minutes"].mean()
+
+    features = attendance_features_for_game(player_minutes, team_game_ids_before, team_side_by_game, lookback_games)
+    if features.empty:
+        return pd.Series(dtype=float)
+    features = features.set_index("playerId")
+    prob = predict_attendance_probability(features, streak_decay=streak_decay)
+
+    weighted = trailing_avg * prob.reindex(trailing_avg.index).fillna(0.0)
+    total = weighted.sum()
+    if total <= 0:
+        return pd.Series(dtype=float)
+    return weighted / total
+
+
 def team_recent_roster_rapm(player_minutes: pd.DataFrame, player_ratings_as_of: pd.DataFrame,
                              team_game_ids_before: list[str], team_side_by_game: dict[str, str],
                              lookback_games: int = DEFAULT_LOOKBACK_GAMES) -> tuple[float, float]:

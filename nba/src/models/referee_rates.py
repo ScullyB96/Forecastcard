@@ -37,6 +37,40 @@ def build_official_game_log(officials: pd.DataFrame, box: pd.DataFrame, schedule
     return log
 
 
+def build_official_game_log_differential(officials: pd.DataFrame, box: pd.DataFrame, schedule: pd.DataFrame) -> pd.DataFrame:
+    """Task #69 (external-review follow-up, MODEL_DOCUMENTATION.md Sec59):
+    `build_official_game_log`'s total-fouls/FTA outcome tested a PACE/STYLE
+    question ("does this crew call a lot of fouls overall") and failed
+    holdout. Real referee-bias literature (Price & Wolfers; Scorecasting)
+    instead focuses on a BIAS/LEVERAGE question: does a crew tend to call
+    FEWER fouls on the home team specifically ("home cooking")? This
+    builds that alternative outcome: `home_foul_diff`/`home_fta_diff` =
+    (away team's own fouls/FTA) - (home team's own fouls/FTA) for that
+    game -- positive means the home team got the benefit (fewer fouls
+    called on them, or fewer FTA conceded) relative to the away team.
+    Same `add_referee_tendency`/`crew_tendency` primitives apply
+    unmodified to this new value_col, since they're already generic."""
+    home_totals = box.merge(schedule[["gameId", "homeTeamId"]], on="gameId", how="inner")
+    home_totals = home_totals[home_totals["teamId"] == home_totals["homeTeamId"]]
+    home_totals = home_totals.groupby("gameId", as_index=False).agg(
+        home_fta=("freeThrowsAttempted", "sum"), home_fouls=("foulsPersonal", "sum"))
+
+    away_totals = box.merge(schedule[["gameId", "awayTeamId"]], on="gameId", how="inner")
+    away_totals = away_totals[away_totals["teamId"] == away_totals["awayTeamId"]]
+    away_totals = away_totals.groupby("gameId", as_index=False).agg(
+        away_fta=("freeThrowsAttempted", "sum"), away_fouls=("foulsPersonal", "sum"))
+
+    game_diff = home_totals.merge(away_totals, on="gameId", how="inner")
+    game_diff["home_fta_diff"] = game_diff["away_fta"] - game_diff["home_fta"]
+    game_diff["home_foul_diff"] = game_diff["away_fouls"] - game_diff["home_fouls"]
+
+    sched = schedule[["gameId", "gameDate", "season"]]
+    log = officials[["gameId", "personId"]].merge(game_diff[["gameId", "home_fta_diff", "home_foul_diff"]], on="gameId", how="inner")
+    log = log.merge(sched, on="gameId", how="inner")
+    log["gameDate"] = pd.to_datetime(log["gameDate"])
+    return log
+
+
 def _trailing_league_mean(log: pd.DataFrame, value_col: str) -> pd.Series:
     """Trailing (strictly prior games only) pooled mean of `value_col`
     across ALL officials -- collapses to one row per gameId FIRST (every

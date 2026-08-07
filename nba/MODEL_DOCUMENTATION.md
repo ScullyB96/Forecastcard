@@ -3860,3 +3860,26 @@ split across 4 zones) for ANY team-aggregate rate model -- however well-informed
 meaningfully out-predict a naive floor. `oreb_shot_location.py` remains available, unused by any live
 path; the miss-rebound linkage itself (`build_miss_rebound_log`) is a genuinely new, reusable
 primitive for any future question needing real shot-outcome-to-rebound attribution.
+
+## 61. Referee home-away foul/FT differential: the literature-preferred formulation, still no signal on our data (2026-08-07)
+
+Follow-up to Sec59's total-fouls/FTA holdout failure: external research specifically flagged that the
+real referee-bias literature (Price & Wolfers; *Scorecasting*) studies a home-minus-away foul/FT
+DIFFERENTIAL (a bias/leverage question -- does a crew favor the home team specifically), not total
+game fouls (a pace/style question, what Sec59 tested). Built
+`referee_rates.build_official_game_log_differential`: `home_fta_diff`/`home_foul_diff` = (away team's
+own total) - (home team's own total) for that game -- positive means the home team benefited (fewer
+fouls/FTA called on them). Reuses `add_referee_tendency`/`crew_tendency` unmodified (already generic
+on `value_col`). Regression-tested (differential arithmetic, shared-crew-value correctness).
+
+**Diagnostic (full dev range, n=10,727 games), correlated against MARGIN residual specifically** (a
+bias effect should show up in who benefits, unlike Sec59's total-based test which used total-score
+residual): NO real correlation on either measure -- `crew_fta_diff_tendency` vs margin_residual:
+r=-0.0121, p=0.21; `crew_foul_diff_tendency`: r=+0.0084, p=0.38; top-vs-bottom-quartile threshold
+delta=-0.432, t=-1.195, p=0.23. Weaker than even Sec59's total-based diagnostic (which at least
+cleared p<0.002 before failing holdout). **Closed at the diagnostic stage, no adoption test
+attempted** -- confirms the research agent's own caution that "the underlying literature is mixed/
+small-effect even for the right formulation," at least at this project's own sample size and using
+this fairly simple crew-averaged trailing-tendency mechanism (not the fixed-effects/racial-composition-
+conditioned designs the strongest published studies use, which would need individual per-call
+attribution this project's data source structurally can't provide -- see Sec59).

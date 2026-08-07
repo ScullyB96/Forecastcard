@@ -41,12 +41,14 @@ from src.models.travel_fatigue import add_travel_fatigue
 from src.models.clutch_rating import add_trailing_clutch_deviation, identify_clutch_stints, team_game_clutch_net_rating
 from src.models.lineup_continuity import add_lineup_continuity, team_game_continuity_score
 from src.models.referee_rates import add_referee_tendency, build_official_game_log, crew_tendency
+from src.models.referee_rates import build_official_game_log_differential
 from src.models.oreb_shot_location import build_miss_rebound_log
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
 from src.models.validate_holdout_bootstrap import generic_holdout_confirmatory_check
 from src.models.usage_allocation import allocate_team_total, compute_usage_shares, matchup_point_delta
 from src.models.lineup_rating import predictive_minutes_shares, semi_oracle_minutes_shares
+from src.models.lineup_rating import probabilistic_predictive_minutes_shares
 from src.models.rapm_lite import _career_games_played, prepare_stints
 from src.models.team_stat_rates import (ADOPTED_CATEGORIES, CROSS_SEASON_WEIGHT_STAT, OWN_HALFLIFE_GAMES_STAT,
                                          STAT_COLUMNS, add_team_stat_ratings, build_team_stat_game_log, project_team_stat)
@@ -660,6 +662,86 @@ def test_build_miss_rebound_log_skips_block_credit_rows_and_dead_balls_and_game_
     clean_row = result[(result["gameId"] == "g1") & (result["zone"] == "three")]
     check("the clean three-point miss + same-team rebound is correctly flagged as OREB",
           len(clean_row) == 1 and clean_row["is_oreb"].iloc[0] == 1.0, f"got {clean_row.to_dict('records')}")
+
+
+def test_probabilistic_predictive_shares_matches_flat_predictive_when_everyone_certain():
+    """Task #66: `probabilistic_predictive_minutes_shares` must be a
+    STRICT GENERALIZATION of `predictive_minutes_shares`, not a different
+    mechanism -- when every candidate attended every window game
+    (games_played_fraction=1.0, dnp_streak=0 for all), every attendance
+    weight collapses to 1.0 and the two functions must produce IDENTICAL
+    shares. Two players, A (30 min/game) and B (10 min/game), both
+    attended all 10 window games."""
+    games = [f"g{i}" for i in range(10)]
+    team_side_by_game = {g: "home" for g in games}
+    rows = []
+    for g in games:
+        rows.append({"gameId": g, "team_side": "home", "playerId": "A", "minutes": 30.0})
+        rows.append({"gameId": g, "team_side": "home", "playerId": "B", "minutes": 10.0})
+    player_minutes = pd.DataFrame(rows)
+
+    flat = predictive_minutes_shares(player_minutes, "target_game", "home", games, team_side_by_game, lookback_games=10)
+    prob = probabilistic_predictive_minutes_shares(player_minutes, "target_game", "home", games, team_side_by_game,
+                                                    lookback_games=10, streak_decay=1.0)
+    check("player A's share is identical between the two modes when everyone is certain to attend",
+          abs(flat["A"] - prob["A"]) < 1e-9, f"flat={flat['A']}, prob={prob['A']}")
+    check("player B's share is identical between the two modes when everyone is certain to attend",
+          abs(flat["B"] - prob["B"]) < 1e-9, f"flat={flat['B']}, prob={prob['B']}")
+
+
+def test_probabilistic_predictive_shares_downweights_a_player_on_a_current_dnp_streak():
+    """Task #66: unlike the flat `predictive_minutes_shares` (which treats
+    every trailing-window union member as equally certain regardless of
+    HOW RECENTLY they last played), `probabilistic_predictive_minutes_shares`
+    must give a SMALLER share to a player currently on a DNP streak than
+    to a player with an IDENTICAL trailing-average minutes but no recent
+    absence. Player A: 30 min in every one of 10 games (streak=0). Player
+    C: also averages 30 min/game, but only played the first 7 of 10
+    window games (streak=3, games_played_fraction=0.7) -- same raw
+    trailing average as A, very different recent attendance pattern."""
+    games = [f"g{i}" for i in range(10)]
+    team_side_by_game = {g: "home" for g in games}
+    rows = []
+    for g in games:
+        rows.append({"gameId": g, "team_side": "home", "playerId": "A", "minutes": 30.0})
+    for g in games[:7]:
+        rows.append({"gameId": g, "team_side": "home", "playerId": "C", "minutes": 30.0})
+    player_minutes = pd.DataFrame(rows)
+
+    flat = predictive_minutes_shares(player_minutes, "target_game", "home", games, team_side_by_game, lookback_games=10)
+    check("the flat mode gives A and C the SAME share (50/50) -- it can't see C's recent absence, "
+          "only the raw trailing average, which is identical for both",
+          abs(flat["A"] - flat["C"]) < 1e-9, f"got A={flat['A']}, C={flat['C']}")
+
+    prob = probabilistic_predictive_minutes_shares(player_minutes, "target_game", "home", games, team_side_by_game,
+                                                    lookback_games=10, streak_decay=0.7)
+    check("the probabilistic mode gives A a LARGER share than C despite their identical trailing "
+          "averages, because C is currently on a real 3-game DNP streak",
+          prob["A"] > prob["C"], f"got A={prob['A']}, C={prob['C']}")
+
+
+def test_build_official_game_log_differential_computes_away_minus_home_correctly():
+    """Task #69: `home_fta_diff`/`home_foul_diff` must be (away team's own
+    total) - (home team's own total) -- positive means the home team
+    benefited (fewer fouls/FTA called on them). Builds one game where the
+    home team (id 100) committed 15 fouls/20 FTA and the away team
+    (id 200) committed 22 fouls/26 FTA -- home should show a clear
+    positive differential on both."""
+    box = pd.DataFrame({
+        "gameId": ["g1", "g1"], "teamId": [100, 200],
+        "freeThrowsAttempted": [20, 26], "foulsPersonal": [15, 22],
+    })
+    schedule = pd.DataFrame({"gameId": ["g1"], "homeTeamId": [100], "awayTeamId": [200],
+                              "gameDate": ["2020-10-01"], "season": [2020]})
+    officials = pd.DataFrame({"gameId": ["g1", "g1", "g1"], "personId": ["A", "B", "C"]})
+
+    result = build_official_game_log_differential(officials, box, schedule)
+    check("home_fta_diff is away(26) - home(20) = +6",
+          (result["home_fta_diff"] == 6).all(), f"got {result['home_fta_diff'].tolist()}")
+    check("home_foul_diff is away(22) - home(15) = +7 (home team benefited -- fewer fouls called on them)",
+          (result["home_foul_diff"] == 7).all(), f"got {result['home_foul_diff'].tolist()}")
+    check("all 3 officials on the crew get the same shared game-level differential value",
+          len(result) == 3 and result["home_fta_diff"].nunique() == 1)
 
 
 def test_career_games_played_pools_home_and_away_appearances():
@@ -2194,6 +2276,9 @@ def test_team_stat_totals_falls_back_to_empty_when_team_missing():
 
 
 if __name__ == "__main__":
+    test_build_official_game_log_differential_computes_away_minus_home_correctly()
+    test_probabilistic_predictive_shares_matches_flat_predictive_when_everyone_certain()
+    test_probabilistic_predictive_shares_downweights_a_player_on_a_current_dnp_streak()
     test_build_miss_rebound_log_skips_block_credit_rows_and_dead_balls_and_game_boundaries()
     test_add_referee_tendency_has_no_leak_on_an_officials_first_ever_game()
     test_add_lineup_continuity_counts_distinct_prior_games_not_stints()
