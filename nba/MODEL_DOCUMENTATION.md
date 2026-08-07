@@ -3918,3 +3918,38 @@ effect" -- it's "our instrument isn't sensitive enough to confirm what a better-
 already found," worth revisiting if/when a market-odds data source is ever acquired for this project
 (see the still-open holdout-range odds-data question), which would give a much lower-noise
 observable to test against.
+
+## 63. 3PT detrend-then-retrend, retried on the correct axis: decisive negative, and it validates the current architecture (2026-08-07)
+
+Sec31's original detrend-then-retrend test on 3PT applied `add_era_adjusted_player_rate` to
+(fg3Made, fg3Att) -- the MAKE-rate. External research flagged this as likely the wrong axis: 3PT
+*attempt* volume roughly doubled 2015-2025 (a genuinely trending exposure quantity), while 3P%
+(makes per attempt) has been flat since the mid-90s (a stable skill) -- so detrending the make-rate
+had nothing real to fix, and the genuinely trending quantity (attempt RATE) was never tested with
+this architecture at all.
+
+Re-examining `player_scoring_rates.py`'s actual live mechanism first (important context Sec31 didn't
+need to consider): 2PT/3PT attempt-rate is NOT modeled with static/shrinkage-based smoothing at all
+-- it already uses `add_walk_forward_player_mean_ewm` (a pure recency-weighted EWMA, halflife=10
+games, no external blending target whatsoever), a family already empirically confirmed (module
+docstring) to beat expanding-shrinkage specifically BECAUSE it tracks volume/role changes well. This
+is a structurally different situation from steals' (Sec17) or the make-rate's (Sec31) problem, both
+of which used a STATIC shrinkage-toward-a-stale-average target that detrend-then-retrend was built to
+fix -- attempt-rate has no such stale target to begin with.
+
+**Tested anyway, for completeness**: applied `add_era_adjusted_player_rate` to (fg3Att, minutes) --
+the attempt RATE -- swept `current_rate_halflife_games` 25/50/100/200/400, compared against the
+CURRENT LIVE mechanism (EWMA halflife=10), not a flat-shrinkage strawman. **Decisive, unambiguous
+REAL REGRESSION at every single halflife tested** (MAE 1.35 vs. the current EWMA's 1.25, delta
++0.094 to +0.098, every 95% CI entirely positive, n=76,604). Stopped at Stage 1, no Stage 2 needed --
+the effect is far too large and consistent to be a shrinkage-strength artifact.
+
+**A clean negative that actually validates the current design**: the research correctly identified
+3PA volume as the real trending quantity, but this project's EWMA-based attempt-rate model already
+handles that trend -- and does so BETTER than an era-adjusted shrinkage approach, because EWMA is
+simply the right family for a metric this volatile (shot volume/role can shift game-to-game on
+coaching decisions, teammate injuries, hot streaks -- much faster-moving than shooting skill,
+independent of any multi-year era drift). The "wrong axis" diagnosis from external research was
+correct in the abstract, but this project had already solved that specific problem with a different,
+better-suited mechanism before the question was ever asked. Nothing changed; `add_era_adjusted_player_rate`
+remains available, unused for 3PT on either axis now.
