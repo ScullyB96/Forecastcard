@@ -4098,3 +4098,41 @@ formulation of "quality spread" (e.g. absolute team-strength rank distance rathe
 projection gap already smoothed through the pace/rating combine, or a play-by-play-level proxy like
 in-game lead-size volatility) would be a genuinely different mechanism, not a re-litigation of this
 same test.
+
+## 67. Margin-MAE normalization diagnostic formalized as a real script -- confirms Sec44.2 under the current live config
+
+Item 5a of TECHNICAL_REFERENCE.md's P1 checklist ("formalize the normalization diagnostic into a real
+`validate_*.py` script rather than leaving it ad hoc"). Built
+`validate_margin_mae_normalization.py`: reuses `run_final_holdout_check.py`'s already-established
+full-range prediction builders (so it always reflects the CURRENT fully-adopted live config --
+currently Phase 1 + Phase 2 probabilistic predictive-minutes mode, Sec65 -- not a frozen snapshot),
+adds a full-range naive-floor builder mirroring `validate_team_strength_baseline._rated_dev_log`'s
+exact construction, and computes the same per-season summary and two normalized ratios Sec44.2's
+original ad hoc run used. A pure data-description diagnostic, not an adoption gate or a repeated
+holdout performance comparison -- same established exception as Sec9.5's own "doesn't touch the
+one-time-read budget." Regression-tested (`per_season_summary`'s groupby-and-ratio arithmetic checked
+on a hand-computed synthetic example).
+
+**Re-run under the current config (n=12,874 dev+holdout games, now including live Phase 2)
+reproduces Sec44.2's finding closely**, with numbers shifting only slightly from the original
+Phase-1-only ad hoc run (raw margin_mae r=+0.835 p=0.0014, vs the original +0.828 p=0.0017; realized
+margin std r=+0.852 p=0.0009, vs +0.846 p=0.0010):
+
+- Raw model margin_mae rises significantly with season (r=+0.835, p=0.0014) -- the documented trend
+  is real in absolute terms.
+- **Neither normalized ratio shows a significant trend**: model_margin_mae/naive_margin_mae
+  r=+0.062, p=0.856; model_margin_mae/realized_margin_std r=-0.307, p=0.358 (both far from
+  significant, and the second has the WRONG sign for "getting worse").
+- Holdout mean is BETTER (lower) than dev mean on both ratios: naive-ratio 0.9068 vs 0.9202,
+  realized-std-ratio 0.6932 vs 0.7241 -- holdout is not regressing on either normalized measure, even
+  with Phase 2 now included in the config.
+
+**Confirms Sec44.2's conclusion under the current live configuration, not just the historical
+Phase-1-only snapshot**: Phase 1's rising raw margin_mae is very likely predominantly explained by
+genuinely rising game-to-game unpredictability across NBA eras, not by the model falling further
+behind a fixed level of task difficulty. Closes item 5a. Per item 5's own stated decision order
+((a) formalize the diagnostic, (b) gamma_rtg damping [already tested and rejected, Sec48], (c) a
+dedicated era/quality-spread regressor only if (a) and (b) don't close the gap) -- since (a) confirms
+there's no real gap left to close, **(c) is not currently well-motivated by the evidence** and
+shouldn't be pursued as a "the margin problem is still open" project; margin/scoring-era-drift is
+closed as a research question pending any future evidence that reopens it.

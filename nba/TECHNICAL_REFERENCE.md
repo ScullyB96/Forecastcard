@@ -1298,22 +1298,21 @@ fix.
 
 ### P1 — real, open modeling questions (not blocking, but the most valuable next research)
 
-5. **Phase 1's margin/scoring-era-drift — REFRAMED (§2.6), downgraded from "urgent open problem" to
-   "worth one clean follow-up, not a fire."** The normalization diagnostic (§2.6) found the raw
-   margin_mae trend tracks almost exactly with rising REALIZED margin variance (r=0.846 for true
-   variance vs. r=0.828 for model MAE, against season), while the model's performance NORMALIZED by
-   either the naive floor or the season's own true variance shows no degradation at all — holdout is
-   if anything the best-normalized stretch in the whole range. **Recommended next step, in order**:
-   (a) formalize the normalization diagnostic into a real `validate_*.py` script rather than leaving
-   it ad hoc -- STILL NOT DONE; (b) ~~the combine log5-slope finding (§2.4) is the more promising
-   concrete lever~~ -- **TESTED AND REJECTED (2026-08-06, MODEL_DOCUMENTATION.md Sec48)**: `gamma_rtg`
-   damping shows a clean, real tradeoff at every value swept (improves total_mae, regresses margin_mae),
-   fails the net-win bar at Stage 1, no holdout spent; `gamma_pace` has no real effect at all. Don't
-   re-open this lever without a structurally different formulation. (c) **the only remaining real
-   option**: a dedicated era/quality-spread regressor -- a genuinely new mechanism, not yet built or
-   tested, meaningfully bigger scope than any lever tried so far (needs its own design, not a parameter
-   sweep on existing machinery). Worth doing (a) first regardless, since it's cheap and would confirm
-   whether (c) is even worth the scope before committing to it.
+5. ~~Phase 1's margin/scoring-era-drift~~ **CLOSED as a research question (2026-08-07,
+   MODEL_DOCUMENTATION.md Sec67), pending any future evidence that reopens it.** The normalization
+   diagnostic (§2.6) found the raw margin_mae trend tracks almost exactly with rising REALIZED margin
+   variance. (a) **Formalized into `validate_margin_mae_normalization.py`** (item 5a, DONE) and
+   re-run under the CURRENT live config (Phase 1 + Phase 2, n=12,874 dev+holdout games) — reproduces
+   the original finding closely: raw margin_mae rises significantly with season (r=+0.835, p=0.0014),
+   but NEITHER normalized ratio does (naive-ratio r=+0.062 p=0.856; realized-std-ratio r=-0.307
+   p=0.358, wrong sign for "getting worse"), and holdout's mean is BETTER than dev's on both ratios.
+   (b) `gamma_rtg`/`gamma_pace` damping — **TESTED AND REJECTED (2026-08-06, MODEL_DOCUMENTATION.md
+   Sec48)**: `gamma_rtg` shows a clean, real tradeoff at every value swept (improves total_mae,
+   regresses margin_mae), fails the net-win bar; `gamma_pace` has no real effect. (c) **a dedicated
+   era/quality-spread regressor is NOT currently well-motivated** — per item 5's own stated decision
+   order, (c) was only worth pursuing if (a) and (b) failed to close the gap, and (a) now confirms
+   there's no real gap left to close. Don't re-open this as an active research target without new
+   evidence (e.g. a future season where the normalized ratios genuinely do trend upward).
 6. **OREB team-level anchoring is closed, not open — NOW SIX independent mechanisms, including the
    shot-location data this doc previously said was missing (2026-08-07).** The external review's own
    concrete suggestion — `projected_team_OREB = projected_misses × projected_OREB_share` (misses from

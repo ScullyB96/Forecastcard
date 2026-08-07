@@ -44,6 +44,7 @@ from src.models.lineup_continuity import add_lineup_continuity, team_game_contin
 from src.models.referee_rates import add_referee_tendency, build_official_game_log, crew_tendency
 from src.models.referee_rates import build_official_game_log_differential
 from src.utils.tz import EASTERN, is_scheduled_firing_hour
+from src.models.validate_margin_mae_normalization import per_season_summary
 from src.models.oreb_shot_location import build_miss_rebound_log
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
@@ -1634,6 +1635,39 @@ def test_is_scheduled_firing_hour_selects_correct_utc_firing_across_dst():
     check("EST: 14:00 UTC (9am ET, the DST-workaround extra) is correctly rejected", est_results[14] is False, f"got {est_results}")
 
 
+def test_per_season_summary_computes_correct_grouped_mae_and_ratios():
+    """`validate_margin_mae_normalization.per_season_summary` formalizes Sec44.2's ad hoc diagnostic
+    (item 5a of TECHNICAL_REFERENCE.md's P1 checklist) -- confirms the per-season groupby correctly
+    isolates each season's own games (not pooling across seasons) and the two normalized ratios
+    (model_margin_mae/naive_margin_mae, model_margin_mae/realized_margin_std) are computed from the
+    right numerator/denominator pairing, on a hand-checkable synthetic example."""
+    df = pd.DataFrame([
+        # season 2020: actual margins [0, 10, 20], model errs [2, 4, 6] (mean 4), naive errs [5, 5, 5] (mean 5)
+        {"gameId": "g1", "season": 2020, "actual_home": 100.0, "actual_away": 100.0, "pred_home": -2.0, "pred_away": 0.0, "naive_home": -5.0, "naive_away": 0.0},
+        {"gameId": "g2", "season": 2020, "actual_home": 105.0, "actual_away": 95.0, "pred_home": 6.0, "pred_away": 0.0, "naive_home": 5.0, "naive_away": 0.0},
+        {"gameId": "g3", "season": 2020, "actual_home": 110.0, "actual_away": 90.0, "pred_home": 14.0, "pred_away": 0.0, "naive_home": 15.0, "naive_away": 0.0},
+        # season 2021: actual margins [0, 10], model errs [0, 0], naive errs [8, 8]
+        {"gameId": "g4", "season": 2021, "actual_home": 100.0, "actual_away": 100.0, "pred_home": 0.0, "pred_away": 0.0, "naive_home": 8.0, "naive_away": 0.0},
+        {"gameId": "g5", "season": 2021, "actual_home": 105.0, "actual_away": 95.0, "pred_home": 10.0, "pred_away": 0.0, "naive_home": 18.0, "naive_away": 0.0},
+    ])
+    summary = per_season_summary(df).set_index("season")
+
+    check("season 2020 has all 3 of its own games, not pooled with 2021", summary.loc[2020, "n_games"] == 3)
+    check("season 2020 model_margin_mae == mean([2,4,6]) == 4.0", abs(summary.loc[2020, "model_margin_mae"] - 4.0) < 1e-9)
+    check("season 2020 naive_margin_mae == mean([5,5,5]) == 5.0", abs(summary.loc[2020, "naive_margin_mae"] - 5.0) < 1e-9)
+    expected_std_2020 = pd.Series([0.0, 10.0, 20.0]).std()
+    check("season 2020 realized_margin_std matches pandas' own std on the real actual margins",
+          abs(summary.loc[2020, "realized_margin_std"] - expected_std_2020) < 1e-9)
+    check("season 2020 model_vs_naive_ratio == 4/5 == 0.8", abs(summary.loc[2020, "model_vs_naive_ratio"] - 0.8) < 1e-9)
+    check("season 2020 model_vs_realized_std_ratio == 4/std, not confused with the naive denominator",
+          abs(summary.loc[2020, "model_vs_realized_std_ratio"] - 4.0 / expected_std_2020) < 1e-9)
+
+    check("season 2021 has exactly its own 2 games", summary.loc[2021, "n_games"] == 2)
+    check("season 2021 model_margin_mae == 0.0 (perfect predictions) -- not leaked from 2020's nonzero errors",
+          abs(summary.loc[2021, "model_margin_mae"] - 0.0) < 1e-9)
+    check("season 2021 model_vs_naive_ratio == 0/8 == 0.0", abs(summary.loc[2021, "model_vs_naive_ratio"] - 0.0) < 1e-9)
+
+
 def test_name_index_prefers_active_player_and_flags_genuine_ambiguity():
     """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): the player-name-to-ID crosswalk used
     to keep whichever of two same-named players happened to appear LAST in `nba_api`'s unsorted
@@ -2519,6 +2553,7 @@ if __name__ == "__main__":
     test_fit_team_b2b_adjustment_walk_forward_diverges_per_team_unlike_pooled_average()
     test_resolve_active_lineup_downweights_a_live_dnp_streak_not_just_a_flat_average()
     test_is_scheduled_firing_hour_selects_correct_utc_firing_across_dst()
+    test_per_season_summary_computes_correct_grouped_mae_and_ratios()
 
     print()
     if FAILURES:
