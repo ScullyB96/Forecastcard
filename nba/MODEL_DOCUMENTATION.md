@@ -4061,3 +4061,40 @@ real historical slate (2018-01-15): `generate_predictions.py` produced plausible
 projections, win probabilities spanning 37.3%-82.4%, lineup tags correctly reporting the new
 `probabilistic-predictive` mechanism; `generate_props.py` (shares the same resolver, no independent
 Phase 2 logic of its own) ran cleanly too (2,570 prop rows, 257 players).
+
+## 66. Team-quality-spread as a variance-model predictor: tested, decisive negative -- closes Sec51's named open item
+
+Sec51 explicitly named the most likely remaining fix for `score_distribution`'s persistent ~1-2pp
+interval-undercoverage gap (worst in 2024-2025 specifically, the seasons that matter most for live
+predictions): "a real predictor missing from the variance model beyond pace, e.g. team-quality-spread
+capturing blowout-vs-competitive-game variance differences." Tested directly rather than assumed --
+`rating_spread = abs(pred_home - pred_away)` (Phase 1's own point projection, already computed for
+every game, zero new ingest) as a hypothesized second regressor in `fit_residual_variance_model`
+(currently `squared_residual ~ a + b*pace` only), on the hypothesis that mismatched-team games carry
+genuinely higher realized variance (blowout potential) beyond what pace alone explains.
+
+**Diagnostic run BEFORE touching any production code** (this project's standing discipline --
+verify the mechanism, then build): fit the existing pace-only variance model on the same chronological
+FIT split `validate_score_distribution.py` already uses, then correlated `rating_spread` against the
+model's own UNEXPLAINED squared-residual (sq_resid - predicted_variance) -- a genuine
+heteroscedasticity-beyond-pace check, not a raw marginal correlation that pace itself could confound
+(pace and rating_spread do have a small but real correlation, r=+0.086, p=1.1e-13, confirming this
+distinction mattered).
+
+**Decisive negative, doesn't even survive its own fit set**: home-side correlation is r=+0.0011
+(p=0.92, fit set) -> r=-0.0110 (p=0.53, eval set) -- flips sign, no real relationship either split.
+Away-side: r=-0.0291 (p=0.012, fit set -- nominally "significant" on n=7,515) -> r=+0.0101 (p=0.57,
+eval set) -- ALSO flips sign, the fit-set result is a classic large-n false positive that doesn't
+replicate at all out of sample. A quintile view (mean unexplained squared-residual by rating_spread
+quintile, eval set) confirms no real trend: 6.8, 9.0, 15.1, 1.3, 5.2 -- not monotonic, no signal.
+
+**Not pursued further -- no code change to `score_distribution.py`.** The basketball-folklore
+intuition ("blowouts are more variable") doesn't hold up on this project's own data via this proxy: a
+team's own PREDICTED rating gap doesn't explain realized score variance beyond what projected pace
+already captures. This closes Sec51's named "most likely next lever" as a genuine negative rather
+than leaving it as a permanently-open placeholder -- the ~1-2pp undercoverage gap remains real and
+unexplained, but this specific, well-motivated candidate predictor is not the answer. A different
+formulation of "quality spread" (e.g. absolute team-strength rank distance rather than a POINT
+projection gap already smoothed through the pace/rating combine, or a play-by-play-level proxy like
+in-game lead-size volatility) would be a genuinely different mechanism, not a re-litigation of this
+same test.

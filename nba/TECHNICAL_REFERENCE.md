@@ -1368,8 +1368,17 @@ fix.
     (r=−0.410..−0.485, p=0.13-0.21) — the original "declining" framing was itself partly an artifact
     of the old diagnostic's full-range fit over-covering early seasons using future data they'd never
     have had live. **Not fully resolved**: pooled coverage still sits ~1-2pp below nominal fairly
-    consistently across most of the range (a mean-level issue, not a trend) — a missing variance
-    predictor beyond pace (e.g. team-quality-spread) is the likely next lever, not built here.
+    consistently across most of the range (a mean-level issue, not a trend). ~~A missing variance
+    predictor beyond pace (e.g. team-quality-spread) is the likely next lever, not built here.~~ **TESTED
+    AND REJECTED (2026-08-07, MODEL_DOCUMENTATION.md Sec66)**: `rating_spread = abs(pred_home -
+    pred_away)` as a second regressor in the variance model — a genuine heteroscedasticity-beyond-pace
+    diagnostic (correlated against the pace-only model's own unexplained squared-residual, not a raw
+    marginal correlation) shows no real relationship on either side and flips sign between the fit and
+    eval splits (home: +0.001→-0.011; away: -0.029→+0.010, the fit-set "significant" p=0.012 a classic
+    large-n false positive that doesn't replicate). No code change made. The ~1-2pp undercoverage gap
+    remains real and unexplained — this specific, well-motivated candidate isn't the answer; a
+    genuinely different formulation (e.g. absolute team-strength rank distance, or a PBP-level lead-
+    volatility proxy) would be a different mechanism, not a re-test of this one.
     **A real, separate live bug found while wiring this in**: the OLD static fit
     (`build_dev_predictions()`) stopped at `DEV_MAX_SEASON - 1` regardless of `game_date` — every live
     call in 2024-2026 was excluding 2+ already-cached seasons from its own calibration, the identical
