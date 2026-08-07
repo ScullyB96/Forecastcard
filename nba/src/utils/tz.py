@@ -34,3 +34,25 @@ def default_slate_date():
     if now.hour >= 17:
         return now.date() + timedelta(days=1)
     return now.date()
+
+
+TARGET_FIRING_HOURS_ET = (21, 10)  # 9pm ET night-before pass, 10am ET morning refresh pass
+
+
+def is_scheduled_firing_hour(now: datetime | None = None, target_hours: tuple = TARGET_FIRING_HOURS_ET) -> bool:
+    """DST fix (previously "documented, not solved" in railway.toml):
+    Railway's cron scheduler is UTC-only with no timezone/DST awareness at
+    all (confirmed via Railway's own docs -- no per-cron timezone setting
+    exists), so a single literal UTC cron expression is only ever correct
+    for ONE of EDT/EST and silently fires an hour off-target for the other
+    (squarely within the Nov-Mar NBA season). Fixed at the application
+    level instead of the platform level: `railway.toml` now fires FOUR
+    UTC times a day (both the EDT and EST versions of each Eastern target
+    hour), and this function is the real DST-correct decision of which of
+    those firings should actually do the work -- True only when the
+    CURRENT Eastern wall-clock hour exactly equals one of `target_hours`.
+    `now` is injectable (defaults to the real current time) purely for
+    testability -- no other caller should ever pass it."""
+    if now is None:
+        now = datetime.now(EASTERN)
+    return now.hour in target_hours

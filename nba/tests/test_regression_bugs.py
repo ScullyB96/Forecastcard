@@ -43,6 +43,7 @@ from src.models.clutch_rating import add_trailing_clutch_deviation, identify_clu
 from src.models.lineup_continuity import add_lineup_continuity, team_game_continuity_score
 from src.models.referee_rates import add_referee_tendency, build_official_game_log, crew_tendency
 from src.models.referee_rates import build_official_game_log_differential
+from src.utils.tz import EASTERN, is_scheduled_firing_hour
 from src.models.oreb_shot_location import build_miss_rebound_log
 from src.models.score_distribution import _t_scale
 from src.models.score_distribution import compute_walkforward_variance_model, predict_variance_walk_forward
@@ -1601,6 +1602,38 @@ def test_resolve_active_lineup_downweights_a_live_dnp_streak_not_just_a_flat_ave
           "probabilistic-predictive" in tag, f"got {tag}")
 
 
+def test_is_scheduled_firing_hour_selects_correct_utc_firing_across_dst():
+    """railway.toml's DST fix (2026-08-07): Railway's cron scheduler is UTC-only with no timezone
+    setting, so a single static UTC cronSchedule is only ever correct for ONE of EDT/EST. The fix
+    fires FOUR UTC times a day (01:00, 02:00, 14:00, 15:00 -- both the EDT and EST versions of
+    ~9pm/~10am ET) and relies on `is_scheduled_firing_hour` to let only the correct two through on
+    any given date. This is the exact bug the old design had: a literal "01:00,14:00 UTC" schedule
+    was right in EDT but silently an hour off throughout the Nov-Mar EST season."""
+    utc = _dt_module.timezone.utc
+    firing_hours_utc = [1, 2, 14, 15]
+
+    edt_date = _dt_module.date(2026, 7, 15)  # July -- EDT (UTC-4) in effect
+    edt_results = {}
+    for h in firing_hours_utc:
+        now_utc = _dt_module.datetime(edt_date.year, edt_date.month, edt_date.day, h, tzinfo=utc)
+        edt_results[h] = is_scheduled_firing_hour(now_utc.astimezone(EASTERN))
+    check("EDT: 01:00 UTC (9pm ET) is a real firing", edt_results[1] is True, f"got {edt_results}")
+    check("EDT: 14:00 UTC (10am ET) is a real firing", edt_results[14] is True, f"got {edt_results}")
+    check("EDT: 02:00 UTC (10pm ET, the DST-workaround extra) is correctly rejected", edt_results[2] is False, f"got {edt_results}")
+    check("EDT: 15:00 UTC (11am ET, the DST-workaround extra) is correctly rejected", edt_results[15] is False, f"got {edt_results}")
+
+    est_date = _dt_module.date(2026, 1, 15)  # January -- EST (UTC-5) in effect
+    est_results = {}
+    for h in firing_hours_utc:
+        now_utc = _dt_module.datetime(est_date.year, est_date.month, est_date.day, h, tzinfo=utc)
+        est_results[h] = is_scheduled_firing_hour(now_utc.astimezone(EASTERN))
+    check("EST: 02:00 UTC (9pm ET) is a real firing -- exactly the case a static EDT-tuned cron got wrong",
+          est_results[2] is True, f"got {est_results}")
+    check("EST: 15:00 UTC (10am ET) is a real firing", est_results[15] is True, f"got {est_results}")
+    check("EST: 01:00 UTC (8pm ET, the DST-workaround extra) is correctly rejected", est_results[1] is False, f"got {est_results}")
+    check("EST: 14:00 UTC (9am ET, the DST-workaround extra) is correctly rejected", est_results[14] is False, f"got {est_results}")
+
+
 def test_name_index_prefers_active_player_and_flags_genuine_ambiguity():
     """REAL BUG FOUND AND FIXED (2026-08-01, full-model audit): the player-name-to-ID crosswalk used
     to keep whichever of two same-named players happened to appear LAST in `nba_api`'s unsorted
@@ -2485,6 +2518,7 @@ if __name__ == "__main__":
     test_semi_oracle_minutes_shares_uses_real_attendance_but_trailing_average_shares()
     test_fit_team_b2b_adjustment_walk_forward_diverges_per_team_unlike_pooled_average()
     test_resolve_active_lineup_downweights_a_live_dnp_streak_not_just_a_flat_average()
+    test_is_scheduled_firing_hour_selects_correct_utc_firing_across_dst()
 
     print()
     if FAILURES:

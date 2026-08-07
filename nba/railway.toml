@@ -12,10 +12,9 @@
 #
 # DUAL-RUN (2026-08-02): fires twice a day so tomorrow's slate is ready the
 # moment the site's displayed day flips at midnight Eastern, not hours
-# later once the morning cron happens to run. One cronSchedule, comma-
-# separated hours, no second Railway service needed:
-#   01:00 UTC = ~9pm ET the night before (EDT) -- populates tomorrow's slate.
-#   14:00 UTC = ~10am ET same day (EDT) -- refreshes it (unchanged timing).
+# later once the morning cron happens to run:
+#   ~9pm ET the night before -- populates tomorrow's slate.
+#   ~10am ET same day -- refreshes it (unchanged timing).
 # src/utils/tz.py's default_slate_date() picks the right target
 # automatically based on the real Eastern hour at the moment each one
 # fires -- no mode flag or second command needed. Also fixes a real
@@ -25,10 +24,17 @@
 # correct by coincidence of sharing that same 14:00 UTC hour, not because
 # it was actually timezone-aware).
 #
-# DST caveat (documented, not solved): the literal UTC values above are
-# EDT-accurate; during EST months (Nov-Mar, squarely within the NBA
-# season) each fires one Eastern hour earlier than intended -- a known,
-# lower-severity gap, not attempted here.
+# DST FIXED (2026-08-07): Railway's cron scheduler is UTC-only with no
+# timezone/DST setting at all (confirmed via Railway's own docs), so a
+# single literal UTC cronSchedule can only ever be correct for one of
+# EDT/EST -- the other regime fires an hour off-target, squarely within
+# the Nov-Mar NBA season. Fixed at the application level instead:
+# cronSchedule now fires FOUR UTC times a day (both the EDT and EST
+# versions of ~9pm and ~10am ET), and src/utils/tz_gate.py (backed by
+# tz.is_scheduled_firing_hour) checks the REAL current Eastern wall-clock
+# hour and only lets the real pipeline run on the two firings that
+# actually land on a target hour -- the other two exit immediately,
+# harmlessly, with exit code 0 (never reported as a failed deployment).
 
 [build]
 builder = "NIXPACKS"
@@ -43,6 +49,13 @@ watchPatterns = ["nba/**"]
 # Slack daily-picks digest (2026-08-04) -- see mlb/railway.toml's own
 # comment for the full design (dedup by slate_key on the site side, `||
 # true` so a hiccup here never fails the pipeline run).
-startCommand = "python -m src.pipeline.generate_predictions && python -m src.pipeline.generate_props && python -m src.pipeline.export_to_site_db && curl -s -X POST -H \"X-Notify-Token: $NOTIFY_TOKEN\" \"$NOTIFY_URL/internal/notify/nba\" || true"
-cronSchedule = "0 1,14 * * *"
+#
+# `python -m src.utils.tz_gate || exit 0;` is the DST fix's gate (see the
+# top-of-file comment): on the two extra DST-workaround firings it exits
+# nonzero, `|| exit 0` makes the WHOLE script exit 0 immediately, and
+# everything after the `;` never runs. On a real target-hour firing it
+# exits 0, `||` doesn't trigger, and the shell falls through into the
+# actual pipeline chain unchanged.
+startCommand = "python -m src.utils.tz_gate || exit 0; python -m src.pipeline.generate_predictions && python -m src.pipeline.generate_props && python -m src.pipeline.export_to_site_db && curl -s -X POST -H \"X-Notify-Token: $NOTIFY_TOKEN\" \"$NOTIFY_URL/internal/notify/nba\" || true"
+cronSchedule = "0 1,2,14,15 * * *"
 restartPolicyType = "NEVER"

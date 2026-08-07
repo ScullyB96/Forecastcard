@@ -1287,10 +1287,14 @@ fix.
    worth explicitly re-confirming `BoxScoreMatchupsV3`/`BoxScoreDefensiveV2` still work identically
    for 2026-27 specifically once real games exist (an untested but low-risk assumption that this
    season, like every one since 2017-18, will behave the same way).
-4. **DST cron mistiming** (§9.3): `railway.toml`'s `cronSchedule = "0 1,14 * * *"` is EDT-accurate
-   only — fires one Eastern hour early throughout EST months (Nov–Mar, i.e. most of a real NBA
-   season). Cheap, mechanical fix (two seasonal cron expressions, or a UTC-offset-aware scheduler)
-   that's been sitting unaddressed; worth just fixing rather than re-deferring again.
+4. ~~DST cron mistiming~~ **FIXED (2026-08-07).** Railway's cron scheduler is UTC-only with no
+   timezone setting (confirmed via Railway's own docs), so a single static UTC `cronSchedule` could
+   only ever be correct for one of EDT/EST. Fixed at the application level: `cronSchedule` now fires
+   four UTC times a day (`"0 1,2,14,15 * * *"` — both the EDT and EST versions of ~9pm/~10am ET), and
+   `src/utils/tz_gate.py` (backed by `tz.is_scheduled_firing_hour`) checks the real current Eastern
+   wall-clock hour and only lets the actual pipeline run on the two firings that land on a target
+   hour — the other two exit 0 immediately (never reported as a failed deployment). Regression-tested
+   across both DST regimes.
 
 ### P1 — real, open modeling questions (not blocking, but the most valuable next research)
 
