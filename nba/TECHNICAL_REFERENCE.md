@@ -1301,12 +1301,15 @@ fix.
    either the naive floor or the season's own true variance shows no degradation at all — holdout is
    if anything the best-normalized stretch in the whole range. **Recommended next step, in order**:
    (a) formalize the normalization diagnostic into a real `validate_*.py` script rather than leaving
-   it ad hoc; (b) if it holds up, the combine log5-slope finding (§2.4) is the more promising concrete
-   lever — a fitted damping coefficient on the rating deviation terms (slopes measured at 0.916/0.907
-   vs. the assumed 1.0) is a genuinely new, well-motivated, already-diagnosed mechanism, distinct from
-   the three shrinkage-primitive levers already tried; (c) only pursue a dedicated era/quality-spread
-   regressor if (a) and (b) don't close the gap — don't jump straight to new-mechanism-building without
-   re-checking the metric itself first.
+   it ad hoc -- STILL NOT DONE; (b) ~~the combine log5-slope finding (§2.4) is the more promising
+   concrete lever~~ -- **TESTED AND REJECTED (2026-08-06, MODEL_DOCUMENTATION.md Sec48)**: `gamma_rtg`
+   damping shows a clean, real tradeoff at every value swept (improves total_mae, regresses margin_mae),
+   fails the net-win bar at Stage 1, no holdout spent; `gamma_pace` has no real effect at all. Don't
+   re-open this lever without a structurally different formulation. (c) **the only remaining real
+   option**: a dedicated era/quality-spread regressor -- a genuinely new mechanism, not yet built or
+   tested, meaningfully bigger scope than any lever tried so far (needs its own design, not a parameter
+   sweep on existing machinery). Worth doing (a) first regardless, since it's cheap and would confirm
+   whether (c) is even worth the scope before committing to it.
 6. **OREB team-level anchoring is closed, not open — NOW SIX independent mechanisms, including the
    shot-location data this doc previously said was missing (2026-08-07).** The external review's own
    concrete suggestion — `projected_team_OREB = projected_misses × projected_OREB_share` (misses from
