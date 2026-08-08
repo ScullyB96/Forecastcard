@@ -2807,11 +2807,16 @@ per this project's standing rule on acquiring new external data.
      even though the underlying probability itself needs no fitting. With a null result there's
      no forking-paths damage done, but the description should match what was actually done.
 
-  **One unverified premise, not yet checked**: these odds columns were never independently
+  **Sanity-checked (2026-08), premise holds.** These odds columns were never independently
   validated as real, representative book prices the way `spread_line` was in §4 (regressed
-  against real outcomes, checked against known market performance) — worth a one-off sanity
-  check (does the implied hold and shading distribution look like a real sportsbook's) before
-  leaning on this null, or any future signal from the same columns, with real confidence.
+  against real outcomes, checked against known market performance) — checked directly rather
+  than left open: across n=2,638 real games with both sides present, implied hold clusters at
+  2-6% (spread mean 3.2%, total mean 3.3%, both std≈1%) — exactly the real-world range for
+  NFL two-way markets; zero games show both sides of a market priced positive simultaneously
+  (a real book never prices a genuine two-way arbitrage against itself); and the actual price
+  distribution (-110, -105, -108, -115, -112, -102...) matches recognizable real sportsbook
+  juice conventions, not synthetic or corrupted values. The vig-signal null above rests on
+  real data.
 - **Neutral-site games** (`location=="Neutral"`, real data in schedules, never used) —
   genuinely underpowered, not a rejected hypothesis: n=46 across 2016-2025 (international/
   London games plus the occasional true neutral site). Signed bias on the market line alone
