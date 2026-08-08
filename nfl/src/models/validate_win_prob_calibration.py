@@ -29,7 +29,10 @@ from src.utils.stats import fit_linear
 TRAIN_SEASONS = {2018, 2019, 2020, 2021}
 CALIB_SEASONS = {2022, 2023}
 HOLDOUT_SEASONS = {2024, 2025}
-N_TRIALS = 300
+N_TRIALS = 5000  # matches production (raised from 300, 2026-08) -- fitting the calibration
+# constants on 300-trial outputs and applying them to production's 5000-trial outputs is a
+# real errors-in-variables mismatch (MC noise at fit time attenuates the fitted slope
+# relative to what cleaner inputs need), flagged by external review; refit on matching noise.
 
 
 def brier(pred: pd.Series, actual: pd.Series) -> float:

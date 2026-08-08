@@ -505,3 +505,50 @@ if __name__ == "__main__":
         print("-> Coefficient essentially survives controlling for team quality -- evidence against")
         print("   the confound hypothesis (at least the part our own rating system would catch).")
     print("(Interpretation belongs in MODEL_DOCUMENTATION.md §6.1.1, not hardcoded here.)")
+
+    print("\n=== T3.5 (2026-08, external review correction): T3.4's covariate had no power to")
+    print("    find anything -- redo with a covariate that actually could ===")
+    print("§4.3 already established Layer-1's own rating adds ~nothing over the market (49.05%")
+    print("ATS, no edge) -- so pregame_rating_diff has near-zero partial correlation with a")
+    print("market residual by PRIOR evidence in this exact document, and its own t=0.94 above")
+    print("confirms it. A covariate with no explanatory power over the outcome cannot move the")
+    print("treatment coefficient regardless of the true confounding structure -- T3.4's null was")
+    print("close to guaranteed before it ran, not real evidence against confounding. The actual")
+    print("candidate confound was always something correlated with the CB flag but NOT priced by")
+    print("the market: a same-week cluster of OTHER injuries the market hasn't fully absorbed.")
+    print("This covariate (real Out-designation count at every non-CB position, same team/week)")
+    print("is NOT orthogonal to the market residual by construction, so this test can actually fail.")
+    inj = pd.read_parquet(_latest_season_range_file(DATA_RAW, "injuries"))
+    inj["season"] = inj["season"].astype(int)
+    inj["week"] = inj["week"].astype(int)
+    other_out = inj[(inj["report_status"] == STATUS_OUT) & (inj["position"] != "CB")]
+    other_out_count = other_out.groupby(["season", "week", "team"]).size().reset_index(name="other_out_count")
+
+    conf_df2 = conf_df.merge(
+        other_out_count.rename(columns={"team": "team_a", "other_out_count": "home_other_out"}),
+        on=["season", "week", "team_a"], how="left",
+    )
+    conf_df2 = conf_df2.merge(
+        other_out_count.rename(columns={"team": "team_b", "other_out_count": "away_other_out"}),
+        on=["season", "week", "team_b"], how="left",
+    )
+    conf_df2["home_other_out"] = conf_df2["home_other_out"].fillna(0)
+    conf_df2["away_other_out"] = conf_df2["away_other_out"].fillna(0)
+    conf_df2["other_out_diff"] = conf_df2["away_other_out"] - conf_df2["home_other_out"]
+    print(f"other_out_diff summary: mean={conf_df2['other_out_diff'].mean():.3f}  "
+          f"std={conf_df2['other_out_diff'].std():.3f}  range=[{conf_df2['other_out_diff'].min():.0f},{conf_df2['other_out_diff'].max():.0f}]")
+
+    beta_uni2, t_uni2 = fit_ols_tstats(conf_df2["resid"], conf_df2[["cb_diff"]])
+    print(f"\nWITHOUT other-injuries covariate: cb_diff coef={beta_uni2[1]:+.3f}  t={t_uni2[1]:+.2f}")
+    beta_multi2, t_multi2 = fit_ols_tstats(conf_df2["resid"], conf_df2[["cb_diff", "other_out_diff"]])
+    print(f"WITH other_out_diff covariate: cb_diff coef={beta_multi2[1]:+.3f}  t={t_multi2[1]:+.2f}  "
+          f"(other_out_diff coef={beta_multi2[2]:+.4f}  t={t_multi2[2]:+.2f})")
+    pct_change2 = (beta_multi2[1] - beta_uni2[1]) / beta_uni2[1] * 100
+    print(f"\ncb_diff coefficient change when controlling for other-position injury burden: {pct_change2:+.1f}%")
+    if abs(pct_change2) > 30:
+        print("-> Substantial shrinkage -- real evidence the CB flag was partly proxying a")
+        print("   same-week broader-injury confound the market hadn't fully priced in.")
+    else:
+        print("-> Coefficient survives controlling for a covariate that COULD have explained it")
+        print("   away (unlike T3.4's) -- this time a real, non-tautological confound check.")
+    print("(Interpretation belongs in MODEL_DOCUMENTATION.md §6.1.1, not hardcoded here.)")

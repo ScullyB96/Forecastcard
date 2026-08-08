@@ -80,16 +80,24 @@ SWAP_B_MARKET = 2.970
 # recentered probability itself still shows a real, out-of-sample-confirmed miscalibration
 # pattern (overconfident near 0.5, underconfident in its most lopsided games). A strict
 # CALIB=2022-2023 -> HOLDOUT=2024-2025 split (never overlapping either the TRAIN=2018-2021
-# drive pools or each other) found linear-refit narrowly beat isotonic and Beta calibration on
-# HOLDOUT Brier (0.2064 vs 0.2065 vs 0.2067, vs. 0.2084 uncalibrated) -- same decision rule as
-# TD_PROB_CALIB (§9.4): linear ships since nothing beat it outright. FROZEN, not auto-refit
-# every run, unlike TD_PROB_CALIB -- doing this safely without leakage would require
-# re-simulating years of history walk-forward every pipeline run (this simulator's drive pools
-# are a single fixed TRAIN-period pool, not internally walk-forward like the share/rate
-# engines TD_PROB_CALIB's inputs come from), not worth the runtime cost for a ~1% Brier gain.
+# drive pools or each other) found linear-refit beat isotonic and Beta calibration on
+# HOLDOUT Brier -- same decision rule as TD_PROB_CALIB (§9.4): linear ships since nothing
+# beat it outright. FROZEN, not auto-refit every run, unlike TD_PROB_CALIB -- doing this
+# safely without leakage would require re-simulating years of history walk-forward every
+# pipeline run (this simulator's drive pools are a single fixed TRAIN-period pool, not
+# internally walk-forward like the share/rate engines TD_PROB_CALIB's inputs come from).
 # Fit on all of 2022-2025 (the strict split above already answered the out-of-sample question).
-WIN_PROB_CALIB_A = -0.1467
-WIN_PROB_CALIB_B = 1.2790
+#
+# Refit at 5,000 trials (2026-08, external review): the constants below were originally
+# fit on 300-trial simulator outputs, then production raised n_trials to 5,000 -- a real
+# errors-in-variables mismatch (Monte Carlo noise on the FIT-TIME inputs attenuates the
+# fitted slope relative to what the now-cleaner 5,000-trial inputs actually need). Refitting
+# on matching 5,000-trial outputs moved the constants modestly (B: 1.2790->1.2891, a ~0.8%
+# shift) -- confirms the mismatch was real, though not large enough to have been a serious
+# problem in practice. HOLDOUT Brier at 5,000 trials: no calibration=0.2084, linear-refit=
+# 0.2060 (still the winner; isotonic=0.2088, beta=0.2065).
+WIN_PROB_CALIB_A = -0.1512
+WIN_PROB_CALIB_B = 1.2891
 
 # TD-probability calibration: TD_PROB_CALIB_A/B is now AUTO-REFIT LINEAR every pipeline run
 # (review round 4, #7; see the computation below, near calib_bucket_means) -- not a frozen

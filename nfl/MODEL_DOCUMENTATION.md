@@ -22,10 +22,13 @@ For a given matchup, the model estimates each team's offensive and defensive str
 a recursive, opponent-adjusted EPA/play rating (Layer 1), converts the rating difference to
 a point margin and total via a linear calibration fit on real historical margins. **As of
 2026-07 (two review rounds), NEITHER margin NOR total blends with the market anymore** — a
-full ATS%/O-U%/CRPS/signed-bias panel found both blends statistically indistinguishable from
-a coin flip against the closing line (margin also carried a real negative bias market-alone
-didn't have; total's own-model weight was additionally found to be declining over time in a
-rolling-origin check — §4.3). Production now uses the market `spread_line`/`total_line`
+full ATS%/O-U%/CRPS/signed-bias panel found both blends' win rates statistically
+indistinguishable from a coin flip against the closing line (margin also carried a real
+negative bias market-alone didn't have — a decisive, well-powered result; total's own O/U%
+test had real power limitations and was NOT an equally decisive failure, §4.3 — removal there
+was for parsimony given the fuller evidence picture, including a declining own-model weight in
+a rolling-origin check, not an identical kill criterion to margin's). Production now uses the
+market `spread_line`/`total_line`
 directly (falling back to Layer 1's own calibration only when no line is published yet for a
 game), with a validated QB-swap adjustment and a symmetric cornerback-injury adjustment
 layered on top of margin (§5, §6 — both refit against this exact residual, since applying
@@ -95,7 +98,8 @@ Layer 1: recursive opponent-adjusted EPA power ratings      (src/models/ratings.
 MARGIN: real Vegas spread_line directly (Layer 1 calibration only as a fallback
         when no line is published yet) -- market blend REMOVED 2026-07, §4.3
 TOTAL:  real Vegas total_line directly, same fallback rule -- market blend ALSO
-        REMOVED 2026-07 (round 2, identical panel/kill-criterion as margin), §4.3
+        REMOVED 2026-07 (round 2, for parsimony -- NOT an identical decisive-failure
+        panel to margin's, that framing was corrected round 3), §4.3
         │
         ▼
 QB-swap adjustment (in-season + offseason bootstrap), refit against the MARGIN
@@ -214,10 +218,11 @@ joined in from `weekly_rosters`. Drop-in-compatible schema with the legacy
 ### 2.4 `src/ingest/parse_clay_pdf.py`
 One-time PDF extraction (pdfplumber + regex) of Mike Clay's 2026 ESPN Projection Guide —
 the only source in this project with real 2026-offseason information (incoming QB starters,
-rookie season-total projections) that `nfl_data_py` structurally cannot have for an
+rookie season-total projections) that the ingestion library structurally cannot have for an
 unplayed season. Produces `clay_2026_schedule.parquet` (superseded once
-`nfl_data_py.import_schedules([2026])` was confirmed to have the real schedule natively —
-verified to match Clay's Week 1 data exactly) and `clay_2026_player_projections.parquet`
+`import_schedules([2026])` — `nfl_data_py`'s at the time, now `nflreadpy.load_schedules`
+post-migration, §2.2.1 — was confirmed to have the real schedule natively, verified to match
+Clay's Week 1 data exactly) and `clay_2026_player_projections.parquet`
 (still load-bearing — see §5.5, §6.5). `TEAM_NAME_TO_CODE` / `OPP_CODE_FIXES` handle 5 team-
 code mismatches (CLV/BLT/ARZ/LAR/HST → CLE/BAL/ARI/LA/HOU) between Clay's naming and
 nflverse's.
@@ -330,7 +335,8 @@ Neither candidate is wired into the live pipeline; `PowerRatingEngine`'s fixed
 
 ## 4. Market blend (`src/models/market_blend.py`)
 
-**The single highest-value discovery this project made.** `nfl_data_py`'s schedule export
+**The single highest-value discovery this project made.** The schedule export (`nflreadpy`,
+migrated from `nfl_data_py` 2026-07, §2.2.1 — verified schema/value-identical for this data)
 already contains real historical Vegas closing lines — `spread_line`, `total_line`,
 `home_moneyline`, `away_moneyline`, `home_spread_odds`, `away_spread_odds`, `over_odds`,
 `under_odds` — 100% coverage 2016-2025, and lines are published for upcoming games well
@@ -382,7 +388,11 @@ implies the blend adds little-to-nothing for margin, and that grading everything
 `src/models/scoring.py` (`ats_win_rate`, `ou_win_rate`, `signed_bias`, `crps_gaussian`,
 `brier_score`, `log_loss_gaussian`, all with bootstrap CIs) and re-ran the comparison with
 the **exact growing-window methodology `weekly_update.py` actually uses** (not a single
-fixed-window approximation). Full panel, TEST=2022-2025, n=1058:
+fixed-window approximation). Full panel, TEST=2022-2025, n=1058 (**n note, 2026-08**: other
+margin analyses elsewhere in this document score n=1087 TEST games — this panel's n=1058
+reflects this specific script's own additional dropna requirements on the growing-window base
+prediction, not a different game-count definition of TEST; not re-derived in full here, flagged
+so a future reader doesn't mistake it for silent sample selection):
 
 | | MAE | ATS% vs. closing line | Signed bias (95% CI) | CRPS |
 |---|---|---|---|---|
@@ -502,7 +512,8 @@ game of the prior season. This means the swap-delta mechanism **already covers o
 transitions**, not just in-season ones, without any special-casing.
 
 ### 5.2 Offseason QB-swap bootstrap (`predict_2026.py`, ported into `weekly_update.py`)
-`nfl_data_py`'s schedule has **no starter QB for any unplayed game** (confirmed directly:
+The schedule data (`nflreadpy`, migrated from `nfl_data_py` 2026-07, §2.2.1 — true of both)
+has **no starter QB for any unplayed game** (confirmed directly:
 `home_qb_id`/`away_qb_id` are NaN for every 2026 Week 1 row) — so a team whose real starter
 changed via trade/free-agency/retirement is invisible to every engine here until that team
 actually plays a game. Clay's PDF (§2.4) is the only source with that information.
@@ -515,10 +526,45 @@ attempts) from a handcuff (<100)). `SWAP_B` is reused for the point-value adjust
 This whole block is scoped tightly: only fires when `pred_season==2026 and pred_week==1
 and clay_path.exists()` — it naturally stops mattering the moment Week 1 is actually played
 (real starter data takes over), and in a future season with no new Clay extraction, it
-silently no-ops rather than guessing. **Validated specifically for the offseason case**
-(not just assumed to transfer from the in-season fit): 47 historical Week-1 offseason-swap
-games, MAE 7.55 → 7.39 with the adjustment applied — smaller effect than in-season swaps
-(11.41 → 11.29) but real and correctly signed.
+silently no-ops rather than guessing. The 47-game, MAE 7.55→7.39 figure quoted here
+historically predates the market-residual basis entirely (its 11.41→11.29 in-season
+companion is Layer-1-era; the current market-era in-season MAE is ~9.5, §4.3) — it was never
+actually re-validated against `SWAP_B_MARKET` or the market residual. That gap matters more
+than it would for any other adjustment in this project: with 2026 CB flags unable to fire yet
+(no 2026 injury data exists) and the weather adjustment a no-op this far from kickoff (§8),
+**this bootstrap is the model's entire source of disagreement with the market for the one
+week about to be published** — every other adjustment layer is silent for Week 1 2026.
+
+**Re-validated 2026-08 (external review) against the real basis this deserved.** The
+in-season justification ("Layer 1 updates slowly, so the market may lag a sudden midweek
+change") doesn't obviously extend to an offseason trade/signing — the single most public,
+most-priced information in the sport, with months for the opening line to absorb it before
+Week 1. `src/models/validate_offseason_swap_effect.py` splits the general swap-delta signal
+(the one `SWAP_B_MARKET` was actually fit on, §6.1.1) into CROSS-SEASON (a team's QB changed
+between its last game of season N and first game of season N+1 — the real offseason
+analog) vs IN-SEASON, and separately fits/scores each against the real market residual,
+walk-forward TRAIN=2018-2021/TEST=2022-2025:
+
+| | n TRAIN | n TEST | TRAIN fit (own-subset SWAP_B, t-stat) | TEST MAE, own-subset fit | TEST MAE, production 2.970 |
+|---|---|---|---|---|---|
+| Cross-season only | 51 | 47 | +5.21 (t=+0.79) | 8.223 → 8.577 (worse) | 8.223 → **8.129** (better) |
+| In-season only | 178 | 209 | +2.38 (t=+0.77) | 10.318 → 10.699 (worse) | 10.318 → 10.339 (~flat) |
+
+Splitting the signal this finely makes each own-subset TRAIN fit too noisy to generalize on
+its own (t≈0.77-0.79 either way, and each own-subset coefficient makes its own TEST worse) —
+n=47-51 cross-season games simply isn't enough to independently pin down a cross-season-
+specific coefficient. But that's a sample-size limitation of the split, not evidence the
+effect is zero: the current production value, fit on the full pooled (mostly in-season)
+sample and applied to the cross-season-only TEST games it was never specifically tuned for,
+holds up — a real, if modest, MAE improvement (8.223→8.129), not a collapse to zero or a
+sign flip. **Net: this does not confirm Fable's predicted failure mode (the coefficient
+"coming back indistinguishable from zero"), but n=47 is genuinely too thin to call this a
+strong, independent confirmation either.** Honest position, consistent with how this project
+treats every other borderline-evidence component: hold with real but bounded confidence — the
+mechanism concern is legitimate and worth remembering, the data available doesn't currently
+support acting on it (zeroing the Week 1 margin effect), and this is exactly the kind of
+question the pristine-2026 CLV log (§10.6, §11.2.1) will get real, prospective evidence on
+this season.
 
 ### 5.3 `src/models/qb_passing_stats.py` — full passing statline (added 2026-07)
 Before this, the props pipeline had **no QB passing projection at all** — a QB's only
@@ -626,7 +672,11 @@ opposite — roughly doubles the effective sample for that coefficient; the pool
 jumps from -2.43/+3.27 (independent) to +4.01 (symmetric). A strict walk-forward check
 confirms it generalizes better, not just fits better in-sample: on the CB-flagged holdout
 subset (n=183), MAE 9.968→9.836 and signed bias +1.596→+0.542 (a real improvement in
-calibration, not just noise). **Current production value:**
+calibration, not just noise). **(n reconciliation, 2026-08: this 183 is on the OLD Layer-1/
+blend-residual basis used at the time of this round; later sections' n=186/192 use the CURRENT
+production formula — market line + QB-swap + CB term, §T3.1 — a different base that naturally
+flags a slightly different game count. Not silent sample selection on the same data.)**
+**Current production value:**
 ```
 margin_adjustment = -0.018 + 0.000*away_skill_out + 0.000*away_ol_out
                           - 2.977*home_cb_out     + 2.977*away_cb_out
@@ -648,7 +698,9 @@ multiple-comparisons caveat should worry about most. `src/models/validate_adjust
 (added 2026-07, extended 2026-07) closed the measurement gap, but the first pass mis-scored
 what it measured:
 
-- **Full ATS panel, CB-flagged subset, RESUBSTITUTION** (TEST=2022-2025, n=186): ATS%=62.4%,
+- **Full ATS panel, CB-flagged subset, RESUBSTITUTION** (TEST=2022-2025, n=186 — 192 total
+  flagged games minus 6 real pushes, which ATS win-rate excludes by definition but MAE/CRPS/
+  bias checks elsewhere in §6.1.1 don't need to): ATS%=62.4%,
   95% CI [55.4%, 68.8%]. **This number is in-sample and was originally reported as if it
   weren't.** It uses `JOINT_COEFS_FORWARD`'s pooled 2018-2025 coefficient (2.977) — fit on
   data that includes the very 2022-2025 games being scored. That's resubstitution, not an
@@ -842,32 +894,57 @@ effect near this magnitude" from "inflated estimate/confound":**
   real, bounded, peaked curve.** MAE bottoms out around 4.0 (barely below 2.977's 9.802) and
   then degrades on the far side badly enough that by 8.0 it's *worse than having no CB term at
   all* (10.149 at coefficient=0.0, §T3.2 above). A confound proxying something unboundedly
-  large would keep improving indefinitely; this doesn't. What it DOES show: this exact
-  holdout's own accuracy-minimizing point sits modestly higher (~4.0) than even the pre-shrink
-  v3 value (2.977), let alone the shipped v4 (2.446) — reinforcing, more sharply than §T3.2
-  alone, that nothing in our own held-out accuracy data wants a smaller coefficient. The
-  differences involved are small relative to n=192, though, and this is now the third or fourth
-  time this same CB-flagged TEST slice has been re-examined across this document's rounds —
-  a real, standing tension with this project's own "touch TEST once per question" discipline,
-  not resolved here.
+  large would keep improving indefinitely; this doesn't.
 
-- **§T3.4, does the CB flag survive controlling for team quality?** Added the team's own
-  Layer-1 `pregame_rating_diff` as a covariate in the same pooled 2018-2025 residual regression
-  that produces `JOINT_COEFS_FORWARD`'s CB coefficient — if a generic "this team is just worse
-  overall" confound (that our own independent rating system would already capture) were driving
-  the apparent CB effect, adding this covariate should shrink the CB coefficient substantially.
-  It doesn't: `+2.990` (t=+4.01) without the covariate vs. `+2.972` (t=+3.99) with it — a
-  **−0.6% change**, essentially no movement at all (`pregame_rating_diff` itself is not
-  significant here, t=+0.94). **This is real evidence against the confound hypothesis** — at
-  least the specific, checkable form of it (generic team quality already visible to our own
-  Layer-1 ratings). It does not rule out a confound our rating system wouldn't catch (e.g. a
-  cluster of same-week secondary injuries correlated with, but not captured by, season-to-date
-  team strength).
+  **Correction (2026-08, external review): the "nothing wants a smaller coefficient" framing
+  above overstated what this actually shows, and the honest comparison points the other way.**
+  The "held-out" label on the 2.977/4.0 candidates is not fully earned — 2.977 was fit on the
+  same pooled 2018-2025 data that contains this sweep's own n=192 test sample, so finding an
+  optimum near the pooled-fit value is close to tautological, not new corroboration. The
+  genuinely independent numbers in this document are the rolling-origin fold coefficients
+  (§6.1.1 above): every strictly-out-of-sample fold sits in **[1.59, 2.63]** — none of the
+  honest, walk-forward-only fits ever got anywhere near 4.0. That gap between the honest fold
+  range and the sweep's in-sample-flavored optimum **is the resubstitution effect, quantified**
+  — and it mildly *supports* the literature-side magnitude skepticism above, not the "our data
+  argues against shrinking" conclusion this section previously drew. What legitimately survives
+  from this sweep: the *shape* (bounded, not runaway) is real anti-confound evidence; the
+  specific optimum location (~4.0) is not independent confirmation of anything. This is now the
+  third or fourth time this same CB-flagged TEST slice has been re-examined across this
+  document's rounds — a real, standing tension with this project's own "touch TEST once per
+  question" discipline. **Rule going forward: no further queries against this specific slice
+  until the CLV log (§10.6, §11.2.1) produces prospective 2026 data** — everything answerable
+  from 2022-2025 has been asked, to within its own noise floor.
 
-**Updated decision, same as before, on firmer footing**: no coefficient change. The extended
-sweep found a real, bounded optimum (not a runaway confound signal) that if anything sits above
-current production, and the team-quality confound test found no evidence the CB flag is a
-generic-quality proxy. Both results argue *against* shrinking, reinforcing rather than
+- **§T3.4/§T3.5, does the CB flag survive controlling for a real confound candidate?**
+  §T3.4 added the team's own Layer-1 `pregame_rating_diff` as a covariate — but **this was a
+  structurally weak test, corrected in §T3.5 (2026-08, external review).** §4.3 already
+  established, elsewhere in this exact document, that Layer-1's own rating adds ~nothing over
+  the market (49.05% ATS, no edge) — so `pregame_rating_diff` has near-zero partial correlation
+  with a market residual by *prior evidence already on record here*, confirmed again by its own
+  t=+0.94 in this fit. A covariate with no explanatory power over the outcome cannot move the
+  treatment coefficient regardless of the true confounding structure, so §T3.4's null
+  (`+2.990`→`+2.972`, −0.6%) was close to guaranteed before it ran — not real evidence against
+  confounding, just a test that couldn't have found one.
+
+  **§T3.5 redoes this with a covariate that actually could fail**: the real count of Out-
+  designated players at every OTHER position, same team/week (excluding CB) — something
+  correlated with the CB flag but plausibly *not* fully priced by the market (a same-week
+  cluster of secondary injuries), unlike `pregame_rating_diff` which the market has already
+  absorbed by construction. This covariate has real, non-zero (if modest) explanatory power of
+  its own (`other_out_diff` coefficient +0.130, t=+0.94 — not itself significant, but not
+  structurally zero either, unlike T3.4's covariate). With it added: `+2.990`→`+2.951`
+  (**−1.3%**), again essentially unchanged. **This time the survival is real, non-tautological
+  evidence against the confound hypothesis** — the CB coefficient held up against a control that
+  had genuine power to move it. It still doesn't rule out every conceivable confound (a subtler
+  mechanism than "other injuries that week"), but it's a materially stronger check than §T3.4's.
+
+**Updated decision, same as before, on firmer footing for a different reason than previously
+stated**: no coefficient change. The extended sweep's *shape* (bounded, not runaway) is real
+anti-confound evidence, but its specific optimum (~4.0) is not — the honest rolling-origin
+fold range [1.59, 2.63] never gets there, and that gap itself supports magnitude skepticism.
+The corrected confound test (§T3.5, not §T3.4) is where the real reassurance comes from: a
+control with genuine power to explain the CB effect away didn't. Net: hold direction with real
+confidence, magnitude with real skepticism — reinforcing rather than
 resolving the standing tension with the real-world benchmark. ±2.446 stays — already the
 conservative choice within what the data supports — held with real confidence on direction,
 real skepticism on magnitude relative to the literature, and an explicit acknowledgment that
@@ -933,7 +1010,8 @@ NFL history got literally zero projected volume in the live pipeline. Draft-capi
 this and works automatically every season (no manual annual PDF re-extraction).
 
 Fits expected first-season `target_share`/`carry_share` on `(position, round)` using real
-draft data (`nfl_data_py`'s own `import_draft_picks` — direct `gsis_id` linkage, no fuzzy
+draft data (`nflreadpy.load_draft_picks`, migrated from `nfl_data_py.import_draft_picks`
+2026-07, §2.2.1 — schema/value-identical, direct `gsis_id` linkage, no fuzzy
 name matching needed at all, unlike the Clay pattern) plus real rookie-season outcomes,
 2016-2025. Bayesian-shrunk per `(position, round)` bucket toward the position-wide mean by
 bucket sample size — same shrinkage principle as `TdRateEngine`, applied to draft-round
@@ -1524,6 +1602,23 @@ trials the MC error drops to ~0.7pp. Confirmed via a real timed run that this is
 16 games × 5,000 trials adds well under a minute to a ~1.5-minute full pipeline run (up from
 ~1 minute at 300 trials) — not worth trading calibration precision for.
 
+**Follow-through, same round: refit `WIN_PROB_CALIB_A/B` at matching trial count.** Raising
+production's trial count without refitting the calibration constants left a real mismatch:
+the constants were fit on 300-trial simulator outputs, a genuine errors-in-variables problem
+(Monte Carlo noise on the FIT-TIME inputs attenuates the fitted slope relative to what
+cleaner inputs actually need) — flagged directly by external review rather than assumed
+harmless. Reran `validate_win_prob_calibration.py` at `N_TRIALS=5000` (same CALIB/HOLDOUT
+split, same decision rule): linear-refit still wins on HOLDOUT Brier (0.2060 vs. 0.2084
+uncalibrated, 0.2088 isotonic, 0.2065 Beta — isotonic notably worse at 5,000 trials than it
+was at 300, beta essentially unchanged), confirming the model-class decision itself was
+never in question. The constants did move, confirming the mismatch was real: `A: -0.1467→
+-0.1512`, `B: 1.2790→1.2891` (~0.8% shift in the slope) — modest, not a sign of a serious
+prior problem, but a real, measurable one worth fixing rather than leaving on record.
+Production now uses the matching-resolution refit. Verified end-to-end on a live run: win
+probabilities range 33.8%–85.9% across the same 16 Week 1 2026 games, moneylines move with
+margins as expected, no degenerate values — materially unchanged from the pre-refit slate
+given how small the constant shift was, as expected.
+
 **Total is now shipped too (review round 4, #5), unblocked by the same fix.** Total was held
 back because its MAE (12.28) trails the top-down model's (10.20) — but that gap is location,
 and `our_total` already provides the better location estimate. Recentered the same way and
@@ -1715,10 +1810,15 @@ Real, consistent, but individually modest per-metric improvements (log-loss ~1.6
 correctly, don't look nearly as dramatic once not aggregated away.
 
 **Tail calibration at ≥7 targets, top 5% of predicted probability** (the bucket that actually
-gets bet): naive Binomial's predicted mean is 0.907 against a realized rate of 0.829 — a real
-7.8-point overshoot, i.e. naive is overconfident exactly where it matters most. The bootstrap
-simulator's predicted mean is 0.864 against the same 0.824 realized rate — only a 4.0-point
-overshoot, essentially halving the tail overconfidence. **This is the single most decision-
+gets bet): naive Binomial's predicted mean is 0.907 against a realized rate of 0.829 (n=819,
+naive's own top-5%-by-its-own-probability selection) — a real 7.8-point overshoot, i.e. naive
+is overconfident exactly where it matters most. **Note (2026-08, clarity fix): "top 5%" is
+each method's OWN top-5%-by-its-own-predicted-probability selection, not the same 819 games
+for both** — naive and the bootstrap simulator rank games differently, so their top-5% subsets
+overlap heavily but aren't identical, and each has its own realized rate rather than sharing
+one. The bootstrap simulator's predicted mean is 0.864 against its own realized rate of 0.824
+(n=820) — only a 4.0-point overshoot, essentially halving the tail overconfidence. **This is
+the single most decision-
 relevant number in this section** — it's real evidence the bootstrap approach is doing
 something naive Binomial structurally can't (respecting the heavy right tail documented
 above), concentrated exactly where a bettor would actually transact.
@@ -1774,8 +1874,10 @@ NOT an improvement, and at two of three thresholds it's measurably worse:**
 
 Raw wins outright at ≥3 and ≥5 on both metrics; the two are essentially tied at ≥7 (each wins
 one metric by a margin smaller than rounding noise). Tail calibration at ≥7 (the
-decision-relevant bucket) is also a near-wash: predicted-mean 0.864 (raw) vs. 0.863
-(demeaned) against the same 0.827 realized rate.
+decision-relevant bucket) is also a near-wash: predicted-mean 0.864 (raw, n=820, its own
+top-5% selection) against its own realized rate of 0.824, vs. 0.863 (demeaned, n=823, its own
+top-5% selection) against its own realized rate of 0.827 — different top-5% subsets by
+construction (each method ranks games differently), not the same number reused.
 
 **Verdict: this is the opposite of a bug — the raw bootstrap's tier-level bias is a real,
 calibration-positive signal, not noise to strip out.** The mechanism: `TouchCountSimulator` is
@@ -1981,7 +2083,9 @@ claims.
 ## 12. Recurring engineering patterns and gotchas worth knowing
 
 ### 12.1 The silent partial-fetch bug (§2.2)
-`nfl_data_py`'s multi-season loaders can drop a season with zero exception. Always verify
+The original incident was with `nfl_data_py` specifically (its multi-season loaders could
+drop a season with zero exception); the guard this motivated is generic and still applies
+post-migration to `nflreadpy` (§2.2.1). Always verify
 season-completeness after any bulk fetch before trusting the result; `_cached()` now does
 this automatically, but if a *new* loader function is ever added outside `fetch.py`, it
 needs the same guard.
@@ -2043,8 +2147,8 @@ Two minor, non-bug findings from this pass, worth recording rather than fixing:
 
 ### 12.1.2 Injury-flow rehearsal (2026-07, ahead of the season — no real 2026 injury data exists yet)
 
-Two checks, one real, one synthetic (real 2026 injury-report data still 404s from
-`nfl_data_py` as of this writing, so a live end-to-end rehearsal isn't possible yet):
+Two checks, one real, one synthetic (real 2026 injury-report data still isn't published
+via `nflreadpy` as of this writing, so a live end-to-end rehearsal isn't possible yet):
 
 - **Real**: the manual-override mechanism (§6.2, `known_outs_2026.json`) already has a real,
   verified entry (Zach Charbonnet, SEA RB, PUP list) sitting in production right now.
@@ -2101,7 +2205,7 @@ the fix.
 
 Found via the standard `props.duplicated(subset=["game_id","team","player"])` check
 immediately after the §12.1.3 fix (same debugging session, different root cause).
-`rookie_fallback_rb_rates()` (the Clay-PDF-based rookie prior, §7.x) triggers purely on "zero
+`rookie_fallback_rb_rates()` (the Clay-PDF-based rookie prior, §6.3) triggers purely on "zero
 real engine history for this player" — it never checks whether that player is *also* currently
 marked Out via roster status (`out_ids`). A true rookie who is both zero-history AND Out gets
 rendered twice: once correctly as `status_note="OUT"` via the main per-team loop, and once more
@@ -2169,10 +2273,19 @@ specific preseason forecast, same pattern as `SWAP_B_LAYER1`/`TD_PROB_CALIB` the
 "actual_margin − blended_pred" back when the margin blend still existed (blend weight on
 market was already 88-98%, so blended_pred was already very close to the pure market line) —
 now that the blend is fully removed and production margin is exactly the market line, this
-was worth checking directly rather than assuming it still holds. It does: R1.3's ATS panel
-(§6.1.1) tested the CURRENT production formula directly (market line + these exact
-coefficients) and found a real, strong result (62.4% ATS) — an independent empirical
-re-confirmation, not just an argument that the residual bases are "close enough." QB passing
+was worth checking directly rather than assuming it still holds. It does, but the citation
+here needs a **correction (2026-08, external review): the 62.4% figure is the resubstitution
+number §6.1.1/round 4 later invalidated as evidence** (fit on data overlapping its own test
+window) — citing it as "independent empirical re-confirmation" was exactly the kind of
+citation this section's own stale-coupling sweep exists to catch, not something that survives
+it. The underlying stale-coupling conclusion still holds, just via a different, valid citation:
+ATS is a sign-of-disagreement metric, magnitude-insensitive by construction, so the
+resubstitution and walk-forward numbers are very nearly the same statistic (§6.1.1) —
+R1.3's **walk-forward** ATS (61.8%, honestly out-of-sample) is the number that actually
+confirms these coefficients still produce the same-signed bet on the current production
+formula. That's real confirmation of "the coefficients weren't broken by the blend removal";
+it says nothing about whether 61.8%/62.4% itself is a strong result independent of the
+multiplicity concern §6.1.1 covers separately. QB passing
 stat prior weights (`qb_passing_stats.py`: `YARDS_PRIOR_WEIGHT`/`TD_PRIOR_WEIGHT`/
 `INT_PRIOR_WEIGHT`, all still swept constants) have no downstream calibration correction
 depending on them, so there's no analogous coupling risk there — unlike `TD_PROB_CALIB`,
@@ -2194,8 +2307,10 @@ Every engine's `predict()` is called *before* `update()` for a given row, and ev
 TRAIN/(VAL)/TEST split, with no lookahead within a single fit — but "touched at most once"
 describes the *discipline of any one fit*, not a claim that TEST has only been looked at
 once in this project's history. It has been re-examined many times across many distinct
-hypotheses (~60-70 and counting — §13.0's running count is the honest figure here, not this
-section). Forward-looking production calibration deliberately uses a different, more recent
+hypotheses (**§13.0's running count is the honest, current figure — deliberately not
+duplicated as a number here, since two counters drifting independently is exactly the
+stale-number bug a 2026-08 pass found and fixed between this section and §13.0/§14**).
+Forward-looking production calibration deliberately uses a different, more recent
 window (§3.3) for documented substantive reasons, not by accident.
 
 ### 12.4 Bayesian/Laplace shrinkage as the one general-purpose tool
@@ -2223,17 +2338,40 @@ here whether it worked or not. Making the count explicit matters because of real
 comparisons exposure: at a conventional p<0.05 threshold, a handful of false positives are
 expected purely by chance across enough independent tests.
 
-**Approximate running count: ~80-90 distinct TEST-window experiments** as of 2026-08 (~75-85
-as of 2026-07: the original review estimated ~30-40 pre-review; round-1 implementation added
-~25-30 more; round-2 added roughly 10-15 — TD-calibration refit, EB ≥100-touch diagnostic, the
-CB ATS/rolling-origin/snap-rank panel, the pending totals panel; +5 more in 2026-08's follow-up
-round: the win-probability CALIB/HOLDOUT calibration comparison, the props-simulator demeaning
-test, and the CB-coefficient magnitude sweep/extended-sweep/team-quality-confound trio — some
-genuinely single hypotheses, some small multi-part investigations counted as one entry each).
-**Fixed a real stale-counter bug here 2026-08: §14 was citing this section as "~85-95+" while
-this section itself still said "~75-85" — this section is the authoritative count; §14 now
-matches it exactly rather than drifting independently.** Given this base rate, expect on the
-order of 3-4 "significant" results in this ledger to be false positives, not real effects. **Items
+**Counting convention (made explicit 2026-08, external review): one entry per distinct
+validate_*.py script or hypothesis family, not per internal sub-flag/threshold/subset.** A
+script that tests four timing flags against two targets (§13.2's day-of-week check) is one
+entry, not eight — an undefined convention lets the count mean whatever's convenient, so this
+is the rule from here on. This makes the count a floor on real multiplicity exposure, not a
+ceiling — genuinely more independent statistical tests were run than entries counted.
+
+**Approximate running count: ~85-100 distinct entries** as of 2026-08 (external review found
+this section's own arithmetic didn't add up — 30-40 + 25-30 + 10-15 sums to 65-85, not the
+"~75-85" previously stated here; corrected to **~65-85 as of 2026-07**: the original review
+estimated ~30-40 pre-review; round-1 implementation added ~25-30 more; round-2 added roughly
+10-15 — TD-calibration refit, EB ≥100-touch diagnostic, the CB ATS/rolling-origin/snap-rank
+panel, the pending totals panel). **2026-08 added roughly 20 more entries across two rounds**,
+not the 5 this section credited itself with until this fix — the first 2026-08 pass counted
+only its own CB-sweep/win-prob-calibration trio and missed everything else run the same week:
+the win-probability CALIB/HOLDOUT calibration comparison, the props-simulator demeaning test,
+the CB-coefficient magnitude sweep (+ its later extension and two confound-test versions,
+counted as one family), the temperature weather signal (shipped), and five further schedule-
+metadata checks (rest differential, day-of-week/primetime, market-vig asymmetry, neutral-site,
+head-coach experience, playoff-bubble stakes — six, not five, see §13.2), plus this round's
+offseason-vs-in-season QB-swap split test and the WIN_PROB_CALIB 5,000-trial refit. **This
+counter went stale again within the same dated round it was first fixed** (§14 was citing
+"~85-95+" against this section's then-current "~75-85" — both numbers are now replaced, and
+kept in sync going forward the way the fix below describes, not by another one-time
+correction). Given this base rate, expect on the
+order of 4-5 "significant" results in this ledger to be false positives, not real effects.
+
+**Procedural fix, not another one-time correction**: update this count in the same commit/
+edit that adds any new `validate_*.py` script or extends an existing one with a genuinely new
+hypothesis — not as a periodic audit. §12.3 no longer states its own copy of this number for
+exactly this reason (a second counter can only drift, never help). **Standing rule, also new
+2026-08: no further queries against the CB-flagged TEST subset specifically** (§6.1.1's sweep
+section) **until the CLV log produces prospective 2026 data** — that slice has been asked
+everything it can honestly answer from 2022-2025 alone. **Items
 worth the most skeptical re-look under this lens** — not because anything specific is wrong
 with them, but because their statistical margin is thin relative to how confidently they're
 currently treated:
@@ -2284,7 +2422,9 @@ not the ones this multiple-comparisons caveat should make anyone doubt.
 - Full QB passing statline (§5.3)
 - 4-signal injury adjustment for game margin: skill/OL/CB Out flags, top-3 CB — **as
   originally validated (`JOINT_COEFS`, historical backtesting only); forward production uses
-  the reduced, refit `JOINT_COEFS_FORWARD` v3, see §6.1.1** (§6.1)
+  the reduced, refit `JOINT_COEFS_FORWARD`, currently v4 (±2.446, shrunk to the rolling-origin
+  fold median — corrected 2026-08, this bullet said "v3" (±2.977) after v4 had already
+  shipped), see §6.1.1** (§6.1)
 - Injury/PUP/IR detection + position-specific reallocation: RB yes, WR/TE no (§6.2)
 - Rookie fallback via Clay projections, triggered on zero-history not roster-absence (§6.3)
 - TD-rate/catch-rate `prior_weight`, empirical-Bayes-fitted (superseding the earlier swept
@@ -2298,7 +2438,12 @@ not the ones this multiple-comparisons caveat should make anyone doubt.
 - Dome/indoor total-points bump (§7.4)
 - Wind adjustment for QB yards/attempt and WR/TE yards/target specifically (§8)
 - Target/carry share (ShareEngine), TD rate/yards/catch-rate (TdRateEngine) (§9)
-- TD-probability calibration: isotonic regression, refit every pipeline run (§9.4)
+- TD-probability calibration: auto-refit LINEAR map, refit every pipeline run (§9.4) —
+  **correction (2026-08): this bullet said "isotonic regression" until this fix; round 3
+  shipped isotonic, round 4 reverted it** (isotonic underperformed a strict walk-forward
+  comparison and had only been kept on resubstitution-flavored evidence) — the reversion
+  never made it back to this ledger entry until now, a real self-contradiction that survived
+  next to a correct bullet describing the same component elsewhere in this document (§0, §9.4)
 - Garbage-time filtering for Layer 1 EPA calculation (validated earlier in project history)
 - Doubtful-status and nickel-CB refinements to the injury signal (top-3, not top-2) (§6.1)
 
@@ -2308,12 +2453,17 @@ A third-party technical review of this model (`MODEL_REVIEW_2026-07.md`, reviewe
 this documentation) produced a prioritized, phased implementation plan. Phase 0 ("foundation
 fixes — changes what 'better' means for everything after") is complete:
 
-- **Margin blend removed, total blend kept** (§4.3) — proper scoring-panel evidence (ATS%,
-  CRPS, bootstrap-CI signed bias, not just MAE) showed the margin blend's ATS win rate
-  (49.6%) is statistically indistinguishable from a coin flip and carries a real negative
-  bias market-alone doesn't have. Confirmed with the user before implementing (an
-  architecture change, not a coefficient tweak). Total's blend showed no such harm and was
-  left as-is.
+- **Margin blend removed, total blend kept — this bullet is a frozen historical record of
+  Phase 0 specifically, SUPERSEDED by round 2 (§4.3): the total blend was also removed
+  shortly after this was written.** Read this bullet as "what Phase 0 alone did," not
+  current state — current state is both blends removed, real Vegas lines used directly for
+  both margin and total (§0, §4.3). At the time: proper scoring-panel evidence (ATS%, CRPS,
+  bootstrap-CI signed bias, not just MAE) showed the margin blend's ATS win rate (49.6%) is
+  statistically indistinguishable from a coin flip and carries a real negative bias
+  market-alone doesn't have. Confirmed with the user before implementing (an architecture
+  change, not a coefficient tweak). Total's blend showed no such harm *by this specific
+  round's evidence* and was left as-is *for now* — round 2 revisited it with fuller evidence
+  and removed it too, for parsimony rather than an identical decisive failure (§4.3).
 - **QB-swap/injury coefficients refit against the blend residual** (§5.1, §6.1.1) — both were
   originally validated against the pure Layer-1 residual, but the live pipeline applies them
   on top of the (now partially removed) blended prediction; refitting confirmed real
@@ -2345,8 +2495,13 @@ fixes — changes what 'better' means for everything after") is complete:
 
 **Phase 2** ("score-distribution Monte Carlo layer," the review's biggest-lift item) has a
 real, working, honestly-validated first build — margin/win-probability distributions
-competitive with the current point estimate, total scoring still behind — see §9.5 for the
-full three-iteration writeup. Not yet wired into the live pipeline.
+competitive with the current point estimate, total scoring still behind at the time this was
+written — see §9.5 for the full three-iteration writeup. **This bullet is a frozen historical
+record, SUPERSEDED twice since: margin/win-probability were wired into the live pipeline in
+round 2 (§9.5), and total was wired in round 4 (§9.5) once the recentering fix unblocked it —
+both are live in production today, plus a 2026-08 win-probability calibration correction and
+Monte Carlo trial-count increase (§9.5.1).** "Not yet wired into the live pipeline" describes
+Phase 2 at the moment it was completed, not current state.
 
 **Phase 3** ("props simulator + prior-fitting refinement") is complete:
 - Empirical-Bayes fitted `prior_weight` (§6.4) — real, shipped win; TD-rate/catch-rate priors
@@ -2431,27 +2586,38 @@ external-data approval).
 - **Full ATS panel on the CB-flagged / QB-swap-flagged subsets, plus rolling-origin CV on the
   CB coefficient and a snap-rank discriminator** (§6.1.1, `src/models/validate_adjustment_layer.py`)
   — the entire live betting edge of the game-side margin model now lives in this adjustment
-  layer, and it had only ever been graded on MAE/signed bias. Result: the CB adjustment is a
-  **real, statistically meaningful edge** (ATS%=62.4%, 95% CI [55.4%, 68.8%], clears breakeven
-  even at the CI floor) with a stable, sign-consistent rolling-origin refit (1.000 sign
-  consistency, magnitude range [1.59, 2.63]) — this is a genuine, newly-quantified strength,
-  not just a closed measurement gap. The QB-swap adjustment's direct ATS test, by contrast,
-  confirms rather than resolves its known thinness (55.0%, CI crosses 50%). The snap-rank
-  discriminator came back inconclusive (small per-rank samples, 37-103).
+  layer, and it had only ever been graded on MAE/signed bias. Result at the time this bullet
+  was first written: ATS%=62.4%, 95% CI [55.4%, 68.8%]. **Correction (round 4, then reinforced
+  2026-08): that 62.4% is a resubstitution number** (fit on data overlapping its own scoring
+  window) — round 4 found the honest walk-forward figure (61.8%) sits at only the ~95th
+  percentile of a null that correctly prices in the full historical specification search, not
+  comfortably clear of it. The rolling-origin refit is real and holds up as described (1.000
+  sign consistency, magnitude range [1.59, 2.63]) — that part of this bullet's original claim
+  survives; the ATS-as-decisive-strength framing does not. See §6.1.1 for the full, current
+  honest position: direction held with confidence, magnitude held with real skepticism (now
+  additionally checked against real-world value benchmarks and two confound tests, still
+  2026-08). The QB-swap adjustment's direct ATS test, by contrast, confirms rather than
+  resolves its known thinness (55.0%, CI crosses 50%). The snap-rank discriminator came back
+  inconclusive (small per-rank samples, 37-103).
 - **Full panel on the total blend, matching margin's rigor** (§4.3,
   `src/models/validate_market_blend_totals.py`) — round 1 kept the total blend on MAE + a
-  single p-value alone, the same thin evidence state that hid margin's harm. The identical
-  panel found the same decisive failure: O/U%=50.1%, CI [47.2%, 53.0%], indistinguishable
-  from a coin flip and spanning well below breakeven, plus a declining (though sign-stable)
-  own-model weight in a rolling-origin check. **The total blend was removed**, same as
-  margin, on the identical kill criterion the approved plan specified — production now uses
-  `total_line` directly. This is a second real architecture change this round, not just a
-  measurement exercise.
+  single p-value alone, the same thin evidence state that hid margin's harm. **Correction
+  (round 3, propagated here 2026-08): the O/U% test was not the decisive failure this bullet
+  originally implied.** O/U%=50.1%, CI [47.2%, 53.0%] has genuinely low statistical power at
+  this sample size — round 3 found it wasn't safe to call this "the same decisive failure
+  pattern" that killed the margin blend on ATS alone. **The total blend was still removed**,
+  but for parsimony given the fuller evidence picture (a declining, though sign-stable,
+  own-model weight in a rolling-origin check, plus the same reasoning that motivated removing
+  margin's blend for a smaller, real edge), not because this specific panel decisively failed
+  the way margin's did. Production uses `total_line` directly either way — the architecture
+  change itself is correct and unchanged, only the justification needed correcting.
 
 **Stranded assets, capability items:**
 - **Game simulator's margin/win-probability + moneyline wired into `weekly_update.py`** (§9.5)
   — display-only addition alongside the existing point estimates; total deliberately not
-  surfaced (still known-weaker than the top-down model). Sanity-checked on a real live run.
+  surfaced *at the time this bullet was written* (still known-weaker than the top-down model).
+  **SUPERSEDED round 4 (§9.5): total was subsequently unblocked by the same recentering trick**
+  and is live in production too (`sim_total_std`). Sanity-checked on a real live run.
 - **Props simulator re-evaluated with log-loss/tail-calibration/vs-vig framing** (§9.6) —
   produced a genuine correction to this round's own prior expectation: the bootstrap-vs-naive
   probability gap at the most decision-relevant threshold is comparable in size to a realistic
@@ -2554,18 +2720,35 @@ per this project's standing rule on acquiring new external data.
   prices, not just the line — already in schedules, never used anywhere in this project). A
   genuinely different KIND of hypothesis than everything else in this ledger: does the
   vig's own shading (away from a flat -110/-110, presumably reflecting betting volume/sharp
-  money) carry real information about the outcome, beyond the line itself? No fitting needed
-  — the vig-implied, hold-removed probability is a probability by construction; checked its
+  money) carry real information about the outcome, beyond the line itself? Checked its
   calibration and whether "bet the side the vig favors when it deviates from 50%" shows a
   real edge, TEST=2022-2025 (n=1058). Clean, decisive null: the real deviation from 50% is
   tiny in this dataset (p_home_cover ∈ [0.453, 0.557], std=0.015 — books shade prices only
   mildly for NFL spreads), and what deviation exists doesn't predict the outcome — TEST
   calibration is flat-to-inverted (the bucket the vig favored most on TRAIN, (0.52,0.55],
   hits at only 45.9% on TEST, *below* a coin flip), and "bet the vig's favorite" nets 51.4%
-  at a modest deviation threshold (n=146, CI [0.432,0.589], comfortably includes both 50% and
-  the ~52.4% breakeven) — no real, exploitable signal. Consistent with an efficient, heavily-
-  bet market: real vig shading here looks more like book-balancing/liquidity management than
-  genuine informational edge.
+  at a modest deviation threshold (n=146, CI [0.432,0.589], comfortably includes 50%) — no
+  real, exploitable signal. Consistent with an efficient, heavily-bet market: real vig shading
+  here looks more like book-balancing/liquidity management than genuine informational edge.
+
+  **Two framing corrections (2026-08, external review):**
+  1. **The ~52.4% breakeven comparison understated the null, it didn't overstate it.**
+     Betting "the side the vig favors" means, by construction, backing the side priced worse
+     than a flat -110 (that's what "the vig shaded toward this side" *means* — the book made
+     it more expensive) — so the real breakeven for that specific strategy is higher than
+     52.4%, not equal to it. The 51.4% result is worse relative to its own true breakeven than
+     the headline number suggests; this doesn't change the null verdict (already a clean null),
+     it just means the strategy is even less borderline than stated.
+  2. **"No fitting needed" was imprecise** — the calibration table and the "modest deviation
+     threshold" both involve choices (which bucket, which cutoff) made by looking at the data,
+     even though the underlying probability itself needs no fitting. With a null result there's
+     no forking-paths damage done, but the description should match what was actually done.
+
+  **One unverified premise, not yet checked**: these odds columns were never independently
+  validated as real, representative book prices the way `spread_line` was in §4 (regressed
+  against real outcomes, checked against known market performance) — worth a one-off sanity
+  check (does the implied hold and shading distribution look like a real sportsbook's) before
+  leaning on this null, or any future signal from the same columns, with real confidence.
 - **Neutral-site games** (`location=="Neutral"`, real data in schedules, never used) —
   genuinely underpowered, not a rejected hypothesis: n=46 across 2016-2025 (international/
   London games plus the occasional true neutral site). Signed bias on the market line alone
@@ -2577,14 +2760,27 @@ per this project's standing rule on acquiring new external data.
   as-HC count (any team, not reset on a team change). Distinct from the already-rejected
   "coaching-change effect" (§13.2, which tests whether JUST changing coaches shifts margin);
   this tests a continuous experience/rookie-year signal instead (a first-year HC still
-  learning in-game clock/timeout/4th-down management). **A real example of exactly the
-  walk-forward discipline this project exists to enforce**: the continuous experience-
-  differential term's TRAIN t-stat (+1.95) sits right at the edge of conventional
-  significance — but applying that TRAIN-fit coefficient to TEST makes accuracy *worse*
-  (MAE 9.4945→9.6297, CRPS 6.9180→6.9751), a clean overfitting tell, not a real effect. The
-  binary "one team has a rookie-year coach" version fares better but still isn't real
-  (TRAIN t=+1.54, TEST MAE 9.4945→9.5331, no improvement); the rookie-coach-flagged subset's
-  signed bias (n=343) comfortably spans zero. Rejected on both formulations.
+  learning in-game clock/timeout/4th-down management).
+
+  **Left-censoring bug, caught and fixed (2026-08, external review), before trusting the
+  result.** The first version started the experience counter empty at 2016 (this project's
+  own cached-data horizon) — silently censoring every coach hired before 2016 (Reid,
+  Belichick, Tomlin, Carroll, etc.) to just 2-5 apparent years heading into TRAIN=2018-2021,
+  which could have manufactured a spurious effect or masked a real one. Fixed by fetching real
+  1999-2015 schedule data (`nflreadpy` goes back that far; schedules only, not full PBP) to
+  seed real pre-2016 tenure before the TRAIN window starts, rather than just caveating the gap.
+
+  **A real example of exactly the walk-forward discipline this project exists to enforce, and
+  it holds up even more cleanly once correctly measured.** With real seeding, the continuous
+  experience-differential term's TRAIN t-stat actually *increases* to +2.17 (cleanly above the
+  conventional 1.96 threshold, not borderline) — but applying that TRAIN-fit coefficient to
+  TEST still makes accuracy worse (MAE 9.4945→9.5808, CRPS 6.9180→6.9570): a real,
+  unambiguous overfitting tell, not an artifact of the censoring bug. The binary "one team has
+  a rookie-year coach" version is weaker on TRAIN with correct seeding (t=+1.35, down from the
+  censored version's +1.54 — some coaches wrongly counted as "rookies" under censoring are now
+  correctly excluded) and also doesn't improve TEST (MAE 9.4945→9.5261); the rookie-flagged
+  subset (now n=288, down from the censored version's 343) still shows signed bias with a CI
+  comfortably spanning zero. Rejected on both formulations, on firmer footing than before.
 - **Playoff-stakes/bubble effect** (`src/models/validate_playoff_stakes_effect.py`, 2026-08)
   — the most involved check in this batch: real standings computed walk-forward from real
   game results already in schedules (a team's conference rank entering week W uses only
@@ -2607,7 +2803,7 @@ per this project's standing rule on acquiring new external data.
 
 ### 13.3 INVESTIGATED, NOT BUILT (real limitation, not a rejected hypothesis)
 - **Real player-prop market data**: unlike game-level spread/total (where real data was
-  found hiding in `nfl_data_py`'s own schedule export), there is no equivalent source for
+  found hiding in the schedule export, `nflreadpy` post-migration), there is no equivalent source for
   player props anywhere in this project's data. External research: no credible academic
   literature on prop-market efficiency specifically; the one well-evidenced, narrow edge
   mechanism (secondary/backup props going stale after injury news, since pricing models
@@ -2635,8 +2831,9 @@ per this project's standing rule on acquiring new external data.
   approximation, not literal T-90-minutes-before-every-game precision — building that would
   require several separate scheduled runs timed to each kickoff window across Thu/Sun/Mon.
   **Measured (2026-07), not just deferred**: the originally-proposed test (diff a Sunday-
-  morning snapshot against final inactives) isn't directly answerable — `nfl_data_py`'s
-  injury export has exactly one row per player-week (55,548/55,552 confirmed), i.e. no
+  morning snapshot against final inactives) isn't directly answerable — the injury export
+  (`nfl_data_py` at the time this was measured, `nflreadpy` now, §2.2.1 — same limitation
+  either way) has exactly one row per player-week (55,548/55,552 confirmed), i.e. no
   point-in-time history to diff against. Reframed proxy: for this project's 4 presumed-
   starter positions, how often does the FINAL injury report's "Out" designation disagree
   with what real stats/snap data shows actually happened? "Out" is extremely precise
@@ -2699,8 +2896,9 @@ download):**
    count, whenever a future session extends the full compound chain.
 
 **Before testing a new hypothesis**: check §13 first. The base rate of "this plausible-sounding
-idea turns out to be null" is roughly 80% in this project's own history (~80-90 distinct
-TEST-window experiments run as of this writing, §13.0) — a new idea needs a specific,
+idea turns out to be null" is roughly 80% in this project's own history (~85-100 distinct
+TEST-window experiments run as of this writing, §13.0 — the single authoritative count; this
+section deliberately doesn't keep its own copy) — a new idea needs a specific,
 non-generic mechanism argued for it, not just plausibility, before spending a validation cycle
 on it. The pattern across all four review rounds has been consistent: real hits cluster in
 measurement/auditing/plumbing, not new modelling ideas — weight where the next session's time
