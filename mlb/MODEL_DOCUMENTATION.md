@@ -5137,6 +5137,89 @@ rebuild) — worth a quick spot-check the next time any sport's code is pushed.
 
 ---
 
+## 11.50 Slice-level calibration (2026-08-07/08): a real, corroborated
+underconfidence in the model's most lopsided predictions — partially localized, not yet fixed
+
+Prompted by "is our Brier score real" — every existing validator reports AGGREGATE SU/Brier/
+log-loss, and an aggregate number can look healthy while a specific real-world slice is
+miscalibrated underneath it. Built `src/models/validate_calibration_slices.py` (permanent
+tool) to check four independent slices of the post-§11.48-fix canonical output
+(n=7237, `game_simulator_validation.parquet`): a reliability curve (predicted win-prob
+decile vs. actual rate, Wilson-CI-flagged), a confidence tercile (games reframed onto "the
+favored side" so home/road favorites pool onto one scale), a scoring-environment tercile (by
+the model's own predicted total runs), and per-park (min n=150).
+
+**Finding, corroborated across three of the four independent slices**: the model is
+systematically UNDERCONFIDENT on its most lopsided predictions.
+- Reliability curve: the top 4 of 10 deciles (predicted win-prob 0.555–0.78) are ALL outside
+  their Wilson CI, monotonically — actual outcomes run 4–6pp more lopsided than predicted, and
+  the gap grows with confidence (top decile: predicted 65.3% → actual 69.5%).
+- Confidence tercile (favored side, home/road pooled): only the "lopsided" tercile is out of
+  CI — predicted 61.9% vs. actual 65.4%. Close/medium tercile are fine, ruling out a generic
+  home-field-advantage-sizing explanation (this is specifically about CONFIDENCE, not home/away).
+- Per-park: 4/30 teams flagged (vs. ~1.5 expected from noise alone at 30 independent 95% CIs),
+  and NOT randomly distributed — LAD/PHI/MIL (above-average 2023-2025 home teams) show actual
+  win rate HIGHER than predicted; CWS (a historically bad team) shows the OPPOSITE. Consistent
+  with, not independent of, the reliability-curve finding.
+- Scoring-environment tercile: only low-scoring (pitcher's-duel) games are out of CI — a
+  secondary, likely-related observation, not separately chased down.
+
+**Root-cause dig, same session — localized to a layer, not yet to a single mechanism.**
+Computed each real team's full-season Pythagorean win% (2023-2025, from actual runs
+scored/allowed) as a ground-truth quality measure, then compared how strongly a real
+home-vs-away quality gap predicts real outcomes vs. how strongly the model's own output
+responds to that same gap:
+
+| Check | Real-outcome slope | Model slope | Ratio |
+|---|---|---|---|
+| Win probability (logit) ~ quality gap | 3.378 | 1.464 | **0.434** |
+| Score margin ~ quality gap | 8.870 | 3.865 | **0.436** |
+
+The near-identical ratio across two structurally different checks (one nonlinear/logit, one
+linear) is itself diagnostic: if this were a Monte Carlo dispersion/noise problem, the two
+ratios would differ (win-prob is margin divided by noise). They don't — confirming the
+compression is in the model's MEAN estimate, not its trial-to-trial noise. Independently
+confirmed: the model's own combined per-trial margin std (4.48) matches the real game-to-game
+margin std (4.51) almost exactly — the simulator's randomness is well-calibrated; only the
+underlying skill signal feeding the mean is too flat.
+
+**Layer-by-layer isolation, single outcome category (batter home runs, chosen for
+simplicity/importance) — same "spread ratio" methodology, real team-seasons, 2023-2025:**
+
+| Layer tested | Spread ratio (model/real) |
+|---|---|
+| Batter-side true-talent shrinkage alone (`true_talent.build_pregame_rates`) | 0.804 |
+| + pitcher-side shrinkage, combined via the odds-ratio formula (`matchup.combine_odds_ratio`), no context factors | 0.702 |
+| + real walk-forward park factors (`park_factors.build_outcome_park_factors`) | **0.761** (↑, closer to 1.0) |
+| Full simulated game output (win-probability/margin, all context + transition table + Monte Carlo) | 0.43-0.44 |
+
+**Ruled out as the dominant cause**: the Marcel-style stabilization constants (task #24/#64)
+contribute real but modest compression (0.80) — nowhere near enough alone. The odds-ratio
+combine formula itself adds only a little more (0.70). Park factors were the leading
+"context-multiplier stacking compresses things" suspect — instead they measurably RESTORE
+dispersion toward reality (0.70→0.76), the opposite of the hypothesis. This rules out
+"stacking context multipliers compresses things" as a general explanation, at least for this
+one factor.
+
+**Still open, genuinely unresolved**: the gap between the isolated HR-category check (0.76)
+and the full simulated game (0.43) is now the largest unexplained piece. Two live hypotheses,
+neither tested: (1) OTHER outcome categories (batting average on balls in play, other
+defense/luck-heavy categories) may have genuinely weaker real team-quality signal than home
+runs do, dragging the AGGREGATE win-probability response down further than HR alone would
+predict — not a bug, just HR being a better-behaved category than the average; (2) the
+transition table's pooled resampling (converting a mix of per-PA outcome probabilities into
+actual runs) may itself smooth team-quality differences when aggregating across categories —
+not yet isolated at all. Resolving this requires repeating the same layer-by-layer spread-ratio
+test for every major outcome category (strikeout, walk, non-HR hits) plus a standalone
+isolation of the transition-table step — a systematic audit on the scale of a full session,
+not extending tonight's ad-hoc single-category tests further. **Not fixed, not yet re-tuned**
+— this is a documented, partially-localized finding, explicitly left for a future session to
+either continue the isolation or design a corrective recalibration layer once the mechanism is
+actually known (guessing at a fix before knowing the cause would risk the same kind of
+undirected patch this project's own discipline exists to avoid).
+
+---
+
 ## 12. Suggested next steps for a future session
 
 **Status as of 2026-08-04**: the Phase 0-4 roadmap that used to occupy this section (written
@@ -5225,6 +5308,15 @@ scheduled — pick up opportunistically):
   tested weak and non-significant (r=-0.112, n=60); pitcher signal is real per Savant's
   cross-sectional spread but currently unverifiable with any method available to us. Don't
   re-open without genuine per-event stolen-base-attempt tagging, the actual blocker.
+- **Team-quality compression / lopsided-prediction underconfidence** (§11.50): a real,
+  three-slice-corroborated finding — the model's win-probability/margin response to real team
+  quality gaps runs at ~43% of what real outcomes warrant, and it's localized to a layer (not
+  rate-shrinkage, not the combine formula, not park factors — those were tested and ruled out
+  or shown to help) but not yet to a specific mechanism. Two open hypotheses, neither tested:
+  weaker team-quality signal in non-HR outcome categories, or transition-table pooling
+  smoothing things when converting outcome mixes into runs. Continue the same layer-by-layer
+  spread-ratio methodology (`validate_calibration_slices.py` has the reusable pieces) across
+  the remaining major outcome categories before attempting any fix.
 
 **Standing discipline, unchanged from the retired roadmap and still binding**: run
 candidate signals through the cheap funnel first (run-value screen → sliced CRN check →
