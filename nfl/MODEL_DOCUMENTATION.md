@@ -2585,6 +2585,25 @@ per this project's standing rule on acquiring new external data.
   binary "one team has a rookie-year coach" version fares better but still isn't real
   (TRAIN t=+1.54, TEST MAE 9.4945→9.5331, no improvement); the rookie-coach-flagged subset's
   signed bias (n=343) comfortably spans zero. Rejected on both formulations.
+- **Playoff-stakes/bubble effect** (`src/models/validate_playoff_stakes_effect.py`, 2026-08)
+  — the most involved check in this batch: real standings computed walk-forward from real
+  game results already in schedules (a team's conference rank entering week W uses only
+  results through week W-1, computed per-week not progressively within a week, so
+  simultaneous same-week games can't leak into each other). Two disclosed simplifications:
+  point-differential tiebreak (not the NFL's real multi-step tiebreaker procedure) and no
+  division-winner-vs-wild-card distinction, just conference rank vs. the real per-season
+  seed count (6 through 2019, 7 from 2020). Distinct from the already-rejected clinched/
+  eliminated test (that's about teams RESTING once safely in or mathematically out); this
+  tests the opposite population — teams still fighting for a spot (rank within 1 of the real
+  cutoff line), hypothesized to play with either extra urgency or extra pressure. Restricted
+  to weeks 10-17 (before week 10 standings are too noisy to mean anything; week 18 excluded
+  to avoid re-deriving the existing clinched/eliminated result). Clean null on both margin
+  (TRAIN t=+0.16; TEST MAE 9.3776→9.3863, no improvement; flagged-subset signed bias n=169,
+  CI=[−1.692,+1.743]) and total (TRAIN t=−0.79; TEST MAE 10.3054→10.2915, no improvement).
+  One incidental, non-hypothesis descriptive note: bubble-flagged games showed slightly
+  *lower* MAE than the full TEST set (9.104 vs. 9.378) — bubble games trended more
+  predictable by the market, not less — worth recording but not a significant result on its
+  own (no CI computed for it) and not what was being tested.
 
 ### 13.3 INVESTIGATED, NOT BUILT (real limitation, not a rejected hypothesis)
 - **Real player-prop market data**: unlike game-level spread/total (where real data was
