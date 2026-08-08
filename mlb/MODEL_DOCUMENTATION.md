@@ -2118,7 +2118,9 @@ that exact historical game_pk, and the per-game-scoped `batter_snap` lookup was 
 skipping 58/60 games in an early sanity check before the fix (reuse `nearest_prior_pitcher_
 snapshot` — despite its name, it auto-detects a `batter` column too).
 
-**Result, full canonical scale (n≈7229-7276, K=50, CRN-paired, 2023-2025)**:
+**Result, full canonical scale (n≈7229-7276, K=50, CRN-paired, 2023-2025) — ORIGINAL run,
+now KNOWN CONTAMINATED, see the 2026-08-07 correction immediately below before citing any
+number in this table**:
 
 | Config | SU | Brier | total MAE |
 |---|---|---|---|
@@ -2143,6 +2145,66 @@ props on lineup confirmation) as the natural next step. Instead, **bullpen usage
 (`sample_bullpen_plan`) is where essentially all of the deployable-path's real-world cost
 lives.** The lineup-regeneration pipeline is not cancelled as a good idea, but it is no longer
 the top-priority fix implied by the original roadmap.
+
+---
+
+**CORRECTION (2026-08-07): the ORACLE bullpen arm above had the same thruorder_counts
+identity bug §11.48/§11.49 found and fixed elsewhere — magnitude was real but overstated by
+roughly 3x, conclusion direction survives.**
+
+Found during a deliberate mechanical-correctness sweep for the exact bug class §11.48 fixed:
+`validate_oracle_vs_predictive.py`'s `home_bullpen_fixed`/`away_bullpen_fixed` (the ORACLE
+bullpen arm, used whenever `bullpen_source == "oracle"` — i.e. every config above except
+FULL_PREDICTIVE) called `pitcher_profile(pid)` fresh per inning key, the identical anti-pattern
+§11.48 already fixed in `validate_game_simulator.py`. Same effect: `thruorder_counts` capped
+near TTO=1, the task #137 per-appearance pitcher shock re-drawn every inning instead of once.
+Fixed via the same pid-cache pattern (`cached_pitcher_profile`). A SEPARATE, unrelated bug
+surfaced getting this re-run working at all: this file still referenced `shared["sb_rates_
+by_season"]`, a key `build_shared_tables` stopped returning once M5 (§11.42) retired
+stolen-base rates from the transition sampling entirely — this validator had been silently
+uncallable (a bare `KeyError`) since that fix landed, and nobody had re-run it in the interim.
+Removed the dead `resolve_sb_rates`/`home_sb_rates`/`away_sb_rates` plumbing to match
+`validate_game_simulator.py`'s own `run_validation`, which already stopped passing them for
+the same reason.
+
+**Full re-run, same protocol (n≈7229-7276, K=50, CRN-paired, fresh Monte Carlo draws — NOT
+directly paired against the table above, so cross-row noise applies, ~0.1-0.8pp per the
+unaffected arms below)**:
+
+| Config | SU | Brier | Δ SU vs. original |
+|---|---|---|---|
+| FULL_ORACLE | 55.72% | 0.2441 | -1.00pp (real — bullpen="oracle") |
+| FULL_PREDICTIVE | 54.85% | 0.2482 | +0.80pp (noise — unaffected arm) |
+| ORACLE_LINEUP | 54.12% | 0.2497 | -0.14pp (noise — unaffected arm) |
+| **ORACLE_BULLPEN** | **56.15%** | **0.2428** | **-1.85pp (real — bullpen="oracle")** |
+| ORACLE_WEATHER | 54.48% | 0.2483 | +0.60pp (noise — unaffected arm) |
+| ORACLE_CATCHER | 54.75% | 0.2482 | +0.62pp (noise — unaffected arm) |
+
+Corrected total oracle-vs-predictive gap: **0.87pp SU** (55.72%-54.85%), 0.0041 Brier — down
+from 2.67pp/0.0062. Corrected bullpen recovery: **1.30pp SU** (56.15%-54.85%), 0.0054 Brier —
+down from 3.95pp/0.0079. **Bullpen still recovers more than the entire corrected gap**
+(1.30pp > 0.87pp), and lineup/weather/catcher are still all within the same ~0.1-0.8pp noise
+band as before — so the qualitative conclusion (bullpen usage guessing dominates; tasks
+#144-148 correctly targeted the right lever) survives intact. What changes: the deployed
+model is meaningfully CLOSER to its own oracle ceiling than this section previously reported
+— the real-world cost of guessing lineups/bullpen/weather/catcher was overstated by roughly
+3x, not understated. Genuinely good news, just not the number originally written here. Every
+prior citation of "2.67pp"/"3.95pp" elsewhere in this document or in task rationale predates
+this correction.
+
+**Scope note on everything below this point in §11.18, and every later section that cites
+"3.95pp"/"0.0079" as the ORACLE_BULLPEN ceiling (the verification pass immediately below, and
+task #144's step 2/3/4 evaluations further down this document)**: all of it was computed
+against the SAME contaminated ORACLE_BULLPEN arm, so the specific point estimates (the
+close/medium/blowout margin slices, the hook/tier-vs-ceiling gaps) are stale in the same
+direction (real ceiling is lower, so gaps-against-it are smaller than stated). NOT re-derived
+tonight — re-running the margin-sliced endogeneity check and the task #144 hook/tier
+comparisons against the corrected oracle path is a legitimate follow-up for a future session.
+The QUALITATIVE conclusions likely survive regardless (hook/tier mechanisms measured ~zero
+improvement over baseline predictive REGARDLESS of the ceiling's true size, so "neither
+mechanism closes any measurable fraction of the gap" doesn't depend on getting the ceiling's
+exact magnitude right) — but treat every absolute number below as pre-correction until
+someone actually re-runs it.
 
 **Verification pass (same day, reviewer-requested, before trusting the headline numbers) —
 two real catches, both resolved from the already-saved parquet output at zero new compute**:

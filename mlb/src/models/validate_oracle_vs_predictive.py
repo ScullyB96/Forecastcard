@@ -70,7 +70,6 @@ from src.models.catcher_framing import (
 )
 from src.models.crn import crn_uniform
 from src.models.defense_factor import resolve_defense_factor
-from src.models.baserunning import resolve_sb_rates
 from src.models.bullpen import (
     build_all_appearance_log,
     build_bullpen_snapshot,
@@ -219,7 +218,14 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
     schedules = shared["schedules"]
     lineups = shared["lineups"]
     defense_snap_by_season = shared["defense_snap_by_season"]
-    sb_rates_by_season = shared["sb_rates_by_season"]
+    # sb_rates_by_season: removed (2026-08-07) -- retired from build_shared_
+    # tables entirely by the M5 fix (real SB movement is already captured in
+    # base_out_transitions.py's pooled resample; see MODEL_DOCUMENTATION.md
+    # sec 11.42), this caller was never updated to match and has been
+    # crashing with a KeyError on this line ever since. GameSimulator's own
+    # home_sb_rates/away_sb_rates params already default to None -- simply
+    # omitting them below matches validate_game_simulator.py's own
+    # run_validation, which stopped passing them for the same reason.
 
     bullpen_snap = predictive["bullpen_snap"]
     expected_innings = predictive["expected_innings"]
@@ -338,6 +344,26 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
             return build_profile(row, prow, pitcher_hand.get(pid, "R"),
                                   pregame_gb_rate_pitcher=gb_p, pregame_fb_rate_pitcher=fb_p)
 
+        # Real bug found + fixed here (2026-08-06, same class as
+        # validate_game_simulator.py's task #211 fix): pitcher_profile(pid)
+        # builds a FRESH dict every call. GameSimulator resets thruorder_
+        # counts (and re-draws the task #137 pitcher-appearance shock) via
+        # an id()-identity check against the PREVIOUS inning's pitcher
+        # object -- a fresh dict per call/per inning key made that check
+        # ALWAYS true, even for the SAME real pid across consecutive
+        # innings (or between home_pitcher/away_pitcher below and this same
+        # pid's entry in home_bullpen_fixed/away_bullpen_fixed). Caching per
+        # pid within this game restores the "one stable object per real
+        # pitcher-appearance" invariant every bullpen-plan builder in this
+        # project is required to satisfy (see game_simulator.py's own
+        # simulate_game docstring).
+        pitcher_profile_cache: dict = {}
+
+        def cached_pitcher_profile(pid):
+            if pid not in pitcher_profile_cache:
+                pitcher_profile_cache[pid] = pitcher_profile(pid)
+            return pitcher_profile_cache[pid]
+
         def roster_pitcher_profile(pid, game_date_):
             if pid in psnap.index:
                 row = psnap.loc[pid]
@@ -356,8 +382,8 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
         away_lineup = [batter_profile(pid) for pid in away_ids]
         if any(p is None for p in home_lineup + away_lineup):
             continue  # a projected player has zero usable history yet (e.g. early cold-start) -- skip, matching live pipeline behavior
-        home_pitcher = pitcher_profile(home_pitcher_id)
-        away_pitcher = pitcher_profile(away_pitcher_id)
+        home_pitcher = cached_pitcher_profile(home_pitcher_id)
+        away_pitcher = cached_pitcher_profile(away_pitcher_id)
 
         park_key = (home_team, season)
         if park_key in park_factors_wide.index:
@@ -391,8 +417,8 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
         if bullpen_source == "oracle":
             home_pitcher_by_inning = top_pa.groupby("inning")["pitcher"].first()
             away_pitcher_by_inning = bot_pa.groupby("inning")["pitcher"].first()
-            home_bullpen_fixed = {int(inn): pitcher_profile(pid) for inn, pid in home_pitcher_by_inning.items() if pid in psnap.index}
-            away_bullpen_fixed = {int(inn): pitcher_profile(pid) for inn, pid in away_pitcher_by_inning.items() if pid in psnap.index}
+            home_bullpen_fixed = {int(inn): cached_pitcher_profile(pid) for inn, pid in home_pitcher_by_inning.items() if pid in psnap.index}
+            away_bullpen_fixed = {int(inn): cached_pitcher_profile(pid) for inn, pid in away_pitcher_by_inning.items() if pid in psnap.index}
         else:
             neutral = {o: 1.0 for o in OUTCOMES}
 
@@ -474,9 +500,6 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
         home_catcher_factor = {**home_catcher_factor, **home_defense_factor}
         away_catcher_factor = {**away_catcher_factor, **away_defense_factor}
 
-        home_sb_rates = resolve_sb_rates(sb_rates_by_season[season], home_ids)
-        away_sb_rates = resolve_sb_rates(sb_rates_by_season[season], away_ids)
-
         sim = GameSimulator(transitions, league_rates[season], rng, state_factors=state_factors[season],
                             ttop_factors=ttop_factors[season], shock_sigma=shock_sigma)
         sim_home, sim_away = [], []
@@ -520,7 +543,6 @@ def run_decomposition(shared: dict, predictive: dict, test_seasons: set[int], n_
                 home_bullpen=home_bullpen_plan, away_bullpen=away_bullpen_plan,
                 blowout_pitcher_profile=blowout_profile,
                 home_catcher_factor=home_catcher_factor, away_catcher_factor=away_catcher_factor,
-                home_sb_rates=home_sb_rates, away_sb_rates=away_sb_rates,
                 hfa_factors=hfa_factors_by_season.get(season),
                 crn_game_pk=game_pk, crn_trial=trial,
                 home_hook_context=home_hook_context, away_hook_context=away_hook_context,
