@@ -566,6 +566,52 @@ support acting on it (zeroing the Week 1 margin effect), and this is exactly the
 question the pristine-2026 CLV log (§10.6, §11.2.1) will get real, prospective evidence on
 this season.
 
+**Hidden assumption, found and traced (2026-08, external review): what rating does a true
+2026 rookie starter get?** `qb_rating_by_name()` (the bootstrap's own helper, `weekly_update.py`)
+returns `qb_engine.predict(qb_id) if qb_id is not None else 0.0` — a QB with zero real NFL
+history gets exactly **0.0**, `QbRatingEngine`'s own default for an unrated `qb_id`. This was
+never stated explicitly anywhere in this document. Traced on the real live Week 1 2026 slate:
+LV's bootstrap-flagged swap is Geno Smith → **Fernando Mendoza**, a true rookie with no
+`qb_id` in the schedule data at all (confirmed directly: `build_qb_name_to_id` has no entry
+for him). His rating defaults to 0.0; Geno Smith's real, recency-weighted rating is **−0.138**
+(EPA/dropback) — so the bootstrap computes `swap_delta = 0.0 − (−0.138) = +0.138`, applied via
+`SWAP_B_MARKET=2.970` as a **+0.41-point** margin adjustment for LV in this specific game. The
+assumption is not neutral in this case: 0.0 happens to sit *above* both Geno Smith's (−0.138)
+and Deshaun Watson's (−0.133, CLE's departing veteran in another flagged swap) recent-form
+ratings, so treating an unproven rookie as exactly "no history" reads, on this rating scale,
+as a mild *upgrade* over both real struggling veterans it replaces — plausible for some
+real rookie/veteran pairings, optimistic for others, and not something this document
+previously stated as a modeling choice rather than a default that just happens to fire. Not
+changed this round (no better rookie-QB prior exists in this codebase to substitute — §6.3.1's
+draft-capital prior covers usage share, not passing efficiency), but now documented as a real,
+traceable assumption rather than an implicit one.
+
+**The LV example above turned out to be exactly the failure mode this document warns about
+elsewhere (§2.4's Clay-PDF freshness caveat) — checked directly, not assumed.** Real, current
+(2026-08) reporting on all six of the bootstrap's flagged teams was checked against Clay's
+June projections: ATL (Tua Tagovailoa), MIA (Malik Willis), and NYJ (Geno Smith) are confirmed
+by direct team/coach statements; CLE (Watson over Sanders) and MIN (Murray over McCarthy) are
+strongly favored in current reporting but not yet officially locked. **LV was wrong**: Clay's
+June PDF projected Fernando Mendoza as the 2026 starter, but real August training-camp
+reporting has **Kirk Cousins** — not in Clay's data at all — as the actual Week 1 starter,
+with Mendoza on a rookie developmental timeline expected to take over a few weeks into the
+season, not Week 1. This is the training-camp-resolves-after-Clay's-snapshot risk stated
+explicitly, now confirmed to have actually fired for a real Week 1 2026 game.
+
+**Fixed with `data/manual_overrides/known_starters_2026.json`** (2026-08) — the same verified-
+entry discipline `known_outs_2026.json` already established for injuries (§6.2), applied to
+the margin side of the bootstrap instead: `{team, player_name, reason, verified_date, source}`,
+loaded in `weekly_update.py` and merged over Clay's `projected_2026` per team before computing
+`swap_delta`, with `likely_change` (and its underlying rating comparison) recomputed against
+the override name rather than Clay's stale one. One verified entry currently: LV → Kirk
+Cousins. Verified end-to-end on a live run: LV's props now correctly show Kirk Cousins as the
+projected starter (real rating, real statline: 36.4 attempts, 259.4 yards) instead of Mendoza
+defaulting to the 0.0-rating assumption above — this specific instance of that assumption no
+longer fires, because the underlying premise (Mendoza starts Week 1) was itself wrong. The
+scheduled-task prompts should check this file each run the same way they already check
+`known_outs_2026.json` — verified entries only, removed once real starter data (§5.1's
+`build_starter_sequence`) catches up once games are actually played.
+
 ### 5.3 `src/models/qb_passing_stats.py` — full passing statline (added 2026-07)
 Before this, the props pipeline had **no QB passing projection at all** — a QB's only
 "prop" was his own rushing production. `build_qb_passing_engines(qb_weeks)` builds four
@@ -2009,7 +2055,8 @@ at zero additional cost, no external data, no purchase.
 
 Fixed: every run now **appends** one row per game to `data/processed/line_snapshots.parquet`
 (`game_id, run_timestamp, season, week, market_spread, market_total, our_margin, our_total,
-home_cb_flag, away_cb_flag, qb_swap_flag, sim_home_win_prob`) instead of only writing the
+home_cb_flag, away_cb_flag, qb_swap_flag, sim_home_win_prob` — plus real spread/total odds,
+added 2026-08, see below) instead of only writing the
 current-run predictions file. Confirmed working on two consecutive live runs (16 rows each,
 32 total, 2 distinct `run_timestamp` values, all fields populated correctly).
 
@@ -2045,6 +2092,22 @@ final score to grade realized ATS against. Fixed with two additions:
 Realized CLV per flagged bet is now `(closing − snapshot)` signed by `bet_side`; realized ATS
 follows directly from `bet_side` vs. the actual final score. The pristine-2026-holdout
 convention (§10.6) is now operational, not just stated.
+
+**Real odds columns added, not just the line (2026-08, external review) — before Week 1 so
+it's in the record from the start, not backfilled later.** Everything above grades CLV in
+*points* (closing line minus snapshot line), but a flagged bet's real value depends on the
+*price*, not just the line — and the CB-edge question this project keeps deferring to
+prospective data (§6.1.1) will eventually need de-vigged EV, not just point movement, to
+answer properly. `home_spread_odds`/`away_spread_odds`/`over_odds`/`under_odds` were already
+fetched every run (§4, the same schedule columns the market-vig investigation used, §13.2) but
+never persisted here. Fixed: both the snapshot-time prices (added to `snapshot_cols`) and,
+symmetrically, the closing-time prices (added to the reconciliation merge as
+`closing_home_spread_odds`/`closing_away_spread_odds`/`closing_over_odds`/`closing_under_odds`)
+are now recorded. Append-only schema change, zero new data sources. Verified on a live run:
+new columns populate with real values (e.g. `-110.0`/`-110.0` for a pick'em-priced spread,
+`-120.0`/`+100.0` for a real shaded one) for every new row; older pre-fix rows in the same
+file correctly show the new columns as missing rather than erroring, standard schema
+evolution for an append-only log.
 
 ### 11.3 `src/pipeline/build_predictions_page.py`
 Generates a self-contained, dark/light-theme-aware HTML page (`TEAMS` dict: full name +

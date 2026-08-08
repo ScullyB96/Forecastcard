@@ -20,6 +20,7 @@ from our own PBP data instead (build_weekly_stats_from_pbp.py).
 """
 
 import datetime as _dt
+import json
 
 import numpy as np
 import pandas as pd
@@ -51,7 +52,7 @@ from src.models.qb_adjustment import QbRatingEngine, build_qb_week_table, build_
 from src.models.qb_passing_stats import build_qb_passing_engines, presumed_starter_qb_id, project_passing_stats
 from src.models.ratings import PowerRatingEngine, build_dataset
 from src.models.weather_adjustment import apply_weather_adjustment, fit_weather_adjustment
-from src.utils.paths import DATA_PROCESSED, DATA_RAW
+from src.utils.paths import DATA_PROCESSED, DATA_RAW, PROJECT_ROOT
 from src.utils.stats import fit_linear
 
 CALIBRATION_SEASONS = {2022, 2023, 2024, 2025}  # most recent, non-COVID-anomalous -- see predict_2026.py
@@ -537,12 +538,33 @@ if __name__ == "__main__":
             return qb_engine.predict(qb_id) if qb_id is not None else 0.0
 
         qb_changes = find_qb_changes(schedules, clay_players)
-        for row in qb_changes.itertuples():
-            if row.likely_change:
-                team_qb_swap_delta[row.team] = qb_rating_by_name(row.projected_2026) - qb_rating_by_name(row.starter_2025)
-                team_new_starter_name[row.team] = row.projected_2026
-        print(f"offseason QB-swap bootstrap: applying to {len(team_qb_swap_delta)} teams (Clay's 2026 projections) -- "
-              f"{', '.join(sorted(team_qb_swap_delta))}")
+
+        # known_starters_2026.json (2026-08, external review): Clay's PDF is a June snapshot;
+        # training-camp QB competitions resolve in August, after Clay's extraction date --
+        # same verified-entry discipline as known_outs_2026.json (injury_reallocation.py),
+        # just for the margin side of the bootstrap instead of the props/reallocation side.
+        # Overrides Clay's projected_2026 for a team with a web-verified, more current name.
+        starter_overrides_path = PROJECT_ROOT / "data" / "manual_overrides" / "known_starters_2026.json"
+        starter_overrides = {}
+        if starter_overrides_path.exists():
+            with open(starter_overrides_path) as f:
+                for entry in json.load(f):
+                    starter_overrides[entry["team"]] = entry["player_name"]
+            if starter_overrides:
+                print(f"  applying {len(starter_overrides)} verified starter override(s): {starter_overrides}")
+
+        projected_by_team = dict(zip(qb_changes["team"], qb_changes["projected_2026"]))
+        starter_by_team = dict(zip(qb_changes["team"], qb_changes["starter_2025"]))
+        projected_by_team.update(starter_overrides)
+
+        for team, projected in projected_by_team.items():
+            starter_2025 = starter_by_team.get(team)
+            last_name = lambda s: str(s).split()[-1].lower() if pd.notna(s) else ""
+            if last_name(projected) != last_name(starter_2025):
+                team_qb_swap_delta[team] = qb_rating_by_name(projected) - qb_rating_by_name(starter_2025)
+                team_new_starter_name[team] = projected
+        print(f"offseason QB-swap bootstrap: applying to {len(team_qb_swap_delta)} teams (Clay's 2026 projections, "
+              f"overridden where a verified newer starter is known) -- {', '.join(sorted(team_qb_swap_delta))}")
     else:
         print("no offseason QB-swap source for this week -- ratings reflect only real starter data seen so far")
 
@@ -656,6 +678,8 @@ if __name__ == "__main__":
             "sim_total_std": sim_total_std,
             "home_cb_flag": home_cb_flag, "away_cb_flag": away_cb_flag, "qb_swap_flag": qb_swap_flag,
             "wind": getattr(g, "wind", None), "roof": getattr(g, "roof", None), "temp": getattr(g, "temp", None),
+            "home_spread_odds": getattr(g, "home_spread_odds", None), "away_spread_odds": getattr(g, "away_spread_odds", None),
+            "over_odds": getattr(g, "over_odds", None), "under_odds": getattr(g, "under_odds", None),
         })
 
     games_df = pd.DataFrame(game_rows)
@@ -678,6 +702,10 @@ if __name__ == "__main__":
     snapshot_cols = [
         "game_id", "home", "away", "market_spread", "market_total", "our_margin", "our_total",
         "home_cb_flag", "away_cb_flag", "qb_swap_flag", "sim_home_win_prob",
+        # real prices, not just the line (2026-08, external review) -- CLV is gradable in
+        # points without these, but not in de-vigged EV; append-only, zero new data sources
+        # (already fetched every run, just never persisted here before this fix)
+        "home_spread_odds", "away_spread_odds", "over_odds", "under_odds",
     ]
     snapshot = games_df[snapshot_cols].copy()
     snapshot["bet_side"] = np.select(
@@ -697,15 +725,28 @@ if __name__ == "__main__":
     # --- post-game reconciliation (review round 4, #8): the log above captures the line
     # AT RUN TIME, not the CLOSING line CLV actually requires, and has no final score to
     # grade against -- neither CLV nor realized ATS was computable from it yet. A completed
-    # game's own spread_line/total_line in nfl_data_py's schedule data IS the closing line
-    # (already fetched every run); join it back onto every snapshot row whose game has since
-    # finished. Runs on EVERY row each pipeline run (cheap: a merge, not a refetch), so a
-    # game reconciles automatically the very next time this pipeline runs after it completes.
+    # game's own spread_line/total_line in the schedule data (nflreadpy, migrated from
+    # nfl_data_py 2026-07, §2.2.1) IS the closing line (already fetched every run); join it
+    # back onto every snapshot row whose game has since finished. Runs on EVERY row each
+    # pipeline run (cheap: a merge, not a refetch), so a game reconciles automatically the
+    # very next time this pipeline runs after it completes.
+    #
+    # Closing ODDS, not just the closing line (2026-08, external review): same real columns
+    # as the snapshot-time odds above, captured at closing too -- CLV is gradable in points
+    # from the line alone, but de-vigged expected value needs the price at both ends.
     all_sched = schedules[schedules["game_type"] == "REG"][
-        ["game_id", "spread_line", "total_line", "home_score", "away_score"]
-    ].rename(columns={"spread_line": "closing_spread", "total_line": "closing_total"})
+        ["game_id", "spread_line", "total_line", "home_score", "away_score",
+         "home_spread_odds", "away_spread_odds", "over_odds", "under_odds"]
+    ].rename(columns={
+        "spread_line": "closing_spread", "total_line": "closing_total",
+        "home_spread_odds": "closing_home_spread_odds", "away_spread_odds": "closing_away_spread_odds",
+        "over_odds": "closing_over_odds", "under_odds": "closing_under_odds",
+    })
     completed = all_sched.dropna(subset=["home_score", "away_score"])
-    snapshot = snapshot.drop(columns=["closing_spread", "closing_total", "home_score", "away_score"], errors="ignore")
+    snapshot = snapshot.drop(columns=[
+        "closing_spread", "closing_total", "home_score", "away_score",
+        "closing_home_spread_odds", "closing_away_spread_odds", "closing_over_odds", "closing_under_odds",
+    ], errors="ignore")
     snapshot = snapshot.merge(completed, on="game_id", how="left")
     snapshot.to_parquet(snapshot_path, index=False)
     n_reconciled = snapshot["home_score"].notna().sum()
