@@ -2537,6 +2537,41 @@ per this project's standing rule on acquiring new external data.
   crosses 0) and long-rest/bye subset (n=251, CI crosses 0) both show no real effect either.
   Real, already-available data — the market appears to already price in known rest
   situations (byes and short weeks are scheduled long in advance), leaving no residual edge.
+- **Day-of-week / primetime slot** (`src/models/validate_game_time_effect.py`, 2026-08) —
+  real `weekday`/`gametime` data, never used; tested as a mechanism potentially independent
+  of rest days (Thursday/Monday specifically, plus any kickoff ≥19:00 ET as a general
+  primetime flag, plus early-kickoff international/London games as a fourth candidate),
+  walk-forward TRAIN=2018-2021 fit / TEST=2022-2025, on both margin and total. All four
+  clean nulls on margin (all \|t\|<1, TEST MAE/CRPS unchanged or slightly worse for every
+  flag) and on total (all \|t\|<1.4 except primetime's total effect at t=-1.89 — the single
+  closest-to-significant result in this batch, games ≥19:00 ET trending slightly under the
+  total, but it doesn't clear conventional significance and the TEST effect size is
+  noise-level, MAE 10.1891→10.1734). Every flagged-subset signed-bias CI (n=19-232 per flag)
+  crosses zero. No real, actionable signal in day-of-week or kickoff-slot timing beyond
+  what the market already prices in.
+- **Market vig/odds asymmetry as a signal** (`src/models/validate_vig_signal.py`, 2026-08) —
+  real `home_spread_odds`/`away_spread_odds`/`over_odds`/`under_odds` data (the actual real
+  prices, not just the line — already in schedules, never used anywhere in this project). A
+  genuinely different KIND of hypothesis than everything else in this ledger: does the
+  vig's own shading (away from a flat -110/-110, presumably reflecting betting volume/sharp
+  money) carry real information about the outcome, beyond the line itself? No fitting needed
+  — the vig-implied, hold-removed probability is a probability by construction; checked its
+  calibration and whether "bet the side the vig favors when it deviates from 50%" shows a
+  real edge, TEST=2022-2025 (n=1058). Clean, decisive null: the real deviation from 50% is
+  tiny in this dataset (p_home_cover ∈ [0.453, 0.557], std=0.015 — books shade prices only
+  mildly for NFL spreads), and what deviation exists doesn't predict the outcome — TEST
+  calibration is flat-to-inverted (the bucket the vig favored most on TRAIN, (0.52,0.55],
+  hits at only 45.9% on TEST, *below* a coin flip), and "bet the vig's favorite" nets 51.4%
+  at a modest deviation threshold (n=146, CI [0.432,0.589], comfortably includes both 50% and
+  the ~52.4% breakeven) — no real, exploitable signal. Consistent with an efficient, heavily-
+  bet market: real vig shading here looks more like book-balancing/liquidity management than
+  genuine informational edge.
+- **Neutral-site games** (`location=="Neutral"`, real data in schedules, never used) —
+  genuinely underpowered, not a rejected hypothesis: n=46 across 2016-2025 (international/
+  London games plus the occasional true neutral site). Signed bias on the market line alone
+  is −0.315 with a CI of [−4.32, +3.53] — comfortably spans zero, cannot confirm OR rule out
+  a home-field-advantage-erosion effect at this sample size. Revisit once more neutral-site
+  games accumulate; not worth building on 46 games.
 
 ### 13.3 INVESTIGATED, NOT BUILT (real limitation, not a rejected hypothesis)
 - **Real player-prop market data**: unlike game-level spread/total (where real data was
