@@ -2572,6 +2572,19 @@ per this project's standing rule on acquiring new external data.
   is −0.315 with a CI of [−4.32, +3.53] — comfortably spans zero, cannot confirm OR rule out
   a home-field-advantage-erosion effect at this sample size. Revisit once more neutral-site
   games accumulate; not worth building on 46 games.
+- **Head-coach career experience** (`src/models/validate_coach_experience_effect.py`,
+  2026-08) — real `home_coach`/`away_coach` names, tracked walk-forward into a career-games-
+  as-HC count (any team, not reset on a team change). Distinct from the already-rejected
+  "coaching-change effect" (§13.2, which tests whether JUST changing coaches shifts margin);
+  this tests a continuous experience/rookie-year signal instead (a first-year HC still
+  learning in-game clock/timeout/4th-down management). **A real example of exactly the
+  walk-forward discipline this project exists to enforce**: the continuous experience-
+  differential term's TRAIN t-stat (+1.95) sits right at the edge of conventional
+  significance — but applying that TRAIN-fit coefficient to TEST makes accuracy *worse*
+  (MAE 9.4945→9.6297, CRPS 6.9180→6.9751), a clean overfitting tell, not a real effect. The
+  binary "one team has a rookie-year coach" version fares better but still isn't real
+  (TRAIN t=+1.54, TEST MAE 9.4945→9.5331, no improvement); the rookie-coach-flagged subset's
+  signed bias (n=343) comfortably spans zero. Rejected on both formulations.
 
 ### 13.3 INVESTIGATED, NOT BUILT (real limitation, not a rejected hypothesis)
 - **Real player-prop market data**: unlike game-level spread/total (where real data was
